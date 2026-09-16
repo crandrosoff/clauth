@@ -296,7 +296,28 @@ pub(crate) struct OAuthToken {
     pub(crate) extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Claude Code's own key for the account's rate-limit tier inside `claudeAiOauth`
+/// (`default_claude_max_5x` on a Team Premium seat). Claude Code stamps it from
+/// `/profile` at login and reads it back as a feature-flag targeting attribute,
+/// so a login block without it evaluates the server's plan-gated flags as an
+/// untiered account. Lives in [`OAuthToken::extra`]: the field is Claude Code's,
+/// not part of the model clauth owns.
+pub(crate) const RATE_LIMIT_TIER_KEY: &str = "rateLimitTier";
+
 impl OAuthToken {
+    /// The stamped rate-limit tier, when the login block carries one.
+    pub(crate) fn rate_limit_tier(&self) -> Option<&str> {
+        self.extra.get(RATE_LIMIT_TIER_KEY).and_then(|v| v.as_str())
+    }
+
+    /// Stamp the rate-limit tier Claude Code would have written itself.
+    pub(crate) fn set_rate_limit_tier(&mut self, tier: String) {
+        self.extra.insert(
+            RATE_LIMIT_TIER_KEY.to_string(),
+            serde_json::Value::String(tier),
+        );
+    }
+
     /// `..Self::default_extra()` — the struct-update tail for every constructor
     /// minting a login from clauth's own flow, where no outside writer has put
     /// anything into the block yet. `Default` is deliberately not derived: the
