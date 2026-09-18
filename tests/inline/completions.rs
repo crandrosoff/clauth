@@ -130,31 +130,6 @@ fn no_shell_completes_a_profile_after_start_auto() {
     );
 }
 
-/// `sessions swap <sid> <profile>` takes a profile in its second position, so
-/// each shell must offer profile names there. The grammar walk above collects
-/// subcommand names and long flags only, so it is blind to this positional
-/// half of the mirror — pinned here, in the shape of the `--with-fallback`
-/// profile arm above.
-#[test]
-fn every_shell_completes_a_profile_at_sessions_swaps_profile_position() {
-    assert!(
-        BASH.contains(
-            r#"[ "$COMP_CWORD" -eq 4 ] && [ "${COMP_WORDS[1]}" = "sessions" ] && [ "${COMP_WORDS[2]}" = "swap" ]"#
-        ),
-        "bash must list profiles at swap's <profile> position (word 4)",
-    );
-    assert!(
-        ZSH.contains(r#""${words[2]}" == sessions && "${words[3]}" == swap"#),
-        "zsh must list profiles at swap's <profile> position (word 5)",
-    );
-    assert!(
-        FISH.contains(
-            r#"__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from swap"#
-        ),
-        "fish must list profiles once swap is seen under sessions",
-    );
-}
-
 /// Every shell must offer `--setup-token` under the `login` subcommand — the
 /// long-lived-token capture flow (#53), gated to login like the other login
 /// flags. Mirrors the `--isolated` coverage above.

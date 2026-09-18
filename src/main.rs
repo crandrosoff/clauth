@@ -259,7 +259,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Which { json } => which::run(json),
         Command::List { all, disabled } => list::run(all || disabled),
         Command::Jobs { json } => jobs_cli::run(json),
-        Command::Sessions { json, tokens, cmd } => cmd_sessions(json, tokens, cmd),
+        Command::Sessions { json, tokens } => sessions_cli::run_sessions(json, tokens),
         Command::Resume { target, profile } => {
             sessions_cli::run_resume(&target, profile.as_deref())
         }
@@ -345,14 +345,6 @@ fn write_openapi_document<W: std::io::Write>(writer: &mut W) -> Result<()> {
         // A reader that left ends the dump at Ok, exit 0 at the real entry: the
         // pipeline reported what the reader returned, not this run failing.
         crate::out::Wrote::ReaderGone => Ok(()),
-    }
-}
-
-/// `clauth sessions`: bare lists; `swap` points a live session at a profile.
-fn cmd_sessions(json: bool, tokens: bool, cmd: Option<cli::SessionsCommand>) -> Result<()> {
-    match cmd {
-        None => sessions_cli::run_sessions(json, tokens),
-        Some(cli::SessionsCommand::Swap { sid, profile }) => sessions_cli::run_swap(&sid, &profile),
     }
 }
 

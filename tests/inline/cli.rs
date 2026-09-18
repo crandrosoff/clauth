@@ -678,8 +678,7 @@ fn which_and_sessions_take_only_json() {
         command(&["sessions", "--json"]),
         Command::Sessions {
             json: true,
-            tokens: false,
-            cmd: None
+            tokens: false
         }
     ));
     // The costly annotation is opt-in and independent of the output format.
@@ -687,8 +686,7 @@ fn which_and_sessions_take_only_json() {
         command(&["sessions", "--tokens"]),
         Command::Sessions {
             json: false,
-            tokens: true,
-            cmd: None
+            tokens: true
         }
     ));
     assert_eq!(parse_exit_code(&["which", "extra"]), 2);
