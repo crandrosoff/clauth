@@ -479,8 +479,9 @@ pub(crate) struct UsageInfo {
     /// on the synthetic stamp a landed kick wrote ([`crate::usage::scheduler`]'s
     /// `mark_window_open`): a history line carrying it is clauth's own durable
     /// record of that kick, and the auto-start queue confirms the window on it.
-    /// Every API-read sample carries `None`, so the field stays absent from
-    /// those lines.
+    /// Wire parses carry `None`; the one wire-written line that carries a stamp
+    /// is a lagging-tick merge forwarding the kick's own, so the marker still
+    /// names that kick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) open_at: Option<i64>,
     /// Epoch-ms of the fetch that produced this body — the age clock EVERY

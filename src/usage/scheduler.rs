@@ -1327,13 +1327,25 @@ impl FetchOutcome {
     }
 }
 
-/// Patch a just-opened live 5h window back into a Fresh body that lags it. A
-/// kick opens the window before `/usage` reflects it, so a Fresh body fetched in
-/// the same tick can still report the window closed; writing it verbatim would
-/// re-lapse the window and re-fire the kick. When `fresh` has no live 5h window
-/// but `prev` does, keep `prev`'s window; every other field takes the fresh
-/// value. A genuine new window (live in `fresh`) or a still-closed `prev` is left
-/// untouched.
+/// How long after a kick a lagging Fresh `/usage` body may still report the
+/// just-opened window closed (the same 5-min ceiling as the degraded fetch
+/// floor). Past it the wire's closed reading wins — a server-side reset (e.g.
+/// a subscription upgrade) must reach the surfaces within minutes, not wait
+/// out the window's own `resets_at`.
+const KICK_LAG_HORIZON_SECS: i64 = 300;
+
+/// Patch a just-kicked live 5h window back into a Fresh body that lags it. A
+/// kick opens the window before `/usage` reflects it, so a Fresh body fetched
+/// in the same tick can still report the window closed; writing it verbatim
+/// would re-lapse the window and re-fire the kick. When `fresh` has no live 5h
+/// window but `prev` holds one THIS PROCESS kicked open — `open_at` stamped no
+/// more than [`KICK_LAG_HORIZON_SECS`] ago — keep `prev`'s window and its
+/// stamp, so the next lagging tick re-derives the bound instead of carrying
+/// the window until its own `resets_at`. Any other live `prev` (wire-sourced,
+/// or a kick past the horizon — e.g. a server-side reset such as a
+/// subscription upgrade) takes `fresh` verbatim, so the wire's verdict wins
+/// once the kick's lag can have passed. A genuine new window (live in
+/// `fresh`) or a still-closed `prev` is left untouched.
 fn preserve_live_window(
     mut fresh: UsageInfo,
     prev: Option<&UsageInfo>,
@@ -1342,8 +1354,12 @@ fn preserve_live_window(
     if !five_hour_live(&fresh, now_secs)
         && let Some(prev) = prev
         && five_hour_live(prev, now_secs)
+        && prev
+            .open_at
+            .is_some_and(|open_at| now_secs - open_at <= KICK_LAG_HORIZON_SECS)
     {
         fresh.five_hour = prev.five_hour.clone();
+        fresh.open_at = prev.open_at;
     }
     fresh
 }
@@ -2310,9 +2326,10 @@ fn apply_outcome(
 /// The `open_at` stamp is the kick's durable record: it rides this synthetic
 /// entry into the history file when the next fresh body lands (the writer
 /// bridges the value it replaces), and the auto-start queue's marker pass
-/// confirms the kicked window on it. Stamped ONLY here — every other
-/// `UsageInfo` (wire parses, `prime_window`'s out-of-band opens) carries
-/// `None`, so a history line with a marker is provably a kick of ours.
+/// confirms the kicked window on it. Stamped only here — a lagging-tick merge
+/// may forward this stamp but never mints one, and every other `UsageInfo`
+/// (wire parses, `prime_window`'s out-of-band opens) carries `None`, so a
+/// history line with a marker still names a kick of ours.
 fn mark_window_open(store: &UsageStore, name: &ProfileName, now_secs: i64) {
     let Ok(mut s) = store.lock() else {
         return;

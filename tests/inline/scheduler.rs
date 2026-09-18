@@ -3975,26 +3975,35 @@ fn an_isolated_session_gets_no_decision() {
 /// A Fresh `/usage` body fetched in the same tick as a kick can lag the
 /// just-opened window and still report it closed; `preserve_live_window` keeps
 /// the live window we already hold so it can't re-lapse and re-fire the kick.
-/// A body that already carries a live window, or has no live predecessor, is
-/// passed through untouched.
+/// The carry is gated on kick provenance: only a window this process stamped
+/// (`open_at`) within `KICK_LAG_HORIZON_SECS` survives, and the stamp rides
+/// the merge so the next lagging tick re-derives the bound. A wire-sourced
+/// prev (`open_at: None`) or a kick past the horizon takes the fresh body
+/// verbatim — a server-side reset (#79) must not stay frozen behind an old
+/// window. A body that already carries a live window, or has no live
+/// predecessor, is passed through untouched.
 #[test]
 fn fresh_body_lagging_a_kick_keeps_the_live_window() {
-    use super::{five_hour_live, preserve_live_window};
+    use super::{KICK_LAG_HORIZON_SECS, five_hour_live, preserve_live_window};
     use crate::usage::{UsageInfo, UsageWindow};
 
     let now = 1_600_000_000i64; // 2020 — between the two reset stamps below
-    let win = |util: f64, resets: &str| UsageInfo {
+    let win = |util: f64, resets: &str, open_at: Option<i64>| UsageInfo {
         five_hour: Some(UsageWindow {
             utilization: util,
             resets_at: Some(resets.to_string()),
         }),
+        open_at,
         ..Default::default()
     };
-    let live = |u| win(u, "2999-01-01T00:00:00+00:00");
-    let closed = |u| win(u, "2000-01-01T00:00:00+00:00");
+    let kicked_live =
+        |util: f64, open_at: i64| win(util, "2999-01-01T00:00:00+00:00", Some(open_at));
+    let wire_live = |util: f64| win(util, "2999-01-01T00:00:00+00:00", None);
+    let closed = |util: f64| win(util, "2000-01-01T00:00:00+00:00", None);
 
-    // Lagging fresh body (closed window) over a just-opened live one → keep live.
-    let merged = preserve_live_window(closed(80.0), Some(&live(0.0)), now);
+    // Lagging fresh body (closed window) over a just-opened kicked one → keep
+    // it, stamp and all.
+    let merged = preserve_live_window(closed(80.0), Some(&kicked_live(0.0, now - 30)), now);
     assert!(
         five_hour_live(&merged, now),
         "a lagging fresh body must not re-close a just-opened window"
@@ -4004,9 +4013,59 @@ fn fresh_body_lagging_a_kick_keeps_the_live_window() {
         0.0,
         "keeps the live window verbatim"
     );
+    assert_eq!(
+        merged.open_at,
+        Some(now - 30),
+        "the kick stamp rides the merge so the next lagging tick re-derives the bound"
+    );
+
+    // The horizon's far edge still carries; one second past it the fresh body
+    // stands — the lag a kick can outrun is bounded, not the window's own life.
+    let merged = preserve_live_window(
+        closed(80.0),
+        Some(&kicked_live(0.0, now - KICK_LAG_HORIZON_SECS)),
+        now,
+    );
+    assert_eq!(
+        merged.five_hour.unwrap().utilization,
+        0.0,
+        "at exactly the horizon the carry still holds"
+    );
+    let merged = preserve_live_window(
+        closed(80.0),
+        Some(&kicked_live(0.0, now - KICK_LAG_HORIZON_SECS - 1)),
+        now,
+    );
+    assert_eq!(
+        merged.five_hour.unwrap().utilization,
+        80.0,
+        "just past the horizon the fresh body stands"
+    );
+    assert_eq!(
+        merged.open_at, None,
+        "a refused carry leaves the fresh body verbatim"
+    );
+
+    // A kick 20 minutes ago is long past any same-tick lag → fresh stands.
+    let merged = preserve_live_window(closed(80.0), Some(&kicked_live(0.0, now - 1200)), now);
+    assert_eq!(
+        merged.five_hour.unwrap().utilization,
+        80.0,
+        "an aged kick no longer holds the wire's reading back"
+    );
+
+    // A wire-sourced prev (no kick stamp — the #79 shape) → fresh stands
+    // verbatim.
+    let merged = preserve_live_window(closed(80.0), Some(&wire_live(97.0)), now);
+    assert_eq!(
+        merged.five_hour.unwrap().utilization,
+        80.0,
+        "a window clauth never kicked must not override the wire"
+    );
+    assert_eq!(merged.open_at, None);
 
     // Fresh body already carries a live window → take it as-is.
-    let merged = preserve_live_window(live(12.0), Some(&live(0.0)), now);
+    let merged = preserve_live_window(wire_live(12.0), Some(&kicked_live(0.0, now - 30)), now);
     assert_eq!(merged.five_hour.unwrap().utilization, 12.0);
 
     // Prior window also closed → nothing live to preserve; the fresh body stands.
@@ -8144,6 +8203,171 @@ fn a_cached_body_appends_no_sample() {
     assert!(
         recorded_samples("alice").is_empty(),
         "a recycled cached snapshot must not land a history sample"
+    );
+}
+
+/// #79: a server-side 5h-window reset (the reporter's subscription upgrade)
+/// must reach every surface on the next Fresh fetch. `preserve_live_window`
+/// used to carry ANY prev live window into a Fresh body reporting none, so the
+/// wire's post-reset reading (`utilization: 0.0, resets_at: null`) was
+/// overwritten with the frozen pre-reset window and re-stamped Fresh. The
+/// carry is gated on kick provenance: a prev this process never kicked open
+/// (`open_at: None` — every wire parse) or one whose kick aged past
+/// `KICK_LAG_HORIZON_SECS` takes the Fresh body verbatim, in store and on
+/// disk.
+#[test]
+fn a_fresh_wire_reset_drops_the_prev_wire_sourced_window() {
+    use super::{
+        FetchOutcome, USAGE_CACHE_FILE, apply_outcome, load_profile_cache, write_profile_cache,
+    };
+    use crate::usage::{UsageInfo, UsageWindow};
+
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["wire", "stale-kick"]);
+    let (store, status, last_fetched, streaks) = history_stores();
+    let now = super::now_epoch_secs();
+
+    let pre_reset = |util: f64, open_at: Option<i64>| UsageInfo {
+        five_hour: Some(UsageWindow {
+            utilization: util,
+            resets_at: Some("2999-01-01T00:00:00+00:00".to_string()),
+        }),
+        open_at,
+        ..Default::default()
+    };
+    // The reporter's post-reset wire shape: the window is simply gone.
+    let wire_reset = UsageInfo {
+        five_hour: Some(UsageWindow {
+            utilization: 0.0,
+            resets_at: None,
+        }),
+        ..Default::default()
+    };
+
+    // Both prev shapes a reset must be visible through: a wire-sourced window
+    // clauth never kicked, and a kick whose lag horizon has long passed.
+    for (name, prev) in [
+        ("wire", pre_reset(97.0, None)),
+        ("stale-kick", pre_reset(97.0, Some(now - 1200))),
+    ] {
+        let profile = crate::profile::ProfileName::from(name);
+        store.lock().unwrap().insert(name.to_string(), prev.clone());
+        write_profile_cache(&profile, USAGE_CACHE_FILE, &prev);
+
+        apply_outcome(
+            FetchOutcome::live(&profile, wire_reset.clone(), None),
+            &store,
+            &status,
+            &last_fetched,
+            &streaks,
+            REFRESH_INTERVAL_MS,
+            false,
+            false,
+            &Arc::new(RankedMutex::new(HashSet::new())),
+        );
+
+        let store_util = store
+            .lock()
+            .unwrap()
+            .get(name)
+            .and_then(|i| i.five_hour.as_ref())
+            .expect("a merged body landed in the store")
+            .utilization;
+        assert_eq!(
+            store_util, 0.0,
+            "#79: the store must take the wire's reset reading"
+        );
+        let disk = load_profile_cache::<UsageInfo>(&profile, USAGE_CACHE_FILE)
+            .expect("cache written by the fresh outcome");
+        let window = disk.five_hour.expect("the wire's windowless shape");
+        assert_eq!(
+            window.utilization, 0.0,
+            "#79: the disk cache must take the wire's reset reading"
+        );
+        assert_eq!(
+            window.resets_at, None,
+            "#79: a reset window carries no reset stamp to serve"
+        );
+    }
+}
+
+/// The designed case the carry exists for: a Fresh `/usage` read in the same
+/// tick as a kick can still report the just-opened window closed, so the
+/// kick's synthetic window survives the merge — and so does its `open_at`
+/// stamp, which is what lets the NEXT lagging tick re-derive the horizon
+/// instead of carrying the window until its own `resets_at`.
+#[test]
+fn a_lagging_fresh_body_keeps_the_kick_window_and_its_stamp() {
+    use super::{
+        FetchOutcome, USAGE_CACHE_FILE, apply_outcome, load_profile_cache, mark_window_open,
+        now_epoch_secs,
+    };
+    use crate::usage::{UsageInfo, UsageWindow};
+
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["kick"]);
+    let (store, status, last_fetched, streaks) = history_stores();
+    let profile = crate::profile::ProfileName::from("kick");
+    let kicked_at = now_epoch_secs();
+    mark_window_open(&store, &profile, kicked_at);
+    let synthetic = store
+        .lock()
+        .unwrap()
+        .get("kick")
+        .cloned()
+        .expect("mark_window_open seeded the store");
+
+    apply_outcome(
+        FetchOutcome::live(
+            &profile,
+            UsageInfo {
+                five_hour: Some(UsageWindow {
+                    utilization: 0.0,
+                    resets_at: None,
+                }),
+                ..Default::default()
+            },
+            None,
+        ),
+        &store,
+        &status,
+        &last_fetched,
+        &streaks,
+        REFRESH_INTERVAL_MS,
+        false,
+        false,
+        &Arc::new(RankedMutex::new(HashSet::new())),
+    );
+
+    let entry = store
+        .lock()
+        .unwrap()
+        .get("kick")
+        .cloned()
+        .expect("the merged body landed in the store");
+    let entry_window = entry.five_hour.as_ref().expect("carried window");
+    let synthetic_window = synthetic.five_hour.as_ref().expect("synthetic window");
+    assert_eq!(
+        (
+            entry_window.utilization,
+            entry_window.resets_at.as_deref(),
+            entry.open_at
+        ),
+        (
+            synthetic_window.utilization,
+            synthetic_window.resets_at.as_deref(),
+            Some(kicked_at)
+        ),
+        "a same-tick lagging body keeps the kicked window AND its stamp, so the \
+         next lagging tick re-derives the bound"
+    );
+
+    let disk = load_profile_cache::<UsageInfo>(&profile, USAGE_CACHE_FILE)
+        .expect("cache written by the fresh outcome");
+    assert_eq!(
+        disk.open_at,
+        Some(kicked_at),
+        "the stamp survives onto the disk cache every surface reads"
     );
 }
 
