@@ -2176,79 +2176,118 @@ fn window_lapsed_only_fires_on_a_fetched_expired_window() {
     );
 }
 
-/// The auto-start kick's firing rules: never mid-`/usage`-429-streak; a lapsed
-/// window opens on the kick's backoff cadence; a live window re-tests a standing
-/// block on the poll cadence (recovery may be imminent). Mid-streak the kick is
-/// suppressed so it can't re-hit (and prolong) a throttled endpoint every slot; a
-/// live `/usage` body clears the streak and the next due tick kicks cleanly.
+/// The auto-start kick's firing rules: mid-`/usage`-429-streak the kick is off
+/// UNLESS the member hosts a live chain session (issue #83 — the storm blinds
+/// `/usage`, and the kick's rejected verdict is then the only signal that can
+/// mint the switch-grade block the walk routes on); a lapsed window opens on the
+/// kick's backoff cadence; a live window re-tests a standing block on the poll
+/// cadence (recovery may be imminent). Mid-streak a non-hosting member's kick is
+/// suppressed so it can't re-hit (and prolong) a throttled endpoint every slot;
+/// a live `/usage` body clears the streak and the next due tick kicks cleanly.
 #[test]
 fn kick_suppressed_during_rate_limit_streak() {
     use super::should_open_window;
 
-    // args: (streak, window_lapsed, kick_due, has_block, queue_due,
-    //        weekly_reset_pending)
+    // args: (streak, hosts_chain_session, window_lapsed, kick_due, has_block,
+    //        queue_due, weekly_reset_pending)
     assert!(
-        should_open_window(0, true, true, false, true, false),
+        should_open_window(0, false, true, true, false, true, false),
         "lapsed + no streak → open"
     );
     assert!(
-        !should_open_window(1, true, true, false, true, false),
+        !should_open_window(1, false, true, true, false, true, false),
         "lapsed but 429-streaking → suppress the kick"
     );
     assert!(
-        !should_open_window(5, true, true, false, true, false),
+        !should_open_window(5, false, true, true, false, true, false),
         "deep streak → still suppressed"
     );
     assert!(
-        !should_open_window(0, false, true, false, true, false),
+        should_open_window(7, true, true, true, false, true, false),
+        "deep streak on a member hosting a live chain session → the kick \
+         re-tests anyway (#83): the storm is what blinds `/usage`, so this is \
+         the only probe that can mint the block the walk routes on"
+    );
+    assert!(
+        !should_open_window(7, true, true, true, false, false, false),
+        "…and the mid-storm exception keeps the queue gate on the LAPSED leg: \
+         an unelected member still may not open"
+    );
+    assert!(
+        !should_open_window(7, true, true, false, true, true, false),
+        "…and it keeps the block ladder: a lapsed member whose retry clock \
+         isn't due still waits its backoff, on the poll cadence's shape and \
+         everyone else's"
+    );
+    assert!(
+        !should_open_window(0, false, false, true, false, true, false),
         "a live window with no block never kicks"
     );
     assert!(
-        should_open_window(0, false, true, true, true, false),
+        should_open_window(0, false, false, true, true, true, false),
         "a live window WITH a standing block re-tests it — the window can be a \
          Claude-web open while Claude Code stays 429'd, so only a landed kick \
          proves the block is gone"
     );
     assert!(
-        should_open_window(0, false, false, true, true, false),
+        should_open_window(0, false, false, false, true, true, false),
         "a live-window block re-tests on the POLL cadence, not the deep kick \
          backoff — the window reopened (maybe via web), so recovery may be \
          imminent and we must not wait out the ~15min ladder"
     );
     assert!(
-        !should_open_window(1, false, false, true, true, false),
+        !should_open_window(1, false, false, false, true, true, false),
         "but a /usage 429-streak still suppresses even the live-window re-test"
     );
     assert!(
-        !should_open_window(0, true, false, true, true, false),
+        should_open_window(1, true, false, false, true, true, false),
+        "mid-storm, a hosting member's live-window block re-tests on the poll \
+         cadence — the exception opens every leg, pacing unchanged"
+    );
+    assert!(
+        !should_open_window(1, true, false, true, false, true, false),
+        "mid-storm or not, a hosting member with a live window and NO block \
+         never kicks — the exception relaxes the streak gate only"
+    );
+    assert!(
+        !should_open_window(0, false, true, false, true, true, false),
         "a LAPSED-window kick-429 block whose retry isn't due still waits its \
          backoff — no reopened-window signal, so don't re-hit a dead endpoint"
     );
     assert!(
-        !should_open_window(0, true, true, false, false, false),
+        !should_open_window(0, false, true, true, false, false, false),
         "the queue gate holds the LAPSED leg: an unelected member with a \
          lapsed window and a due kick clock still may not open"
     );
     assert!(
-        should_open_window(0, false, true, true, false, false),
+        should_open_window(0, false, false, true, true, false, false),
         "…and only the lapsed leg: the live-window re-test is a health probe \
          the queue must never delay"
     );
     assert!(
-        should_open_window(0, false, false, false, false, true),
+        should_open_window(0, true, true, true, false, true, false),
+        "streak 0: the hosting fact changes nothing — the kick already fires"
+    );
+    assert!(
+        should_open_window(0, false, false, false, false, false, true),
         "a pending weekly-reset mark kicks a live window on the poll cadence: \
          no block, no backoff, and the queue never delays a re-test"
     );
     assert!(
-        should_open_window(0, false, false, false, true, true),
+        should_open_window(0, false, false, false, true, true, true),
         "queue due or not, the pending leg is ungated"
     );
     assert!(
-        !should_open_window(1, false, false, false, false, true),
+        !should_open_window(1, false, false, false, false, false, true),
         "a 429-streak suppresses the pending leg like every other"
     );
     assert!(
-        !should_open_window(0, true, false, false, false, true),
+        should_open_window(1, true, false, false, false, false, true),
+        "…unless the member hosts a live chain session — the exception is the \
+         streak gate, not any one leg (#83)"
+    );
+    assert!(
+        !should_open_window(0, false, true, false, false, false, true),
         "pending does NOT bypass the queue for a LAPSED window: there the \
          kick OPENS a window, and opens belong behind the spacing"
     );
@@ -2279,6 +2318,7 @@ fn auto_start_re_tests_a_live_window_block_but_leaves_a_healthy_one() {
         )])))
     };
     let no_pending = || -> WeeklyResetKicks { Arc::new(RankedMutex::new(HashSet::new())) };
+    let empty_hosts = || -> HashSet<String> { HashSet::new() };
 
     let blocked: KickBlocks = Arc::new(RankedMutex::new(HashMap::from([(
         "a".to_string(),
@@ -2295,6 +2335,7 @@ fn auto_start_re_tests_a_live_window_block_but_leaves_a_healthy_one() {
             &live_store(),
             &blocked,
             &no_pending(),
+            &empty_hosts(),
             &crate::profile::ProfileName::from("a"),
             now,
             true
@@ -2309,6 +2350,7 @@ fn auto_start_re_tests_a_live_window_block_but_leaves_a_healthy_one() {
             &live_store(),
             &clean,
             &no_pending(),
+            &empty_hosts(),
             &crate::profile::ProfileName::from("a"),
             now,
             true
@@ -2328,6 +2370,7 @@ fn auto_start_re_tests_a_live_window_block_but_leaves_a_healthy_one() {
             &live_store(),
             &clean,
             &pending,
+            &empty_hosts(),
             &crate::profile::ProfileName::from("a"),
             now,
             true
@@ -2340,11 +2383,226 @@ fn auto_start_re_tests_a_live_window_block_but_leaves_a_healthy_one() {
             &live_store(),
             &clean,
             &no_pending(),
+            &empty_hosts(),
             &crate::profile::ProfileName::from("a"),
             now,
             true
         ),
         "without the mark the same healthy window stays quiet"
+    );
+}
+
+/// #83's mid-storm leg: while `/usage` answers a persistent 429, a member a
+/// live `follows_chain` session runs on may still re-test via kick. The storm
+/// is exactly what blinds `/usage`, so the kick's own rejected verdict is then
+/// the only signal that can mint the switch-grade block the walk's
+/// `kick_rejected` bypass routes on — without this leg the session sits on a
+/// dead member for the storm's whole duration. The shared bucket pays each
+/// leg's own pacing (owner ruling 2026-09-18).
+#[test]
+fn midstorm_kick_fires_for_a_member_hosting_a_live_chain_session() {
+    use crate::usage::UsageInfo;
+
+    let _home = crate::testutil::HomeSandbox::new();
+    let row = session_row("4242-0", "a");
+    let _marker = register_live_row(&row);
+
+    let now = 3_000_000;
+    let streaks: super::PollStreaks = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        super::StreakCounts {
+            rate_limit: 3,
+            refresh_fail: 0,
+        },
+    )])));
+    // The persistent-429 shape: a plan-only, windowless store entry.
+    let lapsed_store: super::UsageStore = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        UsageInfo::default(),
+    )])));
+    let no_blocks: super::KickBlocks = Arc::new(RankedMutex::new(HashMap::new()));
+    let no_pending: super::WeeklyResetKicks = Arc::new(RankedMutex::new(HashSet::new()));
+    let hosts = super::chain_session_hosts(&[token("a")], &streaks);
+
+    assert_eq!(hosts, HashSet::from(["a".to_string()]));
+    assert!(
+        super::auto_start_should_kick(
+            &streaks,
+            &lapsed_store,
+            &no_blocks,
+            &no_pending,
+            &hosts,
+            &crate::profile::ProfileName::from("a"),
+            now,
+            true
+        ),
+        "mid-storm, a member hosting a live chain session still re-tests via kick"
+    );
+}
+
+/// The negative arm of #83's exception: streak > 0 and NOTHING hosting a live
+/// chain session on the member → the kick stays hard-gated, exactly as before.
+#[test]
+fn midstorm_kick_stays_gated_for_a_member_hosting_no_live_chain_session() {
+    use crate::usage::UsageInfo;
+
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let now = 3_000_000;
+    let streaks: super::PollStreaks = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        super::StreakCounts {
+            rate_limit: 3,
+            refresh_fail: 0,
+        },
+    )])));
+    let lapsed_store: super::UsageStore = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        UsageInfo::default(),
+    )])));
+    let no_blocks: super::KickBlocks = Arc::new(RankedMutex::new(HashMap::new()));
+    let no_pending: super::WeeklyResetKicks = Arc::new(RankedMutex::new(HashSet::new()));
+    let hosts = super::chain_session_hosts(&[token("a")], &streaks);
+
+    assert!(hosts.is_empty(), "no live chain session → no hosting fact");
+    assert!(
+        !super::auto_start_should_kick(
+            &streaks,
+            &lapsed_store,
+            &no_blocks,
+            &no_pending,
+            &hosts,
+            &crate::profile::ProfileName::from("a"),
+            now,
+            true
+        ),
+        "mid-storm with no hosting session the kick stays suppressed"
+    );
+}
+
+/// #83's exception relaxes the streak gate ONLY: mid-storm, a hosting member's
+/// kick still rides the block ladder (`kick_retry_due`), not the poll cadence,
+/// on the lapsed leg.
+#[test]
+fn midstorm_kick_keeps_the_block_ladder_for_a_hosting_member() {
+    use crate::usage::UsageInfo;
+
+    let now = 3_000_000;
+    let streaks: super::PollStreaks = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        super::StreakCounts {
+            rate_limit: 3,
+            refresh_fail: 0,
+        },
+    )])));
+    let lapsed_store: super::UsageStore = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        UsageInfo::default(),
+    )])));
+    let no_pending: super::WeeklyResetKicks = Arc::new(RankedMutex::new(HashSet::new()));
+    let hosts = HashSet::from(["a".to_string()]);
+    let ladder_block = |next_retry: i64| -> super::KickBlocks {
+        Arc::new(RankedMutex::new(HashMap::from([(
+            "a".to_string(),
+            super::KickBlock {
+                streak: 2,
+                rejected: true,
+                until: Some(now + 900),
+                next_retry,
+            },
+        )])))
+    };
+
+    assert!(
+        !super::auto_start_should_kick(
+            &streaks,
+            &lapsed_store,
+            &ladder_block(now + 600),
+            &no_pending,
+            &hosts,
+            &crate::profile::ProfileName::from("a"),
+            now,
+            true
+        ),
+        "a hosting member's mid-storm kick waits out the block's retry clock"
+    );
+    assert!(
+        super::auto_start_should_kick(
+            &streaks,
+            &lapsed_store,
+            &ladder_block(now - 1),
+            &no_pending,
+            &hosts,
+            &crate::profile::ProfileName::from("a"),
+            now,
+            true
+        ),
+        "…and fires once the ladder rung comes due"
+    );
+}
+
+/// The hosting fact's derivation: exactly the rows the decision leg would move
+/// (`row_follows_chain_live`), attributed to the member each row currently runs
+/// as, and read only while a due profile actually carries a 429 streak.
+#[test]
+fn chain_session_hosts_reads_rows_the_decision_leg_would_move() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let calm: super::PollStreaks = Arc::new(RankedMutex::new(HashMap::new()));
+    let storm = |name: &str| -> super::PollStreaks {
+        Arc::new(RankedMutex::new(HashMap::from([(
+            name.to_string(),
+            super::StreakCounts {
+                rate_limit: 2,
+                refresh_fail: 0,
+            },
+        )])))
+    };
+
+    // Calm tick: the registry is not even consulted — a registered live row
+    // yields an empty set while no due profile streaks.
+    let _marker = register_live_row(&session_row("4242-0", "a"));
+    assert!(
+        super::chain_session_hosts(&[token("a")], &calm).is_empty(),
+        "no 429 streak in flight → no hosting read at all"
+    );
+    // The gate reads the DUE set's streaks: a storm on a profile not due this
+    // tick changes nothing for the due ones.
+    assert!(
+        super::chain_session_hosts(&[token("a")], &storm("z")).is_empty(),
+        "a streak on a profile not in the due set opens no hosting read"
+    );
+
+    // Storm: live rows count, attributed to `current_member` once set.
+    let hosts = super::chain_session_hosts(&[token("a")], &storm("a"));
+    assert_eq!(hosts, HashSet::from(["a".to_string()]));
+
+    // A swapped session attributes to the member it runs as now, not the one it
+    // launched on — the same fallback the decision leg and the tally use.
+    let mut swapped = session_row("4242-1", "a");
+    swapped.current_member = Some("b".to_string());
+    let _marker_b = register_live_row(&swapped);
+    let hosts = super::chain_session_hosts(&[token("a")], &storm("a"));
+    assert_eq!(
+        hosts,
+        HashSet::from(["a".to_string(), "b".to_string()]),
+        "attribution is current_member, falling back to start_profile"
+    );
+
+    // Rows the decision leg would not move never host: an opted-out session, an
+    // isolated one, and a dead one whose row outlives its session.
+    let mut opted_out = session_row("4242-2", "a");
+    opted_out.follows_chain = false;
+    crate::live_sessions::register(&opted_out).expect("register row");
+    let mut isolated = session_row("4242-3", "a");
+    isolated.isolated = true;
+    crate::live_sessions::register(&isolated).expect("register row");
+    let dead = session_row("4242-4", "a");
+    crate::live_sessions::register(&dead).expect("register row");
+    let hosts = super::chain_session_hosts(&[token("a")], &storm("a"));
+    assert_eq!(
+        hosts,
+        HashSet::from(["a".to_string(), "b".to_string()]),
+        "opted-out, isolated, and dead rows never count as hosting"
     );
 }
 
@@ -2635,6 +2893,7 @@ fn run_fetch_consumes_the_weekly_reset_mark_only_on_a_fired_kick() {
         &streaks,
         &blocks,
         &weekly_reset_kicks,
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );
@@ -2665,6 +2924,7 @@ fn run_fetch_consumes_the_weekly_reset_mark_only_on_a_fired_kick() {
         &streaks,
         &blocks,
         &weekly_reset_kicks,
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );
@@ -6852,6 +7112,7 @@ fn auto_start_queue_run_fetch_anchors_and_logs_only_a_lapsed_window_open() {
         &streaks,
         &blocks,
         &weekly_reset_kicks,
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );
@@ -6889,6 +7150,7 @@ fn auto_start_queue_run_fetch_anchors_and_logs_only_a_lapsed_window_open() {
         &streaks,
         &blocks,
         &weekly_reset_kicks,
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );
@@ -6980,6 +7242,7 @@ fn auto_start_queue_run_fetch_keys_a_failed_kick_to_the_elected_member() {
         &Arc::new(RankedMutex::new(HashMap::new())),
         &Arc::new(RankedMutex::new(HashMap::new())),
         &Arc::new(RankedMutex::new(HashSet::new())),
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );
@@ -7099,6 +7362,7 @@ fn auto_start_queue_run_fetch_records_the_failure_when_refused_before_the_kick()
         &Arc::new(RankedMutex::new(HashMap::new())),
         &blocks,
         &weekly_reset_kicks,
+        &HashSet::new(),
         &queue,
         REFRESH_INTERVAL_MS,
     );

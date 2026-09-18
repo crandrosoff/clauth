@@ -1428,9 +1428,18 @@ fn streak_snapshot(streaks: &PollStreaks) -> HashMap<String, StreakCounts> {
     streaks.lock().map(|m| m.clone()).unwrap_or_default()
 }
 
-/// Whether `run_fetch` should fire the auto-start kick. Never mid-`/usage`
-/// 429-streak (`streak == 0`): the endpoint is already throttling and a kick on a
-/// still-valid token can neither rotate nor open anything (see `auto_start_kick`).
+/// Whether `run_fetch` should fire the auto-start kick. Mid-`/usage`-429-streak
+/// (`streak != 0`) the kick is off — the endpoint is already throttling and a kick
+/// on a still-valid token can neither rotate nor open anything (see
+/// `auto_start_kick`) — with ONE exception (issue #83, owner ruling 2026-09-18):
+/// a member a live `follows_chain` session runs on (`hosts_chain_session`) still
+/// re-tests. The storm is exactly what blinds `/usage`, so the kick's own
+/// rejected verdict is then the only signal that can mint the switch-grade block
+/// the walk's `kick_rejected` bypass routes on; without this leg the session
+/// sits on a dead member for the storm's whole duration. The streak gate is the
+/// only leg relaxed — every pacing below applies unchanged, each on its own
+/// leg's clock: the lapsed leg rides the block ladder (and the queue's
+/// election-failure skip), the live-window re-test the poll cadence.
 /// Two firing modes:
 ///   * LAPSED window → open it, paced by the kick's own decaying retry clock
 ///     (`kick_due`, [`kick_retry_due`]) so a still-dead endpoint isn't re-hit
@@ -1457,13 +1466,14 @@ fn streak_snapshot(streaks: &PollStreaks) -> HashMap<String, StreakCounts> {
 /// records a block the `has_block` leg continues from.
 fn should_open_window(
     streak: u32,
+    hosts_chain_session: bool,
     window_lapsed: bool,
     kick_due: bool,
     has_block: bool,
     queue_due: bool,
     weekly_reset_pending: bool,
 ) -> bool {
-    if streak != 0 {
+    if streak != 0 && !hosts_chain_session {
         return false;
     }
     if window_lapsed {
@@ -1478,13 +1488,19 @@ fn should_open_window(
 /// The auto-start firing decision for `run_fetch`, factored out so it has a test
 /// seam (`run_fetch` itself is HTTP-bound). Reads the streak, window, and kick
 /// block for `name` and applies [`should_open_window`] — the `has_block` wiring
-/// (`block.is_some()`) is the live-window re-test's load-bearing plumbing. Locks
+/// (`block.is_some()`) is the live-window re-test's load-bearing plumbing, and
+/// `hosts` carries the mid-storm exception's hosting fact (issue #83). Locks
 /// are taken one at a time (never nested), so no rank-order constraint applies.
+// One arg over the lint's bar for the same reason as `run_fetch`: every one is a
+// distinct input the kick decision reads, and a bundle would only rename the
+// coupling.
+#[allow(clippy::too_many_arguments)]
 fn auto_start_should_kick(
     streaks: &PollStreaks,
     store: &UsageStore,
     kick_blocks: &KickBlocks,
     weekly_reset_kicks: &WeeklyResetKicks,
+    hosts: &HashSet<String>,
     name: &ProfileName,
     now_secs: i64,
     queue_due: bool,
@@ -1496,12 +1512,48 @@ fn auto_start_should_kick(
         .is_some_and(|m| m.contains(name));
     should_open_window(
         rate_limit_streak(streaks, name),
+        hosts.contains(name.as_str()),
         window_lapsed(store, name, now_secs),
         kick_retry_due(block.as_ref(), now_secs),
         block.is_some(),
         queue_due,
         weekly_reset_pending,
     )
+}
+
+/// Whether `row` is a chain-following session the decision leg would move: not
+/// isolated, and its session still running, probed on the member it currently
+/// runs as. Shared by [`scan_session_switches`] and [`chain_session_hosts`] so a
+/// row can never count as hosting for the kick gate while the decision leg
+/// refuses to move it (or the reverse).
+fn row_follows_chain_live(row: &crate::live_sessions::LiveSession) -> bool {
+    row.follows_chain && !row.isolated && {
+        // `gc_stale_runtimes` reaps rows at daemon STARTUP, not per tick,
+        // so a SIGKILLed session's row outlives the whole daemon run.
+        let probe = ProfileName::from(row.current_member.as_deref().unwrap_or(&row.start_profile));
+        crate::runtime::session_row_is_live(&probe, row.isolated, &row.session_id)
+    }
+}
+
+/// The members a live `follows_chain` session currently runs as — the hosting
+/// fact behind [`should_open_window`]'s mid-storm exception (issue #83).
+/// Attribution matches the decision leg and the tally: `current_member`, which
+/// the executor writes only on a session's FIRST swap, so a session that never
+/// moved is still running as the account it launched on.
+///
+/// Read only while some due profile carries a nonzero `/usage` 429 streak — the
+/// one state where the hosting fact can change a decision — so the steady state
+/// pays nothing and a storm adds one registry read per tick, beside the one
+/// [`scan_session_switches`] already does.
+fn chain_session_hosts(due: &[TokenEntry], streaks: &PollStreaks) -> HashSet<String> {
+    if !due.iter().any(|e| rate_limit_streak(streaks, &e.name) != 0) {
+        return HashSet::new();
+    }
+    crate::live_sessions::list()
+        .into_iter()
+        .filter(row_follows_chain_live)
+        .map(|row| row.current_member.unwrap_or(row.start_profile))
+        .collect()
 }
 
 /// Copy of `name`'s kick block (`None` when absent or poisoned). Read alone and
@@ -1847,9 +1899,10 @@ fn log_queue_open(
 /// may have reopened via the web app while Claude Code stays 429'd) — rotating
 /// once on 401 OR 429, mark the window open on success, then fetch with the
 /// possibly-rotated token.
-// One arg over the lint's bar, and every one of them is a distinct shared store
-// this leg writes; bundling them into a struct would only rename the same
-// coupling. `fetch_oauth_due` is the single caller.
+// Two args over the lint's bar, and every one of them is a distinct shared store
+// this leg writes (or, for `hosts`, a per-tick fact it reads); bundling them
+// into a struct would only rename the same coupling. `fetch_oauth_due` is the
+// single caller.
 #[allow(clippy::too_many_arguments)]
 fn run_fetch(
     config: &crate::profile::ConfigHandle,
@@ -1860,14 +1913,16 @@ fn run_fetch(
     streaks: &PollStreaks,
     kick_blocks: &KickBlocks,
     weekly_reset_kicks: &WeeklyResetKicks,
+    hosts: &HashSet<String>,
     auto_start_queue: &crate::usage::AutoStartQueueState,
     interval_ms: u64,
 ) -> FetchOutcome {
     // Auto-start leg: fire the kick before fetching when this profile opted in and
     // `should_open_window` says to — to open a lapsed window, or to re-test a
     // standing kick block on a live window (its two modes), as long as no 429
-    // streak is in flight. The kick may rotate the chain (401 OR 429 in this
-    // branch only); fold its rotated pair into both the local entry (so the
+    // streak is in flight (a member hosting a live chain session excepted,
+    // issue #83). The kick may rotate the chain (401 OR 429 in this branch
+    // only); fold its rotated pair into both the local entry (so the
     // fetch below uses the fresh token, never re-spending) and the returned
     // outcome (so the tick syncs it into the live snapshot).
     let mut kick_rotated: Option<RotatedTokens> = None;
@@ -1886,6 +1941,7 @@ fn run_fetch(
             store,
             kick_blocks,
             weekly_reset_kicks,
+            hosts,
             &entry.name,
             now_secs,
             entry.may_open_window,
@@ -2714,6 +2770,7 @@ fn filter_suppressed(
 /// publishing happen in `tick`; this leg only fetches. Each worker paces against
 /// the shared `api.anthropic.com` host inside `get_json`.
 fn fetch_oauth_due(state: &SchedulerState, due: Vec<TokenEntry>, interval_ms: u64) {
+    let hosts = chain_session_hosts(&due, &state.poll_streaks);
     fetch_oauth_due_with(state, due, interval_ms, |entry| {
         run_fetch(
             &state.config,
@@ -2724,6 +2781,7 @@ fn fetch_oauth_due(state: &SchedulerState, due: Vec<TokenEntry>, interval_ms: u6
             &state.poll_streaks,
             &state.kick_blocks,
             &state.weekly_reset_kicks,
+            &hosts,
             &state.auto_start_queue,
             interval_ms,
         )
@@ -4203,25 +4261,12 @@ fn scan_session_switches(
 ) {
     let rows: Vec<crate::live_sessions::LiveSession> = crate::live_sessions::list()
         .into_iter()
-        .filter(|row| {
-            // An isolated session runs a throwaway tree that is deliberately not
-            // part of any chain, and the executor refuses it outright.
-            row.follows_chain
-                && !row.isolated
-                // `gc_stale_runtimes` reaps rows at daemon STARTUP, not per tick,
-                // so a SIGKILLed session's row outlives the whole daemon run and
-                // would keep taking decisions nothing can execute.
-                && {
-                    let probe = ProfileName::from(
-                        row.current_member.as_deref().unwrap_or(&row.start_profile),
-                    );
-                    crate::runtime::session_row_is_live(
-                        &probe,
-                        row.isolated,
-                        &row.session_id,
-                    )
-                }
-        })
+        // An isolated session runs a throwaway tree that is deliberately not
+        // part of any chain, and the executor refuses it outright. The liveness
+        // probe half lives in [`row_follows_chain_live`], shared with the
+        // mid-storm kick gate so the two legs cannot disagree about which
+        // sessions count.
+        .filter(row_follows_chain_live)
         .collect();
     if rows.is_empty() {
         return;
