@@ -2832,6 +2832,49 @@ fn acquire_creates_runtime_and_pid_file() {
     });
 }
 
+/// The wipe-HAPPENS half of the acquire-side stale-tree rule: a tree already
+/// sitting at the path a session resolves, with NO live marker in its paired
+/// sessions dir, is wiped before the build, so a dead session's leftovers do
+/// not carry into this session's tree. The stale entry is a regular file with
+/// no counterpart in `~/.claude` (empty here), so neither the additive build
+/// walk nor `prune_dangling_links` can remove it — only the wipe can, which
+/// is what makes this a wipe pin rather than a build pin. Forced Fake
+/// transport because the shared bare-stem tree gives the fixture a FIXED
+/// runtime path to pre-populate; the wipe itself is mode-independent.
+#[test]
+fn acquire_wipes_a_stale_tree_at_its_own_path_when_no_marker_holds_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        with_link_mode(LinkMode::Fake, || {
+            fake_claude_home(tmp.path());
+            let profile = configured_profile("stale");
+
+            let runtime = tmp
+                .path()
+                .join(".clauth")
+                .join("profiles")
+                .join("stale")
+                .join("runtime");
+            fs::create_dir_all(&runtime).expect("mkdir stale runtime");
+            fs::write(runtime.join("leftover-of-a-dead-session"), b"stale bytes")
+                .expect("seed the stale entry");
+
+            let rt =
+                ProfileRuntime::acquire(&profile, Isolation::Shared, &[], false).expect("acquire");
+
+            assert_eq!(
+                rt.config_dir(),
+                runtime,
+                "under the forced shared fake transport the tree is the bare stem"
+            );
+            assert!(
+                !runtime.join("leftover-of-a-dead-session").exists(),
+                "a stale tree with no live marker holding it is wiped, not adopted"
+            );
+        });
+    });
+}
+
 /// The window row 2 of the lock-race backlog names: a caller loads config, the
 /// acquire's rotation-lock wait parks it, a delete lands, and the acquire then
 /// rebuilds a whole session for an account nothing configures. The wait's own
@@ -5414,12 +5457,13 @@ fn gc_collects_an_orphaned_sessions_dir_with_no_runtime_sibling() {
 /// collected tree's item goes with the tree, a live session's item never
 /// does, and a dir that was never built has no item to collect. The macOS
 /// executor that this decision feeds (derive the service while the dir
-/// exists, delete after the state-flock closure) is unreachable under
-/// `cfg(test)` (`keychain::enabled()` is false there), the same split the
-/// seed and swap arms record; what every platform CAN pin is the decision
-/// itself and that the sweep's own filesystem outcome feeds it the right
-/// inputs — the crashed tree below is collected, so the dir the delete keys
-/// on is gone, and the live one is spared, so its dir stands.
+/// exists, re-check liveness under a state-lock hold taken immediately
+/// before the delete) is unreachable under `cfg(test)` (`keychain::enabled()`
+/// is false there), the same split the seed and swap arms record; what every
+/// platform CAN pin is the decision itself and that the sweep's own
+/// filesystem outcome feeds it the right inputs — the crashed tree below is
+/// collected, so the inputs the delete keys on read dead, and the live one
+/// is spared, so they read live.
 #[test]
 fn gc_collects_a_crashed_sessions_keychain_item_and_spares_a_live_one() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -5464,10 +5508,12 @@ fn gc_collects_a_crashed_sessions_keychain_item_and_spares_a_live_one() {
 
         gc_stale_runtimes();
 
-        // The decision the macOS executor takes on the post-sweep state.
+        // The decision the macOS executor takes on the post-sweep state,
+        // with the marker count sampled the way its re-check samples it.
         assert_eq!(
             orphaned_keychain_item(
                 Some(crashed_service.as_str()),
+                prune_stale_sessions(&crashed_sessions),
                 crashed_runtime.symlink_metadata().is_ok()
             ),
             Some(crashed_service.as_str()),
@@ -5476,6 +5522,7 @@ fn gc_collects_a_crashed_sessions_keychain_item_and_spares_a_live_one() {
         assert_eq!(
             orphaned_keychain_item(
                 Some(live_service.as_str()),
+                prune_stale_sessions(&live_sessions),
                 live_runtime.symlink_metadata().is_ok()
             ),
             None,
@@ -5486,7 +5533,7 @@ fn gc_collects_a_crashed_sessions_keychain_item_and_spares_a_live_one() {
             "the never-built marker dir is collected alongside"
         );
         assert_eq!(
-            orphaned_keychain_item(None, false),
+            orphaned_keychain_item(None, Some(0), false),
             None,
             "no tree was ever built, so no service exists to collect"
         );
@@ -5495,16 +5542,87 @@ fn gc_collects_a_crashed_sessions_keychain_item_and_spares_a_live_one() {
 }
 
 /// The truth table for the item-collection decision on its own: the derived
-/// service survives only when the dir that explains it does not. Every other
-/// row keeps the item — a live or uncollectable tree keeps its dir, and a dir
-/// that never existed has no item to collect.
+/// service survives only when nothing live explains the item — no flock-held
+/// marker in the paired sessions dir, and no dir at its path. Every other row
+/// keeps the item: a live or uncollectable tree keeps its dir, a live or
+/// unreadable marker count reads as live, and a dir that never existed has no
+/// item to collect.
 #[test]
 fn orphaned_keychain_item_follows_the_dir() {
     let service = Some("Claude Code-credentials-c56fc9bd");
-    assert_eq!(orphaned_keychain_item(service, false), service);
-    assert_eq!(orphaned_keychain_item(service, true), None);
-    assert_eq!(orphaned_keychain_item(None, false), None);
-    assert_eq!(orphaned_keychain_item(None, true), None);
+    let dead = Some(0);
+    assert_eq!(orphaned_keychain_item(service, dead, false), service);
+    assert_eq!(orphaned_keychain_item(service, dead, true), None);
+    assert_eq!(orphaned_keychain_item(None, dead, false), None);
+    assert_eq!(orphaned_keychain_item(None, dead, true), None);
+    // The #82 rows: a marker a re-minted acquire holds spares the item even
+    // before the dir is rebuilt, and an unreadable sessions dir reads as
+    // live, the same fail-closed fold every destructive level makes.
+    assert_eq!(orphaned_keychain_item(service, Some(1), false), None);
+    assert_eq!(orphaned_keychain_item(service, Some(1), true), None);
+    assert_eq!(orphaned_keychain_item(service, None, false), None);
+}
+
+/// Issue #82's interleaving, posed through the seam between the sweep's
+/// collection closure and its item delete: a concurrently starting session
+/// re-mints the collected path while the sweep sits between the two, so its
+/// lock section has completed — marker claimed and flock-held — with the
+/// runtime dir not yet rebuilt, the corner where only the marker can spare
+/// the item (a rebuilt dir would spare it on the stat alone). The decision is
+/// evaluated on the inputs the macOS executor samples immediately before the
+/// delete: a live marker must outrank dir absence, or the delete lands after
+/// the re-minted acquire's seed and destroys the item it just wrote.
+#[test]
+fn gc_spares_the_keychain_item_a_reminted_acquire_claims_mid_sweep() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let profiles = tmp.path().join(".clauth").join("profiles");
+
+        // A crashed pair: dead marker, tree present — what the sweep collects.
+        let runtime = profiles.join("crashed").join("runtime-4242-0");
+        let sessions = profiles.join("crashed").join("sessions-4242-0");
+        fs::create_dir_all(&runtime).expect("mkdir runtime");
+        fs::create_dir_all(&sessions).expect("mkdir sessions");
+        fs::write(runtime.join(".claude.json"), b"{}").expect("seed runtime");
+        fs::write(sessions.join("4242-0"), b"").expect("dead marker");
+
+        let service = crate::claude::namespaced_keychain_service(
+            &runtime.canonicalize().expect("canonicalize"),
+        );
+
+        // The re-mint, landing between the collection and the delete: the
+        // acquire's lock section leaves a flock-held marker (the claim) and,
+        // at this corner, no runtime dir. The fd is held past the sweep, the
+        // way a live session's acquire holds it.
+        let mut reminted: Option<std::fs::File> = None;
+        gc_one_pair_synced(&runtime, &sessions, || {
+            fs::create_dir_all(&sessions).expect("re-mint the sessions dir");
+            let held = open_pid_file(&sessions.join("4242-0")).expect("open re-minted marker");
+            held.lock().expect("flock-hold the re-minted marker");
+            reminted = Some(held);
+        })
+        .expect("gc one pair");
+
+        // The collection half ran before the interleave posed the re-mint.
+        assert!(
+            !runtime.exists(),
+            "the tree was collected ahead of the re-mint the seam poses"
+        );
+        // The decision the macOS executor takes on the re-checked world,
+        // sampled the way it samples under its re-take of the state lock:
+        // spared — a live marker outranks dir absence.
+        assert_eq!(
+            orphaned_keychain_item(
+                Some(service.as_str()),
+                prune_stale_sessions(&sessions),
+                runtime.symlink_metadata().is_ok()
+            ),
+            None,
+            "a marker a re-minted acquire flock-holds outranks dir absence: \
+             the item it is about to seed stays"
+        );
+        drop(reminted);
+    });
 }
 
 /// The Plugin tab's boot probe must not collect trees: its 3 s kill budget

@@ -1238,6 +1238,20 @@ fn rescue_tombstone(tombstone: &Path) {
 /// tombstone under the lock and rescued outside it, so the flock is never held
 /// across a tree-sized copy; a shared tree is removed under the lock as before.
 fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
+    gc_one_pair_synced(runtime, sessions, || {})
+}
+
+/// [`gc_one_pair`] with the re-mint interleave point exposed for the pin:
+/// `remint_interleave` runs after the collection's state-flock closure and
+/// before the Keychain item's delete — the window in which a concurrently
+/// starting session re-mints this same path (its whole lock section: marker
+/// claim, tree rebuild, then the post-lock item seed) while the sweep sits
+/// between its collection and its delete. A no-op in production.
+fn gc_one_pair_synced(
+    runtime: &Path,
+    sessions: &Path,
+    remint_interleave: impl FnOnce(),
+) -> Result<()> {
     let isolated = runtime
         .file_name()
         .and_then(|n| n.to_str())
@@ -1253,9 +1267,10 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
 
     // macOS: the tree's namespaced Keychain service, derived while the dir
     // still exists — the derivation canonicalizes it, so it cannot run once
-    // the tree is removed. Collected after the closure below, where a
+    // the tree is removed. Collected after the closures below, where a
     // `security` subprocess is legal; `orphaned_keychain_item` documents why
-    // the dir check sits on the far side of the closure too.
+    // its inputs are re-sampled under a second closure immediately before
+    // the delete.
     #[cfg(target_os = "macos")]
     let item_service = tree_keychain_service(runtime);
 
@@ -1296,13 +1311,24 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
         Ok(false)
     })?;
 
+    remint_interleave();
+
     // macOS: collect the tree's Keychain item, before the rescue — the delete
     // is one subprocess, the rescue is a tree-sized copy, and a crash during
-    // the copy must not strand an item whose dir is already gone.
+    // the copy must not strand an item whose dir is already gone. The pair is
+    // re-checked under a fresh state-lock hold taken immediately before the
+    // delete: between the collection above and this point a concurrently
+    // starting session can re-mint this same path, and the delete must key on
+    // the world it runs in. Lock taken, inputs sampled, lock dropped, THEN
+    // the delete — the subprocess still never spans the flock.
     #[cfg(target_os = "macos")]
-    if let Some(service) =
-        orphaned_keychain_item(item_service.as_deref(), runtime.symlink_metadata().is_ok())
-    {
+    if let Some(service) = with_state_lock(|_held| {
+        Ok::<_, anyhow::Error>(orphaned_keychain_item(
+            item_service.as_deref(),
+            prune_stale_sessions(sessions),
+            runtime.symlink_metadata().is_ok(),
+        ))
+    })? {
         collect_orphaned_keychain_item(service);
     }
 
@@ -1313,33 +1339,44 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
 }
 
 /// The namespaced Keychain item a collected runtime tree leaves behind, if
-/// any: the tree's derived service when the dir that explains the item is
-/// GONE, `None` when the dir survives or no service was derived. PURE (the
-/// `session_seed_arm` split) so the keep/delete rule is pinned on every
-/// platform; the `security` delete it feeds is macOS-only and unreachable
-/// under `cfg(test)`, where `keychain::enabled()` is false.
+/// any: the tree's derived service when nothing live explains the item — no
+/// flock-held marker left in the paired sessions dir, and the dir that
+/// explains the item GONE — `None` otherwise. PURE (the `session_seed_arm`
+/// split) so the keep/delete rule is pinned on every platform; the `security`
+/// delete it feeds is macOS-only and unreachable under `cfg(test)`, where
+/// `keychain::enabled()` is false.
 ///
 /// The rows, and why each keeps or collects:
-/// - a LIVE pair — the lock's liveness re-check spared it — keeps its dir, so
-///   its item stays: a live session's Claude Code reads that item (CC resolves
-///   the Keychain before any file, namespaced per `CLAUDE_CONFIG_DIR`).
+/// - a LIVE pair — the lock's liveness re-check spared it — keeps its dir and
+///   holds its marker, so its item stays: a live session's Claude Code reads
+///   that item (CC resolves the Keychain before any file, namespaced per
+///   `CLAUDE_CONFIG_DIR`).
 /// - a pair the sweep could not collect (a failed tombstone rename, an
 ///   unreadable tree) keeps its dir, and its item with it.
 /// - a collected pair (the shared tree removed, the isolated tree renamed to
-///   its rescue tombstone) has no dir: its item is orphaned — only that dir's
-///   hash resolved it — and is collected.
+///   its rescue tombstone) has no dir and no live marker: its item is
+///   orphaned — only that dir's hash resolved it — and is collected.
 /// - a runtime dir that never existed (the orphaned-marker arm; a crash
 ///   between minting the marker dir and building the tree) derived no service,
 ///   and no tree ever hosted a session seed to write an item.
+/// - a RE-MINTED pair — a concurrently starting session re-claimed the path
+///   between the collection and the delete (#82) — holds its marker again, so
+///   its item stays even before its dir is rebuilt: a live marker outranks
+///   dir existence. An unreadable sessions dir (`None`) reads as live for the
+///   same reason every destructive level here folds an unknown into sparing.
 ///
-/// The dir check runs AFTER the state-flock closure on purpose: the delete is
-/// a subprocess and must never span the flock, and between the collection and
-/// the delete a session can re-mint the same sid (acquire wipes a stale tree
-/// at its own path and rebuilds), so the check is against the world the
-/// delete will run in — a dir that reappeared reads as live and keeps its
-/// item. The residual window (a re-minted session's whole acquire plus item
-/// seed landing between this check and the delete) is the same post-lock
-/// subprocess window the swap's keychain legs accept.
+/// Both inputs are sampled in a fresh state-lock hold taken immediately
+/// before the delete, never inside the collection's: the delete is a
+/// subprocess and must never span the flock, so the lock is taken, the inputs
+/// read, and dropped, and only then does the delete run — serialized against
+/// an acquire's own lock section, which claims the marker and rebuilds the
+/// tree as one step. The residual window is the narrowed tail only: a queued
+/// acquire completing its lock section and seeding the item anywhere between
+/// this re-check passing and the delete completing — whether the delete is
+/// already in flight or the sweep has merely not reached the spawn yet.
+/// Accepted here; the airtight shape — a durable in-flight-delete record the
+/// seed consults before writing — is a separate backlog item, not this
+/// narrowing's to grow into.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -1347,8 +1384,12 @@ fn gc_one_pair(runtime: &Path, sessions: &Path) -> Result<()> {
         reason = "the only consumer is the macOS stale-runtime GC's Keychain collection; the decision is pinned on every platform"
     )
 )]
-fn orphaned_keychain_item(service: Option<&str>, dir_exists: bool) -> Option<&str> {
-    service.filter(|_| !dir_exists)
+fn orphaned_keychain_item(
+    service: Option<&str>,
+    live_markers: Option<usize>,
+    dir_exists: bool,
+) -> Option<&str> {
+    service.filter(|_| live_markers == Some(0) && !dir_exists)
 }
 
 /// macOS: the namespaced Keychain service for a runtime dir the GC is walking,
@@ -2420,9 +2461,10 @@ impl SessionSwap {
 
     /// The swap leg of this session's own watchdog tick: execute a move when the
     /// daemon has named a member that differs from the one the link resolves to.
-    /// The daemon writes `intended_member` only for a row whose `follows_chain` is
-    /// set, which `clauth start --with-fallback` is the only thing that requests, so
-    /// a plain `start` session polls and finds nothing to do.
+    /// The daemon writes `intended_member` only for a row whose `follows_chain`
+    /// is set (`clauth start --with-fallback` requests that), and `clauth
+    /// sessions swap` writes one for any live claude row, so a plain `start`
+    /// session no writer has targeted polls and finds nothing to do.
     fn poll(&self) {
         let Some(intended) = crate::live_sessions::get(self.session.as_str())
             .and_then(|row| row.intended_member)
