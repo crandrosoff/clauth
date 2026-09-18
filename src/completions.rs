@@ -34,7 +34,11 @@ const BASH_TEMPLATE: &str = r#"_clauth() {
     elif [ "$COMP_CWORD" -eq 2 ] && [ "$prev" = "which" ]; then
         COMPREPLY=( $(compgen -W "--json" -- "${cur}") )
     elif [ "$COMP_CWORD" -eq 2 ] && [ "$prev" = "sessions" ]; then
-        COMPREPLY=( $(compgen -W "--json --tokens" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "swap --json --tokens" -- "${cur}") )
+    elif [ "$COMP_CWORD" -eq 4 ] && [ "${COMP_WORDS[1]}" = "sessions" ] && [ "${COMP_WORDS[2]}" = "swap" ]; then
+        local profiles
+        profiles=$(clauth __complete 2>/dev/null)
+        COMPREPLY=( $(compgen -W "${profiles}" -- "${cur}") )
     elif [ "$COMP_CWORD" -eq 2 ] && [ "$prev" = "jobs" ]; then
         COMPREPLY=( $(compgen -W "--json" -- "${cur}") )
     elif [ "$COMP_CWORD" -eq 2 ] && [ "$prev" = "devices" ]; then
@@ -139,8 +143,13 @@ _clauth() {
     elif (( CURRENT == 3 )) && [[ "${words[2]}" == which ]]; then
         _values 'flag' '--json[emit JSON instead of plain name]'
     elif (( CURRENT == 3 )) && [[ "${words[2]}" == sessions ]]; then
+        _values 'subcommand' 'swap[point a running session at another profile]'
         _values 'flag' '--json[emit the stable machine-readable array]' \
             '--tokens[add token totals + cost; reads every transcript in full]'
+    elif (( CURRENT == 5 )) && [[ "${words[2]}" == sessions && "${words[3]}" == swap ]]; then
+        local -a profiles
+        profiles=("${(@f)$(clauth __complete 2>/dev/null)}")
+        _describe 'profile' profiles
     elif (( CURRENT == 3 )) && [[ "${words[2]}" == jobs ]]; then
         _values 'flag' '--json[emit the stable machine-readable array]'
     elif (( CURRENT >= 3 )) && [[ "${words[2]}" == resume ]]; then
@@ -216,6 +225,8 @@ complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --auto -d "Pick 
 complete -c clauth -f -n "__fish_seen_subcommand_from start" -a --explain -d "Print the account that would be launched, without launching"
 complete -c clauth -f -n "__fish_seen_subcommand_from which" -a --json -d "Emit JSON"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --json -d "Emit the stable machine-readable array"
+complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a swap -d "Point a running session at another profile"
+complete -c clauth -f -n "__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from swap" -a "(__clauth_profiles)" -d Profile
 complete -c clauth -f -n "__fish_seen_subcommand_from jobs" -a --json -d "Emit the stable machine-readable array"
 complete -c clauth -f -n "__fish_seen_subcommand_from sessions" -a --tokens -d "Add token totals + cost; reads every transcript in full"
 complete -c clauth -f -n "__fish_seen_subcommand_from resume" -a --profile -d "Resume under this profile instead of prompting"

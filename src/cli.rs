@@ -213,6 +213,7 @@ pub(crate) enum Command {
     /// List Claude Code sessions as a table
     ///
     /// Exits 0 on success, 2 on a usage error, 1 on any other failure.
+    #[command(args_conflicts_with_subcommands = true)]
     Sessions {
         /// Emit a stable newest-first JSON array instead of the table. The field
         /// set is fixed; `tokens` and `cost` are null without `--tokens`.
@@ -222,6 +223,8 @@ pub(crate) enum Command {
         /// full, so a large store takes a while; omitted, both stay blank.
         #[arg(long)]
         tokens: bool,
+        #[command(subcommand)]
+        cmd: Option<SessionsCommand>,
     },
 
     /// Resume a session under a chosen profile
@@ -693,5 +696,29 @@ pub(crate) enum DevicesCommand {
         /// Device to grant. Must be a control device; revoke and re-pair with
         /// --control to change a view device.
         name: String,
+    },
+}
+
+/// `clauth sessions <cmd>`: the verbs beyond the listing.
+#[derive(Subcommand, Debug)]
+pub(crate) enum SessionsCommand {
+    /// Point a running session at another profile
+    ///
+    /// Records the profile as the session's intended member — the same
+    /// registry write the fallback chain's decider makes — and installs
+    /// nothing itself: the session's own executor performs the swap, or
+    /// refuses it with a logged reason (a member whose endpoint, key, or
+    /// models differ from the launch profile's is refused, exactly as the
+    /// chain's own moves are). The session picks the new account up at its
+    /// next request, never before it. For a session started with
+    /// --with-fallback, the chain's decider can supersede a manual intent on
+    /// its next tick. The id is the `<pid>-<seq>` of a live
+    /// `clauth start` session, one row per session under
+    /// ~/.clauth/live_sessions/.
+    Swap {
+        /// Live session id: `<pid>-<seq>`.
+        sid: String,
+        /// Profile to point the session at.
+        profile: String,
     },
 }
