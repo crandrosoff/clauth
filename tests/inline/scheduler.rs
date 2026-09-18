@@ -11216,3 +11216,211 @@ fn apply_codex_switch_walks_at_the_codex_weekly_line() {
         "over the codex line: hops, whatever the claude line says"
     );
 }
+
+// ── issue #83: a dead usage-reading channel frees the walk ────────────────────
+//
+// A persistent `/usage` 429 never inserts windows (a 429 outcome writes at most
+// the plan-only cold fill), so a deep-stuck `RateLimited` member's store entry
+// sits windowless — and the walk's exhaustion gate reads windowless as
+// never-exhausted. That held a pinned `--with-fallback` session on the member
+// forever while a clear sibling idled; the `reading_dead` bypass (the fourth
+// exhaustion-gate bypass, beside `active_broken`/`active_kick_rejected`/
+// `active_canceled`) releases it. The pins here hold its boundary: the dead
+// channel (deep streak + windowless) moves the session; everything shallower
+// or better-windowed stays.
+
+/// The wedge's frozen inputs: `a` stuck `RateLimited` in the status store at
+/// `streak` depth with the given store entry (`None` = no entry at all), `b` a
+/// viable Fresh sibling with live headroom. The session sits on `a`.
+fn issue83_inputs(
+    a: Option<crate::usage::UsageInfo>,
+    streak: u32,
+) -> (UsageStore, super::StatusStore, super::PollStreaks) {
+    use crate::usage::{UsageInfo, UsageWindow, epoch_secs_to_iso, now_epoch_secs};
+    let mut entries = Vec::new();
+    if let Some(info) = a {
+        entries.push(("a".to_string(), info));
+    }
+    entries.push((
+        "b".to_string(),
+        UsageInfo {
+            five_hour: Some(UsageWindow {
+                utilization: 10.0,
+                resets_at: Some(epoch_secs_to_iso(now_epoch_secs() + 3600)),
+            }),
+            ..Default::default()
+        },
+    ));
+    let store: UsageStore = Arc::new(RankedMutex::new(entries.into_iter().collect()));
+    let status: super::StatusStore = Arc::new(RankedMutex::new(HashMap::from([
+        ("a".to_string(), super::FetchStatus::RateLimited),
+        ("b".to_string(), super::FetchStatus::Fresh),
+    ])));
+    let streaks: super::PollStreaks = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        super::StreakCounts {
+            rate_limit: streak,
+            refresh_fail: 0,
+        },
+    )])));
+    (store, status, streaks)
+}
+
+/// THE FLIP (issue #83): the reporter's exact frozen state — session on `a`,
+/// `a` deep-stuck `RateLimited` with a plan-only (windowless) entry, sibling
+/// `b` clear and Fresh. `(None, None)` before the bypass; the fix points the
+/// session at `b`.
+#[test]
+fn a_reading_dead_member_releases_a_pinned_session() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let _marker = register_live_row(&session_row("4242-0", "a"));
+    let (store, status, streaks) = issue83_inputs(
+        Some(crate::usage::UsageInfo {
+            plan: Some(crate::usage::PlanInfo::default()),
+            ..Default::default()
+        }),
+        super::ACTIVE_CAP_MAX_STREAK + 1,
+    );
+
+    scan_sessions_with_streaks(
+        &session_config(&["a", "b"], Some("a")),
+        &store,
+        &status,
+        &streaks,
+    );
+
+    assert_eq!(
+        decision_of("4242-0"),
+        (Some("b".to_string()), Some(1)),
+        "issue #83: a member whose reading channel is dead (deep-stuck RateLimited, \
+         no windows) must release a pinned session to a clear sibling"
+    );
+}
+
+/// The shallow bound: a windowless member whose streak has NOT passed the
+/// active cap's depth is a transient storm, not a dead channel — the cap's
+/// frequent retries may still return a Fresh read, so the bypass stays closed
+/// and the walk holds the session. Keys on `is_stuck_streak`'s bound:
+/// `ACTIVE_CAP_MAX_STREAK` itself is shallow.
+#[test]
+fn a_windowless_member_with_a_shallow_streak_is_not_reading_dead() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let _marker = register_live_row(&session_row("4242-0", "a"));
+    let (store, status, streaks) = issue83_inputs(
+        Some(crate::usage::UsageInfo::default()),
+        super::ACTIVE_CAP_MAX_STREAK,
+    );
+
+    scan_sessions_with_streaks(
+        &session_config(&["a", "b"], Some("a")),
+        &store,
+        &status,
+        &streaks,
+    );
+
+    assert_eq!(
+        decision_of("4242-0"),
+        (None, None),
+        "the bypass needs the dead channel, not just a missing window — a shallow \
+         streak may still drain and return a Fresh read"
+    );
+}
+
+/// A LAPSED window never qualifies: the last Fresh read is a trustworthy
+/// verdict the existing rules already weigh (RLS-1 case 3 — a reset account
+/// must not be walked away from), so only a windowless-or-absent entry marks
+/// the channel dead.
+#[test]
+fn a_lapsed_window_is_not_reading_dead() {
+    use crate::usage::{UsageInfo, UsageWindow, epoch_secs_to_iso, now_epoch_secs};
+    let _home = crate::testutil::HomeSandbox::new();
+    let _marker = register_live_row(&session_row("4242-0", "a"));
+    let (store, status, streaks) = issue83_inputs(
+        Some(UsageInfo {
+            five_hour: Some(UsageWindow {
+                utilization: 100.0,
+                resets_at: Some(epoch_secs_to_iso(now_epoch_secs() - 3600)),
+            }),
+            ..Default::default()
+        }),
+        super::ACTIVE_CAP_MAX_STREAK + 1,
+    );
+
+    scan_sessions_with_streaks(
+        &session_config(&["a", "b"], Some("a")),
+        &store,
+        &status,
+        &streaks,
+    );
+
+    assert_eq!(
+        decision_of("4242-0"),
+        (None, None),
+        "a stuck member whose maxed window has since lapsed reads as regained \
+         headroom — untouched by the dead-reading bypass"
+    );
+}
+
+/// A HEADROOM window never qualifies either — same rule, opposite side: the
+/// live idle window is the exhaustion gate's own evidence, and it says stay.
+#[test]
+fn a_headroom_window_is_not_reading_dead() {
+    use crate::usage::{UsageInfo, UsageWindow, epoch_secs_to_iso, now_epoch_secs};
+    let _home = crate::testutil::HomeSandbox::new();
+    let _marker = register_live_row(&session_row("4242-0", "a"));
+    let (store, status, streaks) = issue83_inputs(
+        Some(UsageInfo {
+            five_hour: Some(UsageWindow {
+                utilization: 10.0,
+                resets_at: Some(epoch_secs_to_iso(now_epoch_secs() + 3600)),
+            }),
+            ..Default::default()
+        }),
+        super::ACTIVE_CAP_MAX_STREAK + 1,
+    );
+
+    scan_sessions_with_streaks(
+        &session_config(&["a", "b"], Some("a")),
+        &store,
+        &status,
+        &streaks,
+    );
+
+    assert_eq!(
+        decision_of("4242-0"),
+        (None, None),
+        "a stuck member holding live headroom stays put — the throttle artifact pin"
+    );
+}
+
+/// The daemon's global auto-switch twin — and the ABSENT-entry arm of the fill
+/// in one: same frozen state with `a` the GLOBAL active and no store entry at
+/// all (the 429 arrived before any entry existed). Both legs share
+/// `next_auto_switch_target`, so the one bypass frees both.
+#[test]
+fn scan_auto_switch_leaves_a_reading_dead_global_active() {
+    use super::{PendingSwitch, PendingSwitchOff, scan_auto_switch};
+
+    let _home = crate::testutil::HomeSandbox::new();
+    let (store, status, streaks) = issue83_inputs(None, super::ACTIVE_CAP_MAX_STREAK + 1);
+    let activity: super::ActivityStore = Arc::new(RankedMutex::new(HashMap::new()));
+    let pending: PendingSwitch = Arc::new(RankedMutex::new(HashSet::new()));
+    let pending_off: PendingSwitchOff = Arc::new(RankedMutex::new(false));
+    scan_auto_switch(
+        &session_config(&["a", "b"], Some("a")),
+        &store,
+        &status,
+        &Arc::new(RankedMutex::new(HashMap::new())),
+        &streaks,
+        &Arc::new(RankedMutex::new(HashMap::new())),
+        &activity,
+        &pending,
+        &pending_off,
+    );
+    let queued: Vec<String> = pending.lock().unwrap().iter().cloned().collect();
+    assert_eq!(
+        queued,
+        vec!["b".to_string()],
+        "global twin: the dead-reading bypass must queue the switch the wedge held back"
+    );
+}

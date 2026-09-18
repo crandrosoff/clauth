@@ -1555,6 +1555,87 @@ fn auto_switch_never_targets_a_kick_rejected_member() {
     assert_eq!(next_auto_switch_target(&snap, &store), None);
 }
 
+// A dead-reading ACTIVE (issue #83: deep-stuck `RateLimited` with a windowless
+// or absent store entry — the channel that would prove exhaustion can never
+// answer): the walk bypasses the exhaustion gate exactly like
+// `broken`/`kick_rejected`/`canceled` and leaves for the healthy sibling —
+// windowless reads as never-exhausted, which held the chain on the member
+// forever while the sibling idled.
+#[test]
+fn auto_switch_reading_dead_active_walks_away_despite_no_windows() {
+    let config = config_with_chain(
+        vec![
+            profile_with_util("a", Some(95.0), None),
+            profile_with_util("b", Some(95.0), None),
+        ],
+        "a",
+    );
+    let mut snap = snapshot_chain(&config).expect("snapshot");
+    snap.reading_dead = vec![ProfileName::from("a")];
+    let store = store_with_infos(vec![
+        // The dead channel's frozen read: the plan-only cold fill, no windows.
+        ("a", usage_info(None)),
+        ("b", usage_info(Some(window(10.0, Some(live_reset()))))),
+    ]);
+    assert_eq!(
+        next_auto_switch_target(&snap, &store),
+        Some(SwitchAction::To("b".into())),
+    );
+}
+
+// The bypass moves the chain OFF a dead-reading active but never signs it out:
+// `Off` keys on REAL exhaustion, which a windowless entry cannot prove — same
+// principle as AUTH-4's broken-but-unspent active. With the halt flag armed and
+// no viable sibling, the walk stays put rather than going `Off`.
+#[test]
+fn a_reading_dead_active_is_never_switched_off() {
+    let mut config = config_with_chain(
+        vec![
+            profile_with_util("a", Some(95.0), None),
+            profile_with_util("b", Some(95.0), None),
+        ],
+        "a",
+    );
+    config.state.switch_off_when_spent = true;
+    let mut snap = snapshot_chain(&config).expect("snapshot");
+    snap.reading_dead = vec![ProfileName::from("a")];
+    let store = store_with_infos(vec![
+        ("a", usage_info(None)),
+        ("b", usage_info(Some(window(100.0, Some(live_reset()))))),
+    ]);
+    assert_eq!(
+        next_auto_switch_target(&snap, &store),
+        None,
+        "a dead-reading active is unknowable, not spent — no sign-out over a dead channel"
+    );
+}
+
+// `reading_dead` is deliberately NOT a candidate-side exclusion, unlike
+// `broken`/`kick_rejected`: a windowless member is the walk's only-safe
+// headroom guess (it may never have been polled), and the dead channel says
+// nothing about the account behind it. An exhausted active may still move
+// ONTO one.
+#[test]
+fn a_reading_dead_member_remains_a_walk_target() {
+    let config = config_with_chain(
+        vec![
+            profile_with_util("a", Some(95.0), None),
+            profile_with_util("b", Some(95.0), None),
+        ],
+        "a",
+    );
+    let mut snap = snapshot_chain(&config).expect("snapshot");
+    snap.reading_dead = vec![ProfileName::from("b")];
+    let store = store_with_infos(vec![
+        ("a", usage_info(Some(window(100.0, Some(live_reset()))))),
+        ("b", usage_info(None)),
+    ]);
+    assert_eq!(
+        next_auto_switch_target(&snap, &store),
+        Some(SwitchAction::To("b".into())),
+    );
+}
+
 // Fresh-PREFERENCE walk, asserted on both twins in each direction. The UI twin
 // reads `Profile.fetch_status`, the snapshot twin reads `ChainSnapshot::fresh`
 // (filled by the scheduler's scan from the same `StatusStore` the ACTIVE gate
@@ -4207,6 +4288,7 @@ fn snapshot_for_lock_consolidation(spend_budget: bool) -> ChainSnapshot {
         spend_budget,
         switch_off_when_budget_spent: false,
         kick_rejected: vec![],
+        reading_dead: vec![],
         fresh: vec![],
     }
 }

@@ -942,6 +942,21 @@ pub(crate) struct ChainSnapshot {
     /// even with idle-looking usage, so it is walked around like `broken`, and
     /// a rejected ACTIVE bypasses the exhaustion gate the same way.
     pub(crate) kick_rejected: Vec<ProfileName>,
+    /// Members whose usage-reading channel is DEAD: deep-slot stuck
+    /// `RateLimited` (the streak that already opens the scan bypass
+    /// `reading_is_actionable`) with a windowless or absent store entry, so
+    /// the live window this walk's exhaustion gate needs as evidence can
+    /// never arrive (issue #83: a persistent `/usage` 429 writes no windows).
+    /// Not config state — [`snapshot_chain`] leaves it empty and the
+    /// scheduler's scans fill it from the status/streak/store triple (like
+    /// `kick_rejected`). A dead-reading ACTIVE bypasses the exhaustion gate
+    /// like `broken`/`kick_rejected`/`canceled` — windowless reads as
+    /// never-exhausted, which would hold the walk on the member forever.
+    /// Deliberately NOT a member holding any window at all: a lapsed or
+    /// headroom window is a trustworthy last read the existing rules already
+    /// judge (RLS-1). The codex twin stays empty — its usage leg is passive
+    /// polling with no stuck-RateLimited concept.
+    pub(crate) reading_dead: Vec<ProfileName>,
     /// Members whose last store read was live (`FetchStatus::Fresh`) — the same
     /// freshness `decision_fresh` gates the ACTIVE on. Not config state:
     /// [`snapshot_chain`] leaves it empty and the scheduler's scan fills it from
@@ -1026,6 +1041,7 @@ pub(crate) fn snapshot_codex_chain(
         spend_budget: false,
         switch_off_when_budget_spent: false,
         kick_rejected,
+        reading_dead: Vec::new(),
         fresh: Vec::new(),
     })
 }
@@ -1153,6 +1169,7 @@ fn build_chain_snapshot(
         spend_budget: config.state.spend_budget_switching,
         switch_off_when_budget_spent: config.state.switch_off_when_budget_spent,
         kick_rejected: Vec::new(),
+        reading_dead: Vec::new(),
         fresh: Vec::new(),
     }
 }
@@ -1730,6 +1747,17 @@ fn next_auto_switch_target_with_usage(
     // not a snapshot flag — unlike `broken`/`kick_rejected` it needs no separate
     // channel.
     let active_canceled = is_canceled_from_usage(&active.name, usage);
+    // A dead-reading active is the family's fourth member: its usage-reading
+    // channel is dead (deep-stuck `RateLimited`, windowless or absent store
+    // entry), so the live window this gate needs as evidence can never
+    // arrive — windowless reads as never-exhausted, which held the walk on
+    // the member forever while a viable sibling idled (issue #83). Unlike
+    // the neighbors the account itself may be fine; what is dead is the
+    // CHANNEL, and only a deep streak plus no window at all qualifies — a
+    // lapsed or headroom window keeps the walk's own judgment, since the
+    // last Fresh read is a trustworthy verdict the existing rules already
+    // weigh.
+    let active_reading_dead = snapshot.reading_dead.iter().any(|n| n == &active.name);
     let active_exhausted = is_exhausted_active_from_usage(
         active,
         snapshot.burn_aware,
@@ -1760,7 +1788,12 @@ fn next_auto_switch_target_with_usage(
         !is_exhausted_from_usage(m, usage, m.weekly_line) && !scoped_blocked_from_usage(m, usage)
     };
 
-    if !active_broken && !active_kick_rejected && !active_canceled && !active_exhausted {
+    if !active_broken
+        && !active_kick_rejected
+        && !active_canceled
+        && !active_reading_dead
+        && !active_exhausted
+    {
         // Scoped active trigger: a per-model weekly line crossed on an
         // otherwise-healthy active (its `check_scoped` gate on) hops ONLY
         // when a clear member exists. When every sibling is equally blocked

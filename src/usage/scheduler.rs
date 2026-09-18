@@ -4030,6 +4030,53 @@ pub(crate) fn is_stuck_streak(streak: u32) -> bool {
     streak > ACTIVE_CAP_MAX_STREAK
 }
 
+/// Members whose usage-reading channel is dead: deep-slot stuck `RateLimited`
+/// ([`is_stuck_rate_limited`]) whose usage-store entry carries no 5h window at
+/// all — windowless or absent, the shape a persistent `/usage` 429 leaves (a
+/// 429 outcome never inserts windows; the plan-only cold fill records at most
+/// the tier). Filled by both chain-driving scans beside
+/// `kick_rejected`/`fresh` and consulted by the walk as the fourth
+/// exhaustion-gate bypass: a dead-reading ACTIVE's exhaustion evidence can
+/// never arrive, so the gate must not hold the chain on it (issue #83). A
+/// member holding ANY window — lapsed or headroom — never qualifies: that
+/// last Fresh read is a trustworthy verdict the existing rules already judge
+/// (RLS-1), and only the channel's death, not a missing reading, opens the
+/// bypass.
+fn reading_dead_names(
+    members: &[crate::fallback::ChainMember],
+    status: &StatusStore,
+    streaks: &PollStreaks,
+    store: &UsageStore,
+) -> Vec<ProfileName> {
+    // One store lock window for the windowless checks — the same map the walk
+    // clones a moment later — released before the status/streak reads below,
+    // so no two leaf locks are ever held at once.
+    let windowless: Vec<&crate::fallback::ChainMember> = {
+        let Ok(guard) = store.lock() else {
+            return Vec::new();
+        };
+        members
+            .iter()
+            .filter(|m| {
+                guard
+                    .get(m.name.as_str())
+                    .is_none_or(|i| i.five_hour.is_none())
+            })
+            .collect()
+    };
+    windowless
+        .into_iter()
+        .filter(|m| {
+            let reading = status
+                .lock()
+                .ok()
+                .and_then(|s| s.get(m.name.as_str()).copied());
+            reading.is_some_and(|s| is_stuck_rate_limited(s, rate_limit_streak(streaks, &m.name)))
+        })
+        .map(|m| m.name.clone())
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_auto_switch(
     config: &crate::profile::ConfigHandle,
@@ -4074,6 +4121,11 @@ fn scan_auto_switch(
     // switch-grade kick-rejected members and a rejected ACTIVE bypasses the
     // exhaustion gate (its usage reads idle while inference is refused).
     snapshot.kick_rejected = kick_rejected_names(kick_blocks, now_epoch_secs());
+    // The dead-reading channel is the same kind of non-config state (issue
+    // #83): a deep-stuck `RateLimited` member with no window at all can never
+    // produce the live window the walk's exhaustion gate needs, so the scan
+    // hands the walk the bypass flag instead.
+    snapshot.reading_dead = reading_dead_names(&snapshot.chain, status, streaks, store);
     // Same reason: freshness lives in the status stores, not in config, and
     // `Profile.fetch_status` (what the UI twin reads) is written only by the UI
     // thread. Unions BOTH stores (OAuth + third-party) via `decision_fresh_any`,
@@ -4218,8 +4270,10 @@ fn scan_session_switches(
     } in pending
     {
         // Neither of these is config state, so `snapshot_session_chain` cannot fill
-        // them — same split `scan_auto_switch` works to.
+        // them — same split `scan_auto_switch` works to. `reading_dead` follows the
+        // same split again (issue #83's dead-reading bypass).
         snapshot.kick_rejected = kick_rejected.clone();
+        snapshot.reading_dead = reading_dead_names(&snapshot.chain, status, streaks, store);
         snapshot.fresh = snapshot
             .chain
             .iter()
