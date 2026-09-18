@@ -4297,6 +4297,64 @@ attributes:
     );
 }
 
+/// The `security` exit-code classification, pinned by exact variant: 36 is
+/// the one transient this codebase has measured (a locked keychain over a
+/// context that cannot show a prompt), 44 the read leg's existing "absent"
+/// tolerance, and everything else — 51, the KC-8 write-suppression fixture,
+/// included — stays unclassified, because transient-or-not is unmeasured for
+/// it. PURE and cross-platform: the macOS module that shells out consumes it,
+/// the same split every keychain decision here takes.
+#[test]
+fn classify_security_exit_names_the_measured_codes() {
+    assert_eq!(
+        classify_security_exit(36),
+        SecurityExitClass::InteractionNotAllowed
+    );
+    assert_eq!(classify_security_exit(44), SecurityExitClass::ItemNotFound);
+    assert_eq!(classify_security_exit(51), SecurityExitClass::Unclassified);
+    assert_eq!(classify_security_exit(0), SecurityExitClass::Unclassified);
+    assert_eq!(classify_security_exit(128), SecurityExitClass::Unclassified);
+}
+
+/// The locked-keychain cause is a HARDCODED literal keyed on the classified
+/// code, never the tool's stderr: the write arm must keep its suppression (a
+/// write's stderr can echo the value being written, GH #66), so the one code
+/// whose diagnostic lives in exactly those withheld bytes gets its cause
+/// named by the classification instead. No other class claims a cause —
+/// nothing is measured about them worth asserting.
+#[test]
+fn the_locked_keychain_cause_is_a_hardcoded_literal() {
+    assert_eq!(
+        SecurityExitClass::InteractionNotAllowed.cause(),
+        Some(
+            "the keychain is locked or cannot show a prompt (errSecInteractionNotAllowed); it \
+             clears once the keychain is unlocked — retry once it has"
+        )
+    );
+    assert_eq!(SecurityExitClass::ItemNotFound.cause(), None);
+    assert_eq!(SecurityExitClass::Unclassified.cause(), None);
+}
+
+/// The sign-out's failed-read branch deletes the item whole — its most
+/// destructive arm — and a locked keychain's read says nothing about the
+/// item's bytes, so it must not read as empty: that exact shape deleted a
+/// live login in the field (2026-09-12, an ssh session's exit 36 reaching the
+/// delete). Only the classified transient skips the delete; every other
+/// failed read keeps the documented degrade (delete, quarantining whatever
+/// bytes the read brought back).
+#[test]
+fn the_sign_out_skips_its_destructive_read_degrade_only_over_a_locked_keychain() {
+    assert!(!failed_read_degrades_to_delete(
+        SecurityExitClass::InteractionNotAllowed
+    ));
+    assert!(failed_read_degrades_to_delete(
+        SecurityExitClass::ItemNotFound
+    ));
+    assert!(failed_read_degrades_to_delete(
+        SecurityExitClass::Unclassified
+    ));
+}
+
 /// The settings reader the start walk's demand draws from: top-level `model`,
 /// the `fallbackModel` array (non-string entries skipped), then the subagent
 /// env key, in that order — absent file, a scalar `fallbackModel`, and

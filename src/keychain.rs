@@ -1179,28 +1179,79 @@ impl SecurityOp {
 /// fragment of the written value into exactly this builder (`unknown command
 /// "<tail>"`, observed in the field, GH #66), and this text rides event lines
 /// into `daemon.log` — so a write failure reports the exit code and the stderr
-/// byte COUNT, never the bytes.
+/// byte COUNT, never the bytes. The one exception is the classified
+/// locked-keychain transient (exit 36, `errSecInteractionNotAllowed`): its
+/// diagnostic lives in exactly those withheld bytes, so the classification
+/// names the cause as a HARDCODED literal keyed on the code
+/// ([`crate::claude::SecurityExitClass::cause`]) instead of embedding them.
 fn security_error(op: SecurityOp, output: &std::process::Output) -> anyhow::Error {
-    let code = output
-        .status
-        .code()
-        .map_or_else(|| "signal".to_string(), |c| c.to_string());
-    match op {
-        SecurityOp::Write => anyhow::anyhow!(
-            "Keychain {} failed (security exit {code}): its {}-byte stderr is not shown, because \
-             a write's stderr can echo the value being written",
-            op.as_str(),
-            output.stderr.len()
-        ),
+    let code = output.status.code();
+    let class = code.map_or(
+        crate::claude::SecurityExitClass::Unclassified,
+        crate::claude::classify_security_exit,
+    );
+    let rendered = code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+    let message = match op {
+        SecurityOp::Write => match class.cause() {
+            Some(cause) => format!(
+                "Keychain {} failed (security exit {rendered}): {cause}",
+                op.as_str()
+            ),
+            None => format!(
+                "Keychain {} failed (security exit {rendered}): its {}-byte stderr is not shown, \
+                 because a write's stderr can echo the value being written",
+                op.as_str(),
+                output.stderr.len()
+            ),
+        },
         SecurityOp::Read | SecurityOp::Delete | SecurityOp::Census => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::anyhow!(
-                "Keychain {} failed (security exit {code}): {}",
+            format!(
+                "Keychain {} failed (security exit {rendered}): {}",
                 op.as_str(),
                 stderr.trim()
             )
         }
+    };
+    anyhow::Error::new(SecurityFailure { code, message })
+}
+
+/// A failed `security` invocation as an error value. Its `Display` is exactly
+/// the message the event lines have always rendered ([`security_error`]'s
+/// wording, per arm), and it carries the exit code so a caller that ACTS on a
+/// failure can classify it ([`classified_exit`]) instead of parsing that text.
+/// The tool's stderr bytes stay out of the type: the write arm renders a count
+/// of them precisely because they can echo the written value, and carrying
+/// them here would put them one `{:?}` from an event line. Derived `Debug` is
+/// safe for the same reason — the fields are the code and the already-public
+/// message, never credential bytes (unlike [`UnparseableItem`]'s hand-written
+/// one).
+#[derive(Debug)]
+struct SecurityFailure {
+    code: Option<i32>,
+    message: String,
+}
+
+impl std::fmt::Display for SecurityFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
+}
+
+impl std::error::Error for SecurityFailure {}
+
+/// The classification of a failed `security` invocation's exit status, when
+/// the error carries one; `Unclassified` for every other error (a spawn
+/// failure, a deadline kill — neither reports an exit code). The one seam the
+/// sites that ACT on a failure consult, so the seed's retry and the sign-out's
+/// skip share `claude`'s single table instead of each re-deriving it.
+pub(crate) fn classified_exit(e: &anyhow::Error) -> crate::claude::SecurityExitClass {
+    e.downcast_ref::<SecurityFailure>()
+        .and_then(|failure| failure.code)
+        .map_or(
+            crate::claude::SecurityExitClass::Unclassified,
+            crate::claude::classify_security_exit,
+        )
 }
 
 /// Install `store`, the whole JSON object the file layer put in the live slot,
@@ -1357,7 +1408,7 @@ fn login_blob_is_ours(blob: Option<&Value>, ours: &[&str]) -> bool {
 /// `force_link_profile_credentials` and `clear_claude_credentials` reach it,
 /// never the guarded relink, so a path that never meant to change accounts
 /// cannot destroy a login clauth does not hold (`claude::keychain_mirror_source`).
-pub(crate) fn keychain_sign_out() -> Result<()> {
+pub(crate) fn keychain_sign_out() -> Result<SignOutOutcome> {
     sign_out_at(SERVICE, &account()?)
 }
 
@@ -1367,8 +1418,25 @@ pub(crate) fn keychain_sign_out() -> Result<()> {
 /// session's Claude Code resolves this item before any file, so a departed
 /// account's login left in it (an endpoint recapture's leftover under a
 /// shared or recycled runtime dir) would keep serving that account.
-pub(crate) fn keychain_sign_out_for_config_dir(config_dir: &Path) -> Result<()> {
+pub(crate) fn keychain_sign_out_for_config_dir(config_dir: &Path) -> Result<SignOutOutcome> {
     sign_out_at(&keychain_service_for_config_dir(config_dir)?, &account()?)
+}
+
+/// What a sign-out actually did, so a caller whose downstream state follows
+/// the ITEM — the swap executor's row repoint — can tell an item that is
+/// really signed out from one the locked keychain left untouched. The
+/// fail-closed direction there is to keep the row naming the outgoing member
+/// over a skip, exactly as a failed write does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignOutOutcome {
+    /// The item is signed out: stripped and rewritten, deleted, or already
+    /// absent/holding nothing account-scoped. Downstream state may follow.
+    SignedOut,
+    /// The sign-out was skipped over the classified locked-keychain
+    /// transient: the read said nothing about the item's bytes, so nothing
+    /// was touched and the item keeps serving whatever login it holds until
+    /// the operation is retried on an unlocked keychain.
+    SkippedLocked,
 }
 
 /// The sign-out core over an arbitrary `(service, account)`, parameterized the
@@ -1385,19 +1453,34 @@ pub(crate) fn keychain_sign_out_for_config_dir(config_dir: &Path) -> Result<()> 
 ///
 /// A read that fails deletes instead: whatever it could not preserve is worth
 /// less than the item continuing to authenticate an account the operator just
-/// switched away from. A read that failed WITH BYTES quarantines them first
-/// ([`quarantine_item_bytes`]) — the delete still removes the login, but the
-/// evidence survives it, and the event line says where.
-fn sign_out_at(service: &str, account: &str) -> Result<()> {
+/// switched away from. One exception, decided by
+/// [`crate::claude::failed_read_degrades_to_delete`]: a read refused by a
+/// locked keychain (the classified exit-36 transient) says nothing about the
+/// item's bytes, so it must not read as empty — that exact shape deleted a
+/// live login in the field (2026-09-12, an ssh session). The skip leaves the
+/// item untouched and says so on the event line; a re-run of the switch or
+/// clear signs out for real once the keychain unlocks, which is recoverable
+/// where the delete is not. A read that failed WITH BYTES quarantines them
+/// first ([`quarantine_item_bytes`]) — the delete still removes the login, but
+/// the evidence survives it, and the event line says where.
+fn sign_out_at(service: &str, account: &str) -> Result<SignOutOutcome> {
     // The two `None` cases part here rather than sharing an early return: an
     // absent item is already signed out and says nothing, while a read that
     // FAILED takes the most destructive branch there is, deleting the item
     // whole — now with its raw bytes quarantined first whenever the read
-    // brought any back (#66/#76).
+    // brought any back (#66/#76), and not at all over the classified
+    // locked-keychain transient.
     let mut blob = match read_blob_at(service, account) {
-        Ok(None) => return delete_at(service, account),
+        Ok(None) => return delete_at(service, account).map(|_| SignOutOutcome::SignedOut),
         Ok(Some(blob)) => blob,
         Err(e) => {
+            if !crate::claude::failed_read_degrades_to_delete(classified_exit(&e)) {
+                logline!(
+                    "clauth: could not sign Claude Code out of the macOS Keychain: {e:#}. The \
+                     item was left untouched; retry the operation once the keychain is unlocked"
+                );
+                return Ok(SignOutOutcome::SkippedLocked);
+            }
             match carried_raw(&e) {
                 Some(raw) => logline!(
                     "clauth: signed Claude Code out of the macOS Keychain by deleting the item: \
@@ -1412,7 +1495,7 @@ fn sign_out_at(service: &str, account: &str) -> Result<()> {
                      session"
                 ),
             }
-            return delete_at(service, account);
+            return delete_at(service, account).map(|_| SignOutOutcome::SignedOut);
         }
     };
     match crate::claude::strip_account_credentials(&mut blob) {
@@ -1421,16 +1504,16 @@ fn sign_out_at(service: &str, account: &str) -> Result<()> {
                 "clauth: signed Claude Code out of the macOS Keychain (the profile now active \
                  stores no Claude login). Run `clauth <name>` to put one back"
             );
-            delete_at(service, account)
+            delete_at(service, account).map(|_| SignOutOutcome::SignedOut)
         }
         crate::claude::SignOut::Write => {
             logline!(
                 "clauth: signed Claude Code out of the macOS Keychain (the profile now active \
                  stores no Claude login); its MCP server logins were kept"
             );
-            put_blob_at(service, account, &blob)
+            put_blob_at(service, account, &blob).map(|_| SignOutOutcome::SignedOut)
         }
-        crate::claude::SignOut::Nothing => Ok(()),
+        crate::claude::SignOut::Nothing => Ok(SignOutOutcome::SignedOut),
     }
 }
 

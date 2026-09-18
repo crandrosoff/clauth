@@ -9524,3 +9524,27 @@ fn swap_item_arm_selection() {
     // An unparseable read proceeds, not signs out.
     assert_eq!(swap_item_arm(None), SwapItemArm::Install);
 }
+
+/// The seed's failure disposition — pure, so the retry decision is pinned on
+/// every platform while the seed and its watchdog-tick retry only a Mac
+/// exercises. A locked keychain (the classified exit 36) is the one failure
+/// that arms the retry: it clears the moment the keychain unlocks, and the
+/// next credential tick re-runs the seed's carry-then-write. Everything else
+/// keeps the pre-fix loud degrade — exit 51 and the unclassified codes
+/// included, since nothing measures them transient.
+#[test]
+fn seed_degrade_disposition_retries_only_the_classified_transient() {
+    use crate::claude::SecurityExitClass;
+    assert_eq!(
+        seed_degrade_disposition(SecurityExitClass::InteractionNotAllowed),
+        SeedDegradeDisposition::RetryOnTick
+    );
+    assert_eq!(
+        seed_degrade_disposition(SecurityExitClass::ItemNotFound),
+        SeedDegradeDisposition::LogAndDegrade
+    );
+    assert_eq!(
+        seed_degrade_disposition(SecurityExitClass::Unclassified),
+        SeedDegradeDisposition::LogAndDegrade
+    );
+}

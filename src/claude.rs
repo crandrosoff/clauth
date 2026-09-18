@@ -1164,7 +1164,12 @@ fn keychain_mirror_source(path: &Path, absent: AbsentSource) -> Result<()> {
     // flock, so only a writer that is not clauth can win that race.
     if !path.exists() {
         return match absent {
-            AbsentSource::SignOut => crate::keychain::keychain_sign_out(),
+            // Both outcomes complete the switch: an actually-signed-out item,
+            // and the locked-keychain skip, whose event line `sign_out_at`
+            // already raised — the item keeps serving the departed account
+            // until the switch is re-run on an unlocked keychain, which is
+            // recoverable where the pre-fix blind delete was not.
+            AbsentSource::SignOut => crate::keychain::keychain_sign_out().map(|_| ()),
             AbsentSource::Leave => Ok(()),
         };
     }
@@ -1394,6 +1399,94 @@ pub(crate) fn census_orphan_keychain_services(dump: &str, live: &BTreeSet<String
         }
     }
     orphans.into_iter().collect()
+}
+
+/// What a `security(1)` exit status means, as far as this codebase has
+/// measured. The OSStatus rides the exit status as its low byte
+/// (`osstatus & 0xFF`: −25300 → 44, measured on the read leg; −25308 → 36;
+/// −25293 → 51), so the classification is over the code the tool reports.
+///
+/// PURE and cross-platform — pinned here, consumed by the macOS module that
+/// shells out (the `namespaced_keychain_service` split) — so every surface
+/// that renders or acts on a `security` failure shares one vocabulary instead
+/// of each re-deriving a cause from a bare exit number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecurityExitClass {
+    /// Exit 36, `errSecInteractionNotAllowed` (−25308): the keychain is locked
+    /// or the context cannot show an interaction prompt — over ssh a gated
+    /// operation is REFUSED, never prompted. The one TRANSIENT class: it clears
+    /// the moment the keychain is unlocked.
+    InteractionNotAllowed,
+    /// Exit 44, `errSecItemNotFound` (−25300): no item matches — the read
+    /// leg's existing "absent" tolerance, `EXIT_ITEM_NOT_FOUND` in the macOS
+    /// module.
+    ItemNotFound,
+    /// Every other code, 51 (`errSecAuthFailed`, the write-suppression
+    /// fixture) included: transient-or-not is unmeasured, so no cause is
+    /// claimed and no special handling is taken.
+    Unclassified,
+}
+
+/// See [`SecurityExitClass`]. PURE so the table is pinned on every platform.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS error builder; the table is pinned on every platform"
+    )
+)]
+pub(crate) fn classify_security_exit(code: i32) -> SecurityExitClass {
+    match code {
+        36 => SecurityExitClass::InteractionNotAllowed,
+        44 => SecurityExitClass::ItemNotFound,
+        _ => SecurityExitClass::Unclassified,
+    }
+}
+
+impl SecurityExitClass {
+    /// The cause line this class renders on a failure surface: a HARDCODED
+    /// literal keyed on the classified code, never the tool's stderr — the
+    /// write arm must keep its suppression (a write's stderr can echo the
+    /// value being written), so the one code whose diagnostic lives in
+    /// exactly those withheld bytes gets its cause named here instead. `None`
+    /// for the classes no surface has a measured cause for.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "the only production caller is the macOS error builder; the literal is pinned on every platform"
+        )
+    )]
+    pub(crate) fn cause(self) -> Option<&'static str> {
+        match self {
+            SecurityExitClass::InteractionNotAllowed => Some(
+                "the keychain is locked or cannot show a prompt (errSecInteractionNotAllowed); it \
+                 clears once the keychain is unlocked — retry once it has",
+            ),
+            SecurityExitClass::ItemNotFound | SecurityExitClass::Unclassified => None,
+        }
+    }
+}
+
+/// Whether the sign-out's failed-read branch may take its destructive arm —
+/// deleting the item whole. A locked keychain's read says nothing about the
+/// item's bytes, so treating it as empty destroyed a live login in the field
+/// (2026-09-12: an ssh session's exit 36 reached the delete); the classified
+/// transient skips the delete instead and says so on the event line. The skip
+/// is the recoverable side — a re-run of the switch or clear signs out for
+/// real once the keychain unlocks — where the delete is not. Every other
+/// failed read keeps the documented degrade: delete, with the bytes
+/// quarantined whenever the read brought any back. PURE so the skip rule is
+/// pinned on every platform; `sign_out_at` itself is macOS-only.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS sign-out; the skip rule is pinned on every platform"
+    )
+)]
+pub(crate) fn failed_read_degrades_to_delete(class: SecurityExitClass) -> bool {
+    !matches!(class, SecurityExitClass::InteractionNotAllowed)
 }
 
 /// Typed check at the boundary, then hand the untyped object to the installer:

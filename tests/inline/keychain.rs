@@ -15,11 +15,11 @@
 use super::{
     Keep, PutTransport, SECURITY_ARGV_VALUE_MAX, SECURITY_BIN, SECURITY_STDIN_LINE_MAX, SecurityOp,
     UnparseableItem, VerifyOutcome, WriteDisposition, account, add_generic_password_line,
-    carried_raw, census_namespaced_items, delete_at, delete_namespaced_item, disposition_verdict,
-    dump_keychain, keychain_service_for_config_dir, login_blob_is_ours, merge_and_put_at,
-    merge_write, merged_blob, put_blob_at, put_transport, quarantine_path, quarantine_tail,
-    read_blob_at, run_with_deadline, security_deadline, security_error, security_quote,
-    sign_out_at, verify_outcome, write_disposition,
+    carried_raw, census_namespaced_items, classified_exit, delete_at, delete_namespaced_item,
+    disposition_verdict, dump_keychain, keychain_service_for_config_dir, login_blob_is_ours,
+    merge_and_put_at, merge_write, merged_blob, put_blob_at, put_transport, quarantine_path,
+    quarantine_tail, read_blob_at, run_with_deadline, security_deadline, security_error,
+    security_quote, sign_out_at, verify_outcome, write_disposition,
 };
 use crate::logline::LogLines;
 use crate::profile::{ClaudeCredentials, OAuthToken};
@@ -1302,6 +1302,57 @@ fn read_and_delete_errors_still_embed_stderr() {
         security_error(SecurityOp::Delete, &output).to_string(),
         "Keychain delete failed (security exit 36): SecKeychainSearchCopyNext: interaction not allowed",
         "delete sends no credential either, and its stderr is diagnostic"
+    );
+}
+
+/// The classified transient at the write site: a locked keychain (exit 36,
+/// `errSecInteractionNotAllowed`) renders the classification's hardcoded cause
+/// line instead of the suppressed-stderr wording, and the exit code rides the
+/// error so the sites that ACT on a failure (the seed's retry, the sign-out's
+/// skip) can classify it without parsing the text. The cause stays a literal
+/// keyed on the classified code — the tool's stderr is never embedded for a
+/// write, this code included.
+#[test]
+fn a_locked_keychain_write_failure_names_the_cause_and_carries_its_code() {
+    let output = security_output(36, "SecKeychainSearchCopyNext: interaction not allowed");
+    let err = security_error(SecurityOp::Write, &output);
+    assert_eq!(
+        err.to_string(),
+        "Keychain write failed (security exit 36): the keychain is locked or cannot show a prompt \
+         (errSecInteractionNotAllowed); it clears once the keychain is unlocked — retry once it \
+         has",
+    );
+    assert!(
+        !err.to_string().contains("SecKeychainSearchCopyNext"),
+        "the cause is the classification's hardcoded literal, never the tool's stderr"
+    );
+    assert_eq!(
+        classified_exit(&err),
+        crate::claude::SecurityExitClass::InteractionNotAllowed
+    );
+    // Every non-36 code keeps the suppressed-stderr wording and still carries
+    // its code; a signalled child carries none at all.
+    let other = security_error(SecurityOp::Write, &security_output(51, "x"));
+    assert_eq!(
+        classified_exit(&other),
+        crate::claude::SecurityExitClass::Unclassified
+    );
+    assert_eq!(
+        classified_exit(&other).cause(),
+        None,
+        "exit 51 stays unclassified: nothing measures it transient"
+    );
+    let signalled = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(9),
+            stdout: Vec::new(),
+            stderr: b"x".to_vec(),
+        }
+    };
+    assert_eq!(
+        classified_exit(&security_error(SecurityOp::Write, &signalled)),
+        crate::claude::SecurityExitClass::Unclassified
     );
 }
 

@@ -2688,7 +2688,25 @@ impl SessionSwap {
                                 // The item holds nothing now, so the session
                                 // falls back to the file layer this swap moved:
                                 // the row's verdict follows.
-                                Ok(()) => self.repoint_row_store(&plan),
+                                Ok(crate::keychain::SignOutOutcome::SignedOut) => {
+                                    self.repoint_row_store(&plan)
+                                }
+                                // The locked keychain left the item untouched,
+                                // so the session still reads the outgoing
+                                // member's login out of it: the row keeps
+                                // naming that member's store — rotations stay
+                                // refused for the login the session may still
+                                // be spending, the same fail-closed direction
+                                // a failed write takes.
+                                Ok(crate::keychain::SignOutOutcome::SkippedLocked) => logline!(
+                                    "clauth: session {} swapped onto {} but signing its per-session \
+                                     Keychain item out was skipped: the keychain is locked, so the \
+                                     item was left untouched and the session keeps authenticating as \
+                                     its previous member. Rotations stay refused for it; only a later \
+                                     swap onto another member re-runs the sign-out",
+                                    self.session.as_str(),
+                                    plan.member
+                                ),
                                 Err(e) => logline!(
                                     "clauth: session {} swapped onto {} but signing its per-session \
                                      Keychain item out failed: {e:#}. The session keeps authenticating as \
@@ -3151,7 +3169,7 @@ impl ProfileRuntime {
         // so a rotation queued behind it cannot land between the build and the
         // item write — see `seed_session_keychain_item`.
         #[cfg(target_os = "macos")]
-        seed_session_keychain_item(&canonical, &paths.runtime, name, &session);
+        let seed_retry = seed_session_keychain_item(&canonical, &paths.runtime, name, &session);
         // Released at the end of the register-and-stamp window rather than at the
         // end of this function, so a queued peer waits out that window and not the
         // watchdog arming behind it. On macOS the guard additionally spans
@@ -3225,6 +3243,15 @@ impl ProfileRuntime {
         struct WatchdogLegs {
             claude_home: PathBuf,
             swap: std::sync::Arc<SessionSwap>,
+            /// macOS: the seed's retry target while a classified locked
+            /// keychain left the session's item unwritten — see
+            /// `retry_seeded_keychain_item`. The credential tick recomputes
+            /// the seed against it: no timer of its own, one bounded
+            /// subprocess budget per attempt, and it drops the moment the
+            /// store stops matching the target or a retry fails on anything
+            /// other than the classified transient.
+            #[cfg(target_os = "macos")]
+            seed_retry: std::sync::Mutex<Option<PathBuf>>,
         }
         impl crate::watchdog::Reconcile for WatchdogLegs {
             fn config(&self) {
@@ -3239,6 +3266,11 @@ impl ProfileRuntime {
                 if let Err(e) = tick(&self.claude_home, &self.swap) {
                     logline!("clauth: watchdog tick failed: {e}");
                 }
+                // After the file reconcile and outside every lock: the retry
+                // shells out, so it must never span the state flock `tick`
+                // takes and releases itself.
+                #[cfg(target_os = "macos")]
+                retry_seeded_keychain_item(&self.swap, &self.seed_retry);
             }
             fn swap_poll(&self) {
                 self.swap.poll();
@@ -3255,6 +3287,8 @@ impl ProfileRuntime {
         let legs = WatchdogLegs {
             claude_home: claude_home.clone(),
             swap: std::sync::Arc::clone(&swap),
+            #[cfg(target_os = "macos")]
+            seed_retry: std::sync::Mutex::new(seed_retry),
         };
         // Armed HERE rather than on the spawned thread, so that `acquire`
         // returning IS the barrier proving the watch is live. Arming costs
@@ -4142,9 +4176,12 @@ fn materialize_entries(pending: Vec<(PathBuf, PathBuf)>, mode: LinkMode) -> Resu
 ///
 /// Loud-not-fatal on every arm: a failed write leaves the session on the
 /// file layer — the pre-fix behavior — and a headless box whose keychain
-/// refuses must still start sessions. Nothing retries the write for THIS
-/// session; the next start on the same tree, or a later swap onto another
-/// member, re-runs it.
+/// refuses must still start sessions. The one classified transient (a locked
+/// keychain, `errSecInteractionNotAllowed`) arms a retry on this session's
+/// watchdog credential tick, which recomputes the seed while the store still
+/// matches the seed's target ([`SeedDegradeDisposition::RetryOnTick`]); every
+/// other failure leaves the re-run to the next start on the same tree, or a
+/// later swap onto another member.
 /// Which Keychain arm a session start takes, derived from the install source
 /// alone. PURE so the arm selection is pinned on every platform: the seeding
 /// itself is macOS-only and unreachable by `cfg(test)` (`keychain::enabled()`
@@ -4256,15 +4293,63 @@ fn swap_item_arm(store: Option<&crate::profile::ClaudeCredentials>) -> SwapItemA
     }
 }
 
+/// What the session-start Keychain seed does with a leg that failed, keyed on
+/// the `security` exit classification: the one measured transient (a locked
+/// keychain, [`crate::claude::SecurityExitClass::InteractionNotAllowed`])
+/// clears the moment the keychain unlocks, so its degrade arms a retry on this
+/// session's watchdog credential tick — the retry is the recomputation, no
+/// queue and no timer of its own — while every other failure keeps the pre-fix
+/// loud degrade. PURE so the disposition is pinned on every platform; the seed
+/// and the retry leg that consult it are macOS-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumers are the macOS seed and its watchdog-tick retry; the disposition is pinned on every platform"
+    )
+)]
+enum SeedDegradeDisposition {
+    /// Re-run the seed's carry-then-write on the watchdog's credential ticks
+    /// while the store still matches the seed's target.
+    RetryOnTick,
+    /// The pre-fix behavior: log the consequence, degrade to the file layer,
+    /// and leave the re-run to the next start on the same tree.
+    LogAndDegrade,
+}
+
+/// See [`SeedDegradeDisposition`].
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumers are the macOS seed and its watchdog-tick retry; the disposition is pinned on every platform"
+    )
+)]
+fn seed_degrade_disposition(class: crate::claude::SecurityExitClass) -> SeedDegradeDisposition {
+    match class {
+        crate::claude::SecurityExitClass::InteractionNotAllowed => {
+            SeedDegradeDisposition::RetryOnTick
+        }
+        crate::claude::SecurityExitClass::ItemNotFound
+        | crate::claude::SecurityExitClass::Unclassified => SeedDegradeDisposition::LogAndDegrade,
+    }
+}
+
+/// Returns the seed's retry target — the install source the seed wrote
+/// against — while a classified locked-keychain failure left the session's
+/// item unwritten, for the watchdog's credential tick to re-run the seed
+/// against ([`retry_seeded_keychain_item`]); `None` on every other outcome,
+/// the pre-fix degrade included.
 #[cfg(target_os = "macos")]
 fn seed_session_keychain_item(
     canonical: &Path,
     runtime: &Path,
     name: &ProfileName,
     session: &SessionId,
-) {
+) -> Option<PathBuf> {
     if !crate::keychain::enabled() {
-        return;
+        return None;
     }
     let arm = session_seed_arm(
         canonical.exists(),
@@ -4283,34 +4368,126 @@ fn seed_session_keychain_item(
                     name
                 );
             }
+            None
         }
-        SessionSeedArm::Skip => {}
+        SessionSeedArm::Skip => None,
         SessionSeedArm::Carry => {
             let _budget = crate::lock::SharedSubprocessBudget::arm(SESSION_SEED_BUDGET);
-            match crate::claude::carry_session_item_into(canonical, runtime) {
-                Ok(()) => {
-                    if let Err(e) =
-                        crate::claude::keychain_mirror_source_for_config_dir(canonical, runtime)
-                    {
-                        logline!(
-                            "clauth: session {} started on {} but writing its per-session \
-                             Keychain item failed: {e:#}. Its Claude Code falls back to the runtime \
-                             credentials file, where its next token refresh migrates into the item \
-                             and strands the stored refresh token; the next start on this tree \
-                             re-runs the write",
-                            session.as_str(),
-                            name
-                        );
+            let (what, consequence, e) =
+                match crate::claude::carry_session_item_into(canonical, runtime) {
+                    Ok(()) => {
+                        match crate::claude::keychain_mirror_source_for_config_dir(
+                            canonical, runtime,
+                        ) {
+                            Ok(()) => return None,
+                            Err(e) => (
+                                "writing its per-session Keychain item",
+                                "Its Claude Code falls back to the runtime credentials file, where \
+                             its next token refresh migrates into the item and strands the stored \
+                             refresh token; the next start on this tree re-runs the write",
+                                e,
+                            ),
+                        }
                     }
-                }
-                Err(e) => logline!(
-                    "clauth: session {} started on {} but carrying its per-session Keychain item's \
-                     pair back into the store failed: {e:#}. The item was left untouched, so the \
-                     session's Claude Code reads whatever login it holds and falls back to the \
-                     runtime credentials file when it holds none",
-                    session.as_str(),
-                    name
-                ),
+                    Err(e) => (
+                        "carrying its per-session Keychain item's pair back into the store",
+                        "The item was left untouched, so the session's Claude Code reads whatever \
+                     login it holds and falls back to the runtime credentials file when it holds \
+                     none",
+                        e,
+                    ),
+                };
+            seed_degraded(session, name, canonical, what, consequence, &e)
+        }
+    }
+}
+
+/// Log one of the seed's loud-not-fatal leg failures and decide whether it
+/// arms the watchdog-tick retry, returning the seed's target store for that
+/// retry to guard on. The classified transient appends the retry clause to the
+/// event line; every other failure renders the pre-fix line byte-for-byte.
+/// macOS-only like its caller.
+#[cfg(target_os = "macos")]
+fn seed_degraded(
+    session: &SessionId,
+    name: &ProfileName,
+    canonical: &Path,
+    what: &str,
+    consequence: &str,
+    e: &anyhow::Error,
+) -> Option<PathBuf> {
+    if seed_degrade_disposition(crate::keychain::classified_exit(e))
+        == SeedDegradeDisposition::RetryOnTick
+    {
+        logline!(
+            "clauth: session {} started on {} but {} failed: {e:#}. {}; the watchdog retries the \
+             seed on this session's credential ticks while its store stays the seed's target, so \
+             it lands once the keychain unlocks",
+            session.as_str(),
+            name,
+            what,
+            consequence
+        );
+        return Some(canonical.to_path_buf());
+    }
+    logline!(
+        "clauth: session {} started on {} but {} failed: {e:#}. {}",
+        session.as_str(),
+        name,
+        what,
+        consequence
+    );
+    None
+}
+
+/// The watchdog-tick half of the seed's retry disposition: re-run the seed's
+/// carry-then-write against the recorded target while the session's store
+/// still resolves to it. macOS-only like the seed; called from the credential
+/// leg, OUTSIDE any state-flock hold (the carry takes its own, and a
+/// `security` subprocess must never span one), under one
+/// [`SharedSubprocessBudget`] of [`SESSION_SEED_BUDGET`] per attempt.
+///
+/// The guard is the store comparison: a mid-session swap repoints the swap
+/// cell's store and its own keychain legs own the item from there, so
+/// re-running the seed past that point would write the launch member's store
+/// into an item the session's file layer no longer matches. A retry that
+/// fails on anything other than the classified transient drops the retry and
+/// says so — the pre-fix degrade, one line, once.
+#[cfg(target_os = "macos")]
+fn retry_seeded_keychain_item(swap: &SessionSwap, seed_retry: &std::sync::Mutex<Option<PathBuf>>) {
+    let mut retry = seed_retry.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(target) = retry.take() else {
+        return;
+    };
+    if swap.canonical() != target {
+        return;
+    }
+    let _budget = crate::lock::SharedSubprocessBudget::arm(SESSION_SEED_BUDGET);
+    let failed = match crate::claude::carry_session_item_into(&target, &swap.runtime) {
+        Ok(()) => {
+            crate::claude::keychain_mirror_source_for_config_dir(&target, &swap.runtime).err()
+        }
+        Err(e) => Some(e),
+    };
+    match failed {
+        None => {
+            logline!("clauth: re-seeded the per-session Keychain item after the keychain unlocked")
+        }
+        Some(e) => {
+            if seed_degrade_disposition(crate::keychain::classified_exit(&e))
+                == SeedDegradeDisposition::RetryOnTick
+            {
+                // Still locked: stay armed for the next tick. The seed's own
+                // line already named the retry, so a still-locked attempt adds
+                // nothing — one line at degrade time, none per tick.
+                *retry = Some(target);
+            } else {
+                logline!(
+                    "clauth: retrying the per-session Keychain item seed failed: {e:#}. Its \
+                     Claude Code keeps the runtime credentials file, where its next token refresh \
+                     migrates into the item and strands the stored refresh token; the next start \
+                     on this tree re-runs the write"
+                );
             }
         }
     }
