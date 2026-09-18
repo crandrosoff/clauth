@@ -150,7 +150,15 @@ fn registry_remap(
     else {
         return agentgear::Remap::Skip("no plugins/ segment".to_string());
     };
-    let twin = claude.join("plugins").join(suffix);
+    // Component-wise: a one-string join carrying the forward-slash suffix
+    // renders mixed separators on windows (`\plugins\cache/a/b`), which
+    // resolves but is not the native spelling CC records — joining per
+    // component yields the canonical per-platform path.
+    let twin = suffix
+        .split(['/', '\\'])
+        .fold(claude.join("plugins"), |path, component| {
+            path.join(component)
+        });
     if twin.exists() {
         // The spelling lands verbatim; safe because CC derives its cache dirs
         // from marketplace/plugin/version slugs, never from user input, so no

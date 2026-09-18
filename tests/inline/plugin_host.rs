@@ -574,8 +574,17 @@ fn repoint_registry_reroots_a_dead_path_and_names_a_missing_twin() {
     let claude = home.home().join(".claude");
     let clauth = home.home().join(".clauth");
 
-    // The twin of the first recorded path exists; the second's does not.
-    let twin = claude.join("plugins/cache/agenticat/agents/a6261ea74c14");
+    // The twin of the first recorded path exists; the second's does not. The
+    // joins are component-wise, matching the product's per-component twin
+    // build, so fixture and product spellings are byte-equal on every
+    // platform — a one-string join with a mixed-separator suffix renders
+    // differently on windows and breaks the byte compare.
+    let twin = claude
+        .join("plugins")
+        .join("cache")
+        .join("agenticat")
+        .join("agents")
+        .join("a6261ea74c14");
     std::fs::create_dir_all(&twin).expect("twin dir");
 
     let dead = format!(
@@ -598,7 +607,7 @@ fn repoint_registry_reroots_a_dead_path_and_names_a_missing_twin() {
     let original = format!(
         "{{\n  \"version\": 2,\n  \"plugins\": {{\n    \"agents@agenticat\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{dead}\" }}\n    ],\n    \"security-guidance@claude-plugins-official\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{missing}\" }}\n    ],\n    \"live@live\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{live}\" }}\n    ]\n  }}\n}}\n"
     );
-    let registry = claude.join("plugins/installed_plugins.json");
+    let registry = claude.join("plugins").join("installed_plugins.json");
     std::fs::create_dir_all(registry.parent().unwrap()).expect("plugins dir");
     std::fs::write(&registry, &original).expect("registry");
 
@@ -674,7 +683,9 @@ fn repoint_registry_names_a_skip_only_pass() {
 
 /// The separator half of the windows contract: CC records `\`-spelled paths
 /// on windows, and the remap must converge them exactly like `/`-spelled
-/// ones. Pinned at the string level so it runs on every platform.
+/// ones. Both spellings converge to the one canonical twin the product's
+/// component-wise join builds, asserted by exact display equality on every
+/// platform.
 #[test]
 fn registry_remap_matches_both_separator_spellings() {
     use crate::testutil::HomeSandbox;
@@ -686,19 +697,23 @@ fn registry_remap_matches_both_separator_spellings() {
     let prefix_fwd = format!("{}/", profiles.display());
     let prefix_back = format!("{}\\", profiles.display());
 
-    // The backslash-spelled twin: join treats the suffix as one component on
-    // posix, so the dir literally carries backslashes — the string-level
-    // contract is what is under test, and it holds on windows natively.
-    std::fs::create_dir_all(claude.join("plugins").join("cache\\mkt\\plugin\\1"))
-        .expect("backslash twin dir");
+    let canonical = claude
+        .join("plugins")
+        .join("cache")
+        .join("mkt")
+        .join("plugin")
+        .join("1");
+    std::fs::create_dir_all(&canonical).expect("twin dir");
+
     let back_path = format!(
         "{}\\D0\\runtime-9-0\\plugins\\cache\\mkt\\plugin\\1",
         profiles.display()
     );
     match super::registry_remap(&back_path, &prefix_fwd, &prefix_back, &claude) {
-        agentgear::Remap::Rewrite(to) => assert!(
-            to.ends_with("cache\\mkt\\plugin\\1") || to.ends_with("cache/mkt/plugin/1"),
-            "the backslash-spelled path rewrites to its twin: {to}"
+        agentgear::Remap::Rewrite(to) => assert_eq!(
+            to,
+            canonical.display().to_string(),
+            "the backslash-spelled path rewrites to the canonical twin"
         ),
         agentgear::Remap::Keep => {
             panic!("a dead backslash-spelled path with a twin must rewrite, got Keep")
@@ -713,15 +728,16 @@ fn registry_remap_matches_both_separator_spellings() {
         profiles.display()
     );
     match super::registry_remap(&fwd_path, &prefix_fwd, &prefix_back, &claude) {
-        agentgear::Remap::Skip(reason) => assert!(
-            reason.contains("no twin"),
-            "the forward-spelled path has no resolving twin (the planted one is backslash-spelled): {reason}"
+        agentgear::Remap::Rewrite(to) => assert_eq!(
+            to,
+            canonical.display().to_string(),
+            "the forward-spelled path rewrites to the canonical twin"
         ),
         agentgear::Remap::Keep => {
-            panic!("a dead path under the profiles dir must be targeted, got Keep")
+            panic!("a dead forward-spelled path with a twin must rewrite, got Keep")
         }
-        agentgear::Remap::Rewrite(to) => {
-            panic!("a dead path whose twin does not resolve must be named, got Rewrite({to})")
+        agentgear::Remap::Skip(reason) => {
+            panic!("a dead forward-spelled path with a twin must rewrite, got Skip({reason})")
         }
     }
 
