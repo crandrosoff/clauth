@@ -788,7 +788,9 @@ fn header_lines(profile: &Profile, header: &HeaderState, inner_w: u16) -> Vec<Li
 
 /// The `pricing` header row: the peak-rate state sampled now, named as a pill
 /// plus the countdown to the next flip. Peak is a charged state (WARNING);
-/// off-peak is the neutral resting state. No trailing countdown when no flip
+/// off-peak is the neutral resting state. Into peak the countdown warns
+/// (`peak starts in …`); leaving peak it is relief and the pill supplies the
+/// subject, so it is a bare `ends in …`. No trailing countdown when no flip
 /// lands inside the query horizon. Windows come from the price table's own
 /// constraints — the same schedule cost pricing uses, never a second opinion.
 fn pricing_line(peak: crate::pricing::PeakState) -> Line<'static> {
@@ -800,12 +802,13 @@ fn pricing_line(peak: crate::pricing::PeakState) -> Line<'static> {
     let mut spans = vec![key_span("pricing")];
     spans.extend(pill(label.to_string(), style));
     if let Some((to_peak, secs)) = peak.next_flip {
-        let verb = if to_peak { "peak" } else { "off-peak" };
+        let countdown = if to_peak {
+            format!("peak starts in {}", humanize_duration(secs))
+        } else {
+            format!("ends in {}", humanize_duration(secs))
+        };
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("{verb} starts in {}", humanize_duration(secs)),
-            theme::faint(),
-        ));
+        spans.push(Span::styled(countdown, theme::faint()));
     }
     Line::from(spans)
 }

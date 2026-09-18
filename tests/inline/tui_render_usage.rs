@@ -2170,7 +2170,9 @@ fn auth_broken_does_not_render_a_reassuring_idle_line() {
 // ── pricing row (peak-rate indicator) ───────────────────────────────────────
 
 /// `pricing_line` names the peak state as a charged pill plus the countdown
-/// to the next flip, all as spans a key/value header row expects.
+/// to the next flip, all as spans a key/value header row expects. Leaving
+/// peak the countdown is relief: a bare `ends in …` reads against the pill,
+/// which already names the state.
 #[test]
 fn pricing_line_peak_pill_and_countdown() {
     let line = pricing_line(crate::pricing::PeakState {
@@ -2183,9 +2185,9 @@ fn pricing_line_peak_pill_and_countdown() {
     let countdown = line
         .spans
         .iter()
-        .find(|s| s.content.contains("starts in"))
+        .find(|s| s.content.contains("ends in"))
         .expect("a countdown span");
-    assert_eq!(countdown.content, "off-peak starts in 1h 30m");
+    assert_eq!(countdown.content, "ends in 1h 30m");
     let pill = line
         .spans
         .iter()
@@ -2211,8 +2213,8 @@ fn pricing_line_off_peak_pill() {
         text.contains("[ off-peak ]"),
         "neutral off-peak pill: {text}"
     );
-    // Exact-span pin: a substring check cannot separate `peak starts in` from
-    // `off-peak starts in`.
+    // Exact-span pin: both arms end in ` in ` (`peak starts in` here, the
+    // peak arm's bare `ends in`), so a shared-substring check separates none.
     let countdown = line
         .spans
         .iter()
@@ -2232,7 +2234,10 @@ fn pricing_line_without_flip_has_no_countdown() {
     });
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.contains("[ peak rate ]"), "{text}");
-    assert!(!text.contains("starts in"), "{text}");
+    assert!(
+        !text.contains("starts in") && !text.contains("ends in"),
+        "{text}"
+    );
 }
 
 /// The row renders between plan and status only when the profile's pricing
