@@ -372,10 +372,11 @@ pub(crate) struct Profile {
     /// `fallback::next_auto_switch_target`'s return-to-preferred pass.
     pub(crate) preferred: bool,
     /// CLA-ROLL: the daemon re-stamps this profile's `session-token.json` with the
-    /// usage chain's current access token on every rotation (full scopes +
-    /// `subscriptionType`, no refresh token — sessions get plan-gated-model
-    /// bearers while the refresh chain stays clauth-private). Off — the
-    /// default — keeps the sidecar exactly what was captured (static mint).
+    /// usage chain's current access token on every rotation (full scopes,
+    /// `subscriptionType` and `rateLimitTier`, no refresh token — sessions get
+    /// plan-gated-model bearers while the refresh chain stays clauth-private).
+    /// Off — the default — keeps the sidecar exactly what was captured (static
+    /// mint).
     pub(crate) rolling_token: bool,
     /// Ceiling in US dollars on what the auto-switch chain may spend of this
     /// account's pay-as-you-go budget on its own (fallback chain only, and only

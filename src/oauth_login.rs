@@ -547,11 +547,11 @@ fn credentials_from_token(token: crate::oauth::TokenResponse) -> ClaudeCredentia
             scopes,
             subscription_type: None,
             // A login clauth mints itself has no outside-written keys to keep.
-            // Claude Code adds its own (`clientId`, `refreshTokenExpiresAt`) on
-            // its first token save, and the catch-all holds them from then on.
-            // `rateLimitTier` is the exception: Claude Code reads it at STARTUP,
-            // before any save, so `finish_login` stamps it from the same
-            // `/profile` probe that stamps the plan tier.
+            // Claude Code adds its own on its first token save (measured:
+            // `refreshTokenExpiresAt`, `rateLimitTier`), and the catch-all
+            // holds them from then on. The tier is stamped HERE too instead of
+            // waiting for that save: Claude Code reads it at STARTUP, before
+            // any save, to evaluate plan-gated flags (#78).
             ..OAuthToken::default_extra()
         }),
     }

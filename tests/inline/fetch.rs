@@ -286,7 +286,8 @@ fn a_login_bodys_blank_uuid_reads_as_no_identity() {
 /// The organization's raw `rate_limit_tier` rides the same body. Claude Code
 /// stamps it verbatim as `claudeAiOauth.rateLimitTier` and reads it back at
 /// startup as a flag-targeting attribute (#78), so the login must carry it
-/// exactly as served — no mapping, no normalization beyond a blank check.
+/// exactly as served — no mapping, no normalization beyond a trim-then-blank
+/// check.
 #[test]
 fn a_login_body_yields_the_organizations_rate_limit_tier_verbatim() {
     let body = |json: &str| -> LoginProfile {
