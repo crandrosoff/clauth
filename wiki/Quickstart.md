@@ -74,7 +74,7 @@ clauth list           # account table with cached usage, no network
 | `clauth which` | `--json` | print the profile owning the loaded credentials; inside a `clauth start` codex session, that codex profile |
 | `clauth list` | `--all` (`--disabled`) | account table from the on-disk caches, never fetches; Claude Code accounts only |
 | `clauth jobs` | `--json` | what the delegates are doing: account, elapsed, last output, live runs first; `--json` also carries each run's `session_id`, the handle `delegate({session_id})` takes after a crash, and whether the run was isolated, which is what decides whether that id is a handle at all |
-| `clauth sessions` | `--json`, `--tokens`; `swap <sid> <profile>` | list Claude Code sessions, newest first; `swap` points a running session at another profile, picked up at the session's next request |
+| `clauth sessions` | `--json`, `--tokens` | list Claude Code sessions, newest first |
 | `clauth resume <id\|latest>` | `--profile <name>` | resume a session under a chosen account |
 | `clauth info <id\|latest>` | | print a session's resume command, workspace, and storage path |
 | `clauth daemon` | `--status`, `--standby`, `--replace`, `--no-standby`, `--listen [ADDR:PORT]`, `--cert <path>`, `--key <path>`, `--dump-openapi` | run the refresh + auto-switch loop with no TUI |
