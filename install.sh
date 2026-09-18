@@ -17,6 +17,9 @@ if [[ "${NOCARGO}" -eq 0 ]] && command -v cargo &>/dev/null; then
     echo "cargo detected, installing via cargo..."
     cargo install clauth
     echo ""
+    # Best-effort: converge plugin installPaths a dead session tree left behind.
+    clauth self-heal || echo "note: plugin path heal skipped" >&2
+    echo ""
     echo "To uninstall, run: cargo uninstall clauth"
     exit 0
 fi
@@ -120,6 +123,9 @@ mkdir -p "${INSTALL_DIR}"
 mv "${TMP}" "${INSTALL_DIR}/${BINARY}"
 
 echo "Installed to ${INSTALL_DIR}/${BINARY}"
+
+# Best-effort: converge plugin installPaths a dead session tree left behind.
+"${INSTALL_DIR}/${BINARY}" self-heal || echo "note: plugin path heal skipped" >&2
 
 # Warn if install dir is not in PATH
 if ! printf '%s' "${PATH}" | grep -q "${INSTALL_DIR}"; then
