@@ -5,6 +5,8 @@
 
 use super::*;
 
+use crate::testutil::HomeSandbox;
+
 #[test]
 fn print_script_supports_bash_zsh_fish() {
     for shell in ["bash", "zsh", "fish"] {
@@ -128,6 +130,134 @@ fn no_shell_completes_a_profile_after_start_auto() {
         !ZSH.contains("--auto)"),
         "zsh's fourth-word profile arm must not accept --auto as the third word",
     );
+}
+
+/// `clauth switch` completes profile names ∪ live-sid stems at its first
+/// position and profile names at the second (after a sid), so each shell must
+/// offer both shapes in the right slot. The grammar walk above collects
+/// subcommand names and long flags only, so it is blind to this positional
+/// half of the mirror — pinned here, in the shape of the `--with-fallback`
+/// profile arm above.
+///
+/// Each pin is anchored to the SWITCH ARM it claims, never to a string the
+/// template repeats: zsh spells `_describe 'profile' profiles` in seven arms,
+/// so a whole-script `contains` stays green while the union arm loses its
+/// profile half.
+#[test]
+fn every_shell_completes_switchs_both_positions() {
+    // Position 1 (word 2): the union of profiles and live-sid stems, the sids
+    // via the `__complete --live-sessions` shellout.
+    let bash_pos1 = guarded_arms(&BASH, |guard| {
+        guard.contains(r#"[ "$COMP_CWORD" -eq 2 ] && [ "$prev" = "switch" ]"#)
+    })
+    .expect("bash must have a switch first-position arm");
+    assert!(
+        bash_pos1.contains(r#"profiles=$(clauth __complete 2>/dev/null)"#)
+            && bash_pos1.contains(r#"sids=$(clauth __complete --live-sessions 2>/dev/null)"#)
+            && bash_pos1.contains(r#"compgen -W "${profiles} ${sids}""#),
+        "bash must offer profiles ∪ live sids at switch's first position (word 2)",
+    );
+
+    // Position 2 (word 3): profiles only.
+    let bash_pos2 = guarded_arms(&BASH, |guard| {
+        guard.contains(r#"[ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[1]}" = "switch" ]"#)
+    })
+    .expect("bash must have a switch second-position arm");
+    assert!(
+        bash_pos2.contains(r#"profiles=$(clauth __complete 2>/dev/null)"#)
+            && !bash_pos2.contains("--live-sessions"),
+        "bash must offer profiles at switch's second position (word 3), never sids",
+    );
+
+    let zsh_pos1 = guarded_arms(&ZSH, |guard| {
+        zsh_word_matches(guard, 2, "switch") && guard.contains("CURRENT == 3")
+    })
+    .expect("zsh must have a switch first-position arm");
+    assert!(
+        zsh_pos1.contains(r#"_describe 'profile' profiles"#)
+            && zsh_pos1.contains(r#"_describe 'session' sids"#)
+            && zsh_pos1.contains("__complete --live-sessions"),
+        "zsh must offer profiles ∪ live sids at switch's first position (word 3)",
+    );
+
+    let zsh_pos2 = guarded_arms(&ZSH, |guard| {
+        zsh_word_matches(guard, 2, "switch") && guard.contains("CURRENT == 4")
+    })
+    .expect("zsh must have a switch second-position arm");
+    assert!(
+        zsh_pos2.contains(r#"_describe 'profile' profiles"#)
+            && !zsh_pos2.contains("--live-sessions")
+            && !zsh_pos2.contains("sids"),
+        "zsh must offer profiles at switch's second position (word 4), never sids",
+    );
+
+    // fish's condition and its offered lists are one line each, so the pin
+    // that ties them together is the whole line.
+    let profiles_pos1 = r#"complete -c clauth -f -n "__fish_seen_subcommand_from switch; and test (count (commandline -opc)) -lt 3" -a "(__clauth_profiles)" -d Profile"#;
+    let sids_pos1 = r#"complete -c clauth -f -n "__fish_seen_subcommand_from switch; and test (count (commandline -opc)) -lt 3" -a "(__clauth_sessions)" -d Session"#;
+    let profiles_pos2 = r#"complete -c clauth -f -n "__fish_seen_subcommand_from switch; and test (count (commandline -opc)) -ge 3" -a "(__clauth_profiles)" -d Profile"#;
+    assert!(
+        FISH.contains(profiles_pos1) && FISH.contains(sids_pos1),
+        "fish must offer profiles ∪ live sids at switch's first position \
+         (the token right after `clauth switch`)",
+    );
+    assert!(
+        FISH.contains(profiles_pos2),
+        "fish must offer profiles only once a sid is present",
+    );
+    // The sid list is the first-position offer alone: exactly one completion
+    // line may name it, or a repointed second position would read as covered.
+    assert_eq!(
+        FISH.matches("(__clauth_sessions)").count(),
+        1,
+        "the sid list must not leak into the second position",
+    );
+    assert!(
+        FISH.contains(r#"function __clauth_sessions"#)
+            && FISH.contains(r#"clauth __complete --live-sessions 2>/dev/null"#),
+        "the __clauth_sessions function must shell out to the live-sessions mode",
+    );
+}
+
+/// `__complete --live-sessions` is what offers switch's first position the
+/// live sids: the `.json` stems of the live-session registry dir, sorted, and
+/// nothing else — a foreign file is skipped, and no transcript is ever read.
+/// Rows are filed through the production [`crate::live_sessions::register`]
+/// writer, so the fixture and the listing cannot drift onto different paths.
+#[test]
+fn session_stem_completion_lists_registry_stems_only() {
+    let sb = HomeSandbox::new();
+    for sid in ["7777-1", "4242-0"] {
+        let row = crate::live_sessions::LiveSession {
+            session_id: sid.to_string(),
+            start_profile: "work".to_string(),
+            harness: crate::harness::Harness::Claude,
+            pid: 4242,
+            started_at: 0,
+            cwd: None,
+            isolated: false,
+            follows_chain: false,
+            intended_member: None,
+            chain_cursor: None,
+            current_member: None,
+            last_swap_at: None,
+            launch_store: None,
+        };
+        crate::live_sessions::register(&row).expect("register row");
+    }
+    // A foreign file in the registry dir is skipped.
+    let dir = sb.home().join(".clauth").join("live_sessions");
+    std::fs::write(dir.join("notes.txt"), b"{}").expect("seed a foreign file");
+
+    assert_eq!(
+        live_session_stems(),
+        vec!["4242-0".to_string(), "7777-1".to_string()],
+        "the .json stems, sorted, and nothing else"
+    );
+
+    // A registry dir that does not exist yet answers empty, never an error.
+    std::fs::remove_dir_all(&dir).expect("remove the registry dir");
+    assert!(live_session_stems().is_empty());
 }
 
 /// Every shell must offer `--setup-token` under the `login` subcommand — the
@@ -673,9 +803,6 @@ fn print_script_rejects_unsupported_shell() {
         "error must name the unsupported shell",
     );
 }
-
-#[cfg(unix)]
-use crate::testutil::HomeSandbox;
 
 /// `completions install bash` writes the script under `~/.clauth/completions/`
 /// and appends an idempotent `source` line to `~/.bashrc`.

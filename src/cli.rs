@@ -26,7 +26,8 @@ pub(crate) const DEFAULT_LISTEN: &str = "0.0.0.0:8443";
     name = "clauth",
     version,
     about = "launcher and account manager for claude code",
-    after_help = "With no command, clauth launches the TUI; `clauth <profile>` switches to that account and exits. \
+    after_help = "With no command, clauth launches the TUI; `clauth <profile>` switches to that account and exits \
+                  (deprecated, use `clauth switch <name>`). \
                   The color depth can also be pinned in ~/.clauth/profiles.toml with `theme = \"full\"`."
 )]
 pub(crate) struct Cli {
@@ -224,6 +225,31 @@ pub(crate) enum Command {
         tokens: bool,
     },
 
+    /// Switch the global account, or move a live session to another profile
+    ///
+    /// One name switches the global account: `clauth switch <name>` is the
+    /// bare `clauth <name>` act under its own verb, repointing the credentials
+    /// the global `claude` reads (a codex name moves the codex active marker
+    /// instead). Two names address a live session: `clauth switch <sid>
+    /// <profile>` records the profile as the session's intended member — the
+    /// same registry write the fallback chain's decider makes — and installs
+    /// nothing itself: the session's own executor performs the switch, or
+    /// refuses it with a logged reason (a member whose endpoint, key, or
+    /// models differ from the launch profile's is refused, exactly as the
+    /// chain's own moves are). The session picks the new account up at its
+    /// next request, never before it. For a session started with
+    /// --with-fallback, the chain's decider can supersede a manual intent on
+    /// its next tick. The sid is the `<pid>-<seq>` of a live
+    /// `clauth start` session, one row per session under
+    /// ~/.clauth/live_sessions/.
+    Switch {
+        /// Profile to switch the global account to, or a live session id.
+        name: String,
+        /// Profile to point the live session at — its presence is what makes
+        /// the two-name form the session form.
+        profile: Option<String>,
+    },
+
     /// Resume a session under a chosen profile
     ///
     /// Prompts on a TTY, defaulting to the session's last-ran profile (the
@@ -380,9 +406,16 @@ pub(crate) enum Command {
         shell: Option<String>,
     },
 
-    /// Print one profile name per line, for the shell completion scripts.
+    /// Print one profile name per line, for the shell completion scripts;
+    /// `--live-sessions` prints the live-session registry's id stems instead,
+    /// for `clauth switch`'s first position.
     #[command(name = "__complete", hide = true)]
-    Complete,
+    Complete {
+        /// Print `~/.clauth/live_sessions/`'s file stems instead of profile
+        /// names.
+        #[arg(long = "live-sessions", hide = true)]
+        live_sessions: bool,
+    },
 
     /// CC's `apiKeyHelper` body for an api-key profile: print the profile's
     /// stored key to stdout so the runtime settings.json never holds it.
@@ -416,9 +449,10 @@ pub(crate) enum Command {
         rest: Vec<String>,
     },
 
-    /// A bare word is a profile name: switch to it and exit. Declared last so
-    /// every real subcommand above shadows a same-named profile, which is the
-    /// precedence the hand-rolled dispatcher had.
+    /// A bare word is a profile name: switch to it and exit (deprecated, use
+    /// `clauth switch <name>`). Declared last so every real subcommand above
+    /// shadows a same-named profile, which is the precedence the hand-rolled
+    /// dispatcher had.
     #[command(external_subcommand)]
     External(Vec<String>),
 }

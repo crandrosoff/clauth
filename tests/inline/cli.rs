@@ -81,6 +81,38 @@ fn a_subcommand_name_shadows_a_same_named_profile() {
     assert_eq!(err.exit_code(), 0);
 }
 
+// ── clauth switch: one verb, two forms split by arity ───────────────────────
+
+/// One positional is the global form (the bare-word act under its own verb),
+/// two positionals the session form — arity alone decides, so a sid-shaped
+/// first value is never guessed at.
+#[test]
+fn switch_splits_the_forms_on_arity_alone() {
+    let Command::Switch { name, profile } = command(&["switch", "acme"]) else {
+        panic!("one positional must parse as the global form");
+    };
+    assert_eq!(name, "acme");
+    assert_eq!(profile, None, "one positional is the global form");
+
+    let Command::Switch { name, profile } = command(&["switch", "4242-0"]) else {
+        panic!("a sid-shaped single name still parses as the global form");
+    };
+    assert_eq!(name, "4242-0");
+    assert_eq!(
+        profile, None,
+        "arity alone decides, never the first value's shape"
+    );
+
+    let Command::Switch { name, profile } = command(&["switch", "4242-0", "spare"]) else {
+        panic!("two positionals must parse as the session form");
+    };
+    assert_eq!(name, "4242-0");
+    assert_eq!(profile.as_deref(), Some("spare"));
+
+    let err = parse(&["switch", "a", "b", "c"]).expect_err("three positionals is a usage error");
+    assert_eq!(err.exit_code(), 2);
+}
+
 /// `start` hands `claude` everything after the profile byte-identically,
 /// leading hyphens included, so a passthrough `-p`/`--model` is never eaten as
 /// a clauth flag.
@@ -1258,7 +1290,18 @@ fn theme_accepts_both_spellings_ahead_of_a_subcommand() {
 /// invokes three of them by the exact string clap derives from the variant name.
 #[test]
 fn hidden_entry_points_parse_but_never_appear_in_help() {
-    assert!(matches!(command(&["__complete"]), Command::Complete));
+    assert!(matches!(
+        command(&["__complete"]),
+        Command::Complete {
+            live_sessions: false
+        }
+    ));
+    assert!(matches!(
+        command(&["__complete", "--live-sessions"]),
+        Command::Complete {
+            live_sessions: true
+        }
+    ));
     assert!(matches!(command(&["mcp-await-job"]), Command::McpAwaitJob));
     assert!(matches!(
         command(&["hook-profile-changed-note"]),
@@ -1336,6 +1379,7 @@ fn every_visible_subcommand_is_listed_in_the_root_help() {
         "enable",
         "which",
         "list",
+        "switch",
         "sessions",
         "resume",
         "info",
@@ -1346,6 +1390,18 @@ fn every_visible_subcommand_is_listed_in_the_root_help() {
     ] {
         assert!(help.contains(name), "`{name}` must appear in the root help");
     }
+}
+
+/// The bare `clauth <profile>` act is deprecated in favour of `clauth switch
+/// <name>` — said in the help and the wiki, never as a runtime warning on the
+/// most-used path.
+#[test]
+fn the_bare_profile_form_is_deprecated_in_the_help() {
+    let help = Cli::command().render_help().to_string();
+    assert!(
+        help.contains("deprecated, use `clauth switch <name>`"),
+        "the root help must name the replacement for the bare form: {help}"
+    );
 }
 
 // ── the exit-code contract ──────────────────────────────────────────────────
@@ -1546,6 +1602,29 @@ mod disabled_target_refusal {
         );
     }
 
+    /// The one-name form reaches the exact function the bare word reaches, so
+    /// its refusals are byte-identical — pinned through the dispatch seam, not
+    /// by calling `cmd_switch` directly.
+    #[test]
+    fn switch_refuses_a_disabled_target_through_dispatch() {
+        let _home = HomeSandbox::new();
+        seed_disabled_profile("off");
+
+        let cli = parse(&["switch", "off"]).expect("one positional parses as the global form");
+        let err = crate::dispatch(cli).expect_err("a disabled target must be refused");
+        assert_eq!(
+            err.to_string(),
+            "'off': account is disabled, run `clauth enable off`",
+            "the refusal copy is the bare form's, byte for byte"
+        );
+
+        let reloaded = crate::profile::load_config().expect("reload");
+        assert_eq!(
+            reloaded.state.active_profile, None,
+            "a refused switch must not change the active profile"
+        );
+    }
+
     #[test]
     fn cmd_start_refuses_disabled_target_before_acquiring_a_runtime() {
         let home = HomeSandbox::new();
@@ -1618,6 +1697,18 @@ mod bad_profile_name_is_a_usage_error {
             dispatch_exit_code(&["strat"]),
             2,
             "a typo'd subcommand (a bare unknown word) is a usage error, not exit 1"
+        );
+    }
+
+    /// `clauth switch <name>` is the bare-word act under its own verb, so an
+    /// unknown name is the same usage error through the same seam.
+    #[test]
+    fn switch_with_an_unknown_name_exits_2() {
+        let _home = HomeSandbox::new();
+        assert_eq!(
+            dispatch_exit_code(&["switch", "strat"]),
+            2,
+            "an unknown name on the one-arg form is a usage error, not exit 1"
         );
     }
 

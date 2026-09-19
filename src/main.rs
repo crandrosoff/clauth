@@ -260,6 +260,13 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::List { all, disabled } => list::run(all || disabled),
         Command::Jobs { json } => jobs_cli::run(json),
         Command::Sessions { json, tokens } => sessions_cli::run_sessions(json, tokens),
+        // One positional is the bare-word act under its own verb: the exact
+        // function `Command::External`'s single-word arm calls, so the exits
+        // and copy are identical.
+        Command::Switch { name, profile } => match profile {
+            None => cmd_switch(&name),
+            Some(profile) => sessions_cli::run_switch(&name, &profile),
+        },
         Command::Resume { target, profile } => {
             sessions_cli::run_resume(&target, profile.as_deref())
         }
@@ -296,7 +303,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         // the parse pin in `tests/inline/cli.rs`, and the leg it points at is
         // pinned hermetically by the fake-`claude` tests.
         Command::SelfHeal => plugin_host::self_heal(),
-        Command::Complete => cmd_complete(),
+        Command::Complete { live_sessions } => cmd_complete(live_sessions),
         Command::ApiKey { profile } => cmd_api_key(&profile),
         Command::Completions { target, shell } => cmd_completions(&target, shell.as_deref()),
         Command::Herdr { cmd } => cmd_herdr(cmd),
@@ -369,8 +376,12 @@ fn cmd_devices(json: bool, cmd: Option<cli::DevicesCommand>) -> Result<()> {
     }
 }
 
-fn cmd_complete() -> Result<()> {
-    completions::print_profile_names();
+fn cmd_complete(live_sessions: bool) -> Result<()> {
+    if live_sessions {
+        completions::print_session_stems();
+    } else {
+        completions::print_profile_names();
+    }
     Ok(())
 }
 
