@@ -7698,6 +7698,313 @@ fn a_standing_refusal_is_announced_once_per_reason() {
     });
 }
 
+// ── the in-place convergence (rolling-token arming under live sessions) ──────
+
+/// The issue-#84 shape: a session that launched before its profile was armed
+/// for rolling tokens holds the rotating pair, and arming changes only future
+/// starts. That session's own poll must detect the transition — its canonical
+/// still refreshable while the install source now selects a refreshless
+/// sidecar — and converge onto the sidecar in place, one poll, same member.
+#[test]
+fn a_pre_arming_session_converges_onto_the_armed_sidecar_on_one_poll() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        if !host_poses(tmp.path(), "a convergence relink") {
+            return;
+        }
+        let launch = member("conv-a");
+        member_store(&launch);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+        let sid = swap.session.as_str().to_string();
+
+        // Arm the profile under the live session.
+        let sidecar = crate::profile::profile_dir(&crate::profile::ProfileName::from("conv-a"))
+            .expect("profile_dir")
+            .join("session-token.json");
+        write_creds(&sidecar, None);
+
+        swap.poll();
+
+        assert_eq!(
+            fs::read_link(swap.runtime.join(".credentials.json")).expect("read link"),
+            sidecar,
+            "one poll repoints the session onto the armed sidecar"
+        );
+        assert_eq!(swap.canonical(), sidecar, "the cell follows the link");
+        assert_eq!(swap.member(), "conv-a", "the member does not change");
+        let row = crate::live_sessions::get(&sid).expect("row");
+        assert_eq!(row.current_member.as_deref(), Some("conv-a"));
+        assert_eq!(
+            row.launch_store.as_deref(),
+            Some(sidecar.as_path()),
+            "the row's launch_store names the sidecar, so the rotation refusal lifts"
+        );
+        assert!(
+            row.last_swap_at.is_some(),
+            "the convergence advances last_swap_at exactly like a swap"
+        );
+        // The item arm the convergence executes on macOS, pinned here through
+        // the pure seam: the bearer is signed out, never installed.
+        let creds = crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(&sidecar)
+            .expect("read sidecar");
+        assert_eq!(converge_item_arm(Some(&creds)), SwapItemArm::SignOut);
+    });
+}
+
+/// Same member, same source: without an armed transition the poll is a no-op
+/// — no mtime move, no registry write, and no refusal recorded (the steady
+/// state is not news).
+#[test]
+fn a_convergence_does_not_move_a_session_without_an_armed_transition() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let launch = member("conv-noop-a");
+        let launch_store = member_store(&launch);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+        let sid = swap.session.as_str().to_string();
+
+        let before = SystemTime::now() - Duration::from_secs(60);
+        set_mtime(&launch_store, before);
+
+        swap.poll();
+
+        assert_eq!(swap.member(), "conv-noop-a");
+        assert_eq!(
+            fs::read_link(swap.runtime.join(".credentials.json")).expect("read link"),
+            launch_store,
+            "no sidecar armed — there is nothing to converge onto"
+        );
+        assert_eq!(
+            fs::metadata(&launch_store)
+                .expect("meta")
+                .modified()
+                .expect("mtime"),
+            before,
+            "a no-op convergence must not move the store's mtime"
+        );
+        let row = crate::live_sessions::get(&sid).expect("row");
+        assert_eq!(row.current_member, None, "a no-op must not write the row");
+        assert_eq!(row.last_swap_at, None);
+        assert!(
+            swap.cell().last_refusal.is_none(),
+            "the steady state is not a refusal"
+        );
+    });
+}
+
+/// The admitted transition is rotatable-current → refreshless-selected only.
+/// A session already on the sidecar must not converge BACK onto the rotating
+/// store when the profile is disarmed — reverse convergence would re-strand
+/// the session on a login the re-stamp leg no longer owns.
+#[test]
+fn a_refreshless_session_does_not_converge_back_onto_the_rotating_store() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let launch = member("conv-rev-a");
+        register_profile(&launch);
+        // Armed BEFORE the fixture, so the session launches on the sidecar.
+        let sidecar = crate::profile::profile_dir(&crate::profile::ProfileName::from("conv-rev-a"))
+            .expect("profile_dir")
+            .join("session-token.json");
+        write_creds(&sidecar, None);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+        let sid = swap.session.as_str().to_string();
+
+        // Disarm: the install source falls back to the rotating store.
+        fs::remove_file(&sidecar).expect("disarm");
+
+        swap.poll();
+
+        assert_eq!(swap.member(), "conv-rev-a");
+        assert_eq!(
+            fs::read_link(swap.runtime.join(".credentials.json")).expect("read link"),
+            sidecar,
+            "a refreshless current source never converges onto the rotating store"
+        );
+        let row = crate::live_sessions::get(&sid).expect("row");
+        assert_eq!(row.current_member, None);
+        assert_eq!(row.last_swap_at, None);
+    });
+}
+
+/// An unreadable current source admits nothing: the session stays put and the
+/// fail-closed rotation refusal stands (an unknown must never read as the
+/// armed transition).
+#[test]
+fn an_unreadable_current_source_does_not_converge() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let launch = member("conv-torn-a");
+        let launch_store = member_store(&launch);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+
+        fs::write(&launch_store, b"not json").expect("corrupt the current source");
+        let sidecar =
+            crate::profile::profile_dir(&crate::profile::ProfileName::from("conv-torn-a"))
+                .expect("profile_dir")
+                .join("session-token.json");
+        write_creds(&sidecar, None);
+
+        swap.poll();
+
+        assert_eq!(
+            fs::read_link(swap.runtime.join(".credentials.json")).expect("read link"),
+            launch_store,
+            "an unreadable current source never moves"
+        );
+        let row = crate::live_sessions::get(swap.session.as_str()).expect("row");
+        assert_eq!(row.current_member, None);
+    });
+}
+
+/// The transition discriminator, pinned pure: only a refreshable current
+/// source with a DISTINCT refreshless selected source converges. Everything
+/// else — same source, reverse, refreshable-to-refreshable, and every
+/// unreadable shape — stays a no-op.
+#[test]
+fn a_convergence_admits_only_rotatable_current_to_refreshless_selected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let rot = tmp.path().join("rot.json");
+    let rot2 = tmp.path().join("rot2.json");
+    let refreshless = tmp.path().join("sidecar.json");
+    let refreshless2 = tmp.path().join("sidecar2.json");
+    let torn = tmp.path().join("torn.json");
+    write_creds(&rot, Some("rt-1"));
+    write_creds(&rot2, Some("rt-2"));
+    write_creds(&refreshless, None);
+    write_creds(&refreshless2, None);
+    fs::write(&torn, b"not json").expect("write torn");
+
+    assert!(
+        converge_transition_holds(&rot, &refreshless),
+        "the armed transition is exactly what converges"
+    );
+    assert!(
+        !converge_transition_holds(&rot, &rot),
+        "same member, same source stays a no-op"
+    );
+    assert!(
+        !converge_transition_holds(&refreshless, &rot),
+        "refreshless → rotatable (disarm) does not auto-converge"
+    );
+    assert!(
+        !converge_transition_holds(&refreshless, &refreshless2),
+        "a refreshless current source is not rotatable-current, however the \
+         selected source reads"
+    );
+    assert!(
+        !converge_transition_holds(&rot, &rot2),
+        "rotatable → rotatable is not an armed transition"
+    );
+    assert!(
+        !converge_transition_holds(&torn, &refreshless),
+        "an unreadable current source does not move"
+    );
+    assert!(
+        !converge_transition_holds(&rot, &torn),
+        "an unreadable selected source does not move"
+    );
+    assert!(
+        !converge_transition_holds(&tmp.path().join("missing.json"), &refreshless),
+        "a missing current source does not move"
+    );
+}
+
+/// The item arm the convergence executes on macOS, pinned pure: the bearer is
+/// SIGNED OUT, never installed — installing a refreshless login would strand
+/// the session on a snapshot the re-stamp leg can no longer reach. The
+/// Install arms are unreachable by admission (the transition selects only a
+/// refreshless store) and stop the move fail-closed if ever reached.
+#[test]
+fn a_convergence_signs_the_item_out_and_never_installs() {
+    use crate::profile::{ClaudeCredentials, OAuthToken};
+    let store = |refresh: Option<&str>| ClaudeCredentials {
+        claude_ai_oauth: Some(OAuthToken {
+            access_token: "a".to_string(),
+            refresh_token: refresh.map(str::to_string),
+            expires_at: None,
+            scopes: None,
+            subscription_type: None,
+            ..OAuthToken::default_extra()
+        }),
+    };
+
+    assert_eq!(
+        converge_item_arm(Some(&store(None))),
+        SwapItemArm::SignOut,
+        "the bearer is signed out of the item, never installed"
+    );
+    assert_eq!(
+        converge_item_arm(Some(&store(Some("r")))),
+        SwapItemArm::Install
+    );
+    assert_eq!(converge_item_arm(None), SwapItemArm::Install);
+}
+
+/// The convergence Keychain legs' failure routing, pinned pure: the
+/// classified locked-keychain transient raises nothing — it is the steady
+/// state the next poll clears once the keychain unlocks, and a line per tick
+/// for its whole duration is the noise the seed's disposition pattern exists
+/// to avoid — while every other class goes through the announcement memo.
+#[test]
+fn a_convergence_keychain_failure_routes_the_locked_keychain_as_silent() {
+    assert_eq!(
+        converge_leg_disposition(crate::claude::SecurityExitClass::InteractionNotAllowed),
+        ConvergeLegDisposition::Silent,
+        "the classified locked-keychain transient must not log per tick"
+    );
+    assert_eq!(
+        converge_leg_disposition(crate::claude::SecurityExitClass::ItemNotFound),
+        ConvergeLegDisposition::Announce
+    );
+    assert_eq!(
+        converge_leg_disposition(crate::claude::SecurityExitClass::Unclassified),
+        ConvergeLegDisposition::Announce
+    );
+}
+
+/// The standing-failure memo the legs log behind, pinned through the same
+/// once-per-(member, reason) gate: a persistent non-transient failure
+/// announces once and stays silent across ticks until the class, the leg, or
+/// the member changes — a landed swap or convergence clears the memo, which
+/// `a_standing_refusal_is_announced_once_per_reason` already pins.
+#[test]
+fn a_convergence_keychain_failure_memo_silences_a_standing_fault() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let launch = member("carry-a");
+        member_store(&launch);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+
+        let carry =
+            SwapRefused::ConvergeCarryFailed(crate::claude::SecurityExitClass::ItemNotFound);
+        assert!(
+            swap.should_announce("carry-a", &carry),
+            "the first failure is news"
+        );
+        assert!(
+            !swap.should_announce("carry-a", &carry),
+            "the standing failure must not repeat every tick"
+        );
+        let changed_class =
+            SwapRefused::ConvergeCarryFailed(crate::claude::SecurityExitClass::Unclassified);
+        assert!(
+            swap.should_announce("carry-a", &changed_class),
+            "a changed class is news"
+        );
+        let sign_out =
+            SwapRefused::ConvergeSignOutFailed(crate::claude::SecurityExitClass::ItemNotFound);
+        assert!(
+            swap.should_announce("carry-a", &sign_out),
+            "a changed leg is news"
+        );
+        assert!(
+            !swap.should_announce("carry-a", &sign_out),
+            "the new reason is then the standing one"
+        );
+    });
+}
+
 // ── bare `claude` session markers ────────────────────────────────────────────
 
 /// The whole safety argument for counting bare sessions: their markers live
@@ -8465,6 +8772,182 @@ fn rotation_blocked_for_reads_what_the_live_session_holds() {
         assert!(
             !rotation_blocked_for(&crate::profile::ProfileName::from("wired-roll")),
             "the narrowing is not wired into rotation_blocked_for"
+        );
+    });
+}
+
+// ── the fan-out warning (P1) ─────────────────────────────────────────────────
+
+/// The exact warning fires only from two live sessions up: `<n>` is the
+/// observed live count including the session whose item write just landed,
+/// and the threshold is `n >= 2` — one session on its own rotating pair is
+/// the pre-arming norm, not a fan-out.
+#[test]
+fn a_fanout_warning_fires_at_two_and_three_live_sessions() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-a");
+        let store = crate::profile::profile_dir(&name)
+            .expect("profile_dir")
+            .join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let session = SessionId::mint();
+
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            None,
+            "one session on its own rotating pair is the pre-arming norm"
+        );
+
+        let _second = live_session_launched_on("fanout-a", "22222-1", &store);
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            Some(
+                "clauth: warning: 'fanout-a' has 2 live sessions sharing one rotating login; run `clauth rolling-token fanout-a` before one refresh signs the others out"
+                    .to_string()
+            ),
+            "the second live session holding the rotating login is exactly the warning"
+        );
+
+        let _third = live_session_launched_on("fanout-a", "22222-2", &store);
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            Some(
+                "clauth: warning: 'fanout-a' has 3 live sessions sharing one rotating login; run `clauth rolling-token fanout-a` before one refresh signs the others out"
+                    .to_string()
+            ),
+            "the observed count includes every live holder"
+        );
+    });
+}
+
+/// Registry rows are the real thing, and a row whose session is gone drops by
+/// the same liveness predicate the tally/decision leg uses — never counted
+/// into a warning that names it as live.
+#[test]
+fn a_fanout_warning_ignores_dead_rows() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-dead");
+        let store = crate::profile::profile_dir(&name)
+            .expect("profile_dir")
+            .join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let session = SessionId::mint();
+
+        // A row with no held marker: the session it names is gone.
+        register_row("fanout-dead", "33333-3", Some(store.clone()));
+
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            None,
+            "a dead row must not count a session the warning names as live"
+        );
+    });
+}
+
+/// A row whose launch_store names a refreshless sidecar holds no rotating
+/// login, so it never counts toward the fan-out.
+#[test]
+fn a_fanout_warning_ignores_rows_holding_a_refreshless_store() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-side");
+        let dir = crate::profile::profile_dir(&name).expect("profile_dir");
+        let store = dir.join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let sidecar = dir.join("session-token.json");
+        write_creds(&sidecar, None);
+        let session = SessionId::mint();
+
+        let _side = live_session_launched_on("fanout-side", "44444-4", &sidecar);
+
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            None,
+            "a refreshless row holds no rotating login to share"
+        );
+    });
+}
+
+/// Attribution follows the tally: a row whose current/start profile is not
+/// this one is another account's session, however its store reads. The
+/// foreign row names THIS profile's store on purpose — the store-path check
+/// alone must not drop it, or a plant deleting the attribution check stays
+/// green.
+#[test]
+fn a_fanout_warning_ignores_rows_attributed_to_another_profile() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-a");
+        let store = crate::profile::profile_dir(&name)
+            .expect("profile_dir")
+            .join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let session = SessionId::mint();
+
+        // Attributed to fanout-other but launch_store = fanout-a's store:
+        // only the attribution check can drop it from fanout-a's count.
+        let _foreign = live_session_launched_on("fanout-other", "55555-5", &store);
+
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            None,
+            "another profile's session is not this profile's fan-out"
+        );
+    });
+}
+
+/// A failed item write created no new copy, so it must never raise the
+/// success-shaped warning — the decision is fed the write's own outcome.
+#[test]
+fn a_failed_item_write_never_raises_the_fanout_warning() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-fail");
+        let store = crate::profile::profile_dir(&name)
+            .expect("profile_dir")
+            .join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let session = SessionId::mint();
+
+        let _other = live_session_launched_on("fanout-fail", "66666-6", &store);
+
+        assert_eq!(
+            fanout_warning(false, &name, &store, &session),
+            None,
+            "a failed write created no copy and must not warn like a landed one"
+        );
+    });
+}
+
+/// The swap Install arm's shape: the writing session's row still names its
+/// PREVIOUS store until the row repoint lands, so the count must include the
+/// writing session by construction rather than off its row.
+#[test]
+fn a_fanout_warning_counts_the_session_whose_write_landed_even_while_its_row_names_its_previous_store()
+ {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let name = crate::profile::ProfileName::from("fanout-swap");
+        let dir = crate::profile::profile_dir(&name).expect("profile_dir");
+        let store = dir.join("credentials.json");
+        write_creds(&store, Some("rt-live"));
+        let session = SessionId::mint();
+
+        // The writing session's own row names the outgoing member's store.
+        let previous = dir.join("previous.json");
+        write_creds(&previous, Some("rt-old"));
+        register_row("fanout-swap", session.as_str(), Some(previous));
+        let _other = live_session_launched_on("fanout-swap", "77777-7", &store);
+
+        assert_eq!(
+            fanout_warning(true, &name, &store, &session),
+            Some(
+                "clauth: warning: 'fanout-swap' has 2 live sessions sharing one rotating login; run `clauth rolling-token fanout-swap` before one refresh signs the others out"
+                    .to_string()
+            ),
+            "the observed count includes the session whose write just landed"
         );
     });
 }
@@ -9675,9 +10158,9 @@ fn the_namespaced_keychain_sinks_require_a_durable_ownership_witness() {
         runtime_src
             .matches("namespaced_keychain_ledger::authorize_write(")
             .count(),
-        5,
+        6,
         "every namespaced producer (swap install + sign-out, start sign-out + install, \
-         watchdog retry) takes the ownership-first path"
+         watchdog retry, convergence sign-out) takes the ownership-first path"
     );
 
     let keychain_src = include_str!("../../src/keychain.rs");

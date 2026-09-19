@@ -746,6 +746,59 @@ fn live_session_holds_rotatable(name: &ProfileName) -> bool {
     false
 }
 
+/// Live registry rows currently attributed to `profile` and holding `store`
+/// (their `launch_store` names it), counted like the tally counts sessions:
+/// attribution is `current_member` first, `start_profile` for a session that
+/// never moved, and dead rows drop by the same liveness predicate the
+/// tally/decision leg uses. Markers are never counted — a swapped session
+/// retains old-member markers for life. `session`'s own row is excluded:
+/// the caller adds the session whose write just landed by construction.
+fn sessions_holding_store(profile: &ProfileName, store: &Path, session: &SessionId) -> usize {
+    crate::live_sessions::list()
+        .into_iter()
+        .filter(|row| {
+            let member = row.current_member.as_deref().unwrap_or(&row.start_profile);
+            let probe = crate::profile::ProfileName::from(member);
+            member == profile.as_str()
+                && row.launch_store.as_deref() == Some(store)
+                && row.session_id != session.as_str()
+                && session_row_is_live(&probe, row.isolated, &row.session_id)
+        })
+        .count()
+}
+
+/// The fan-out warning decision behind the three namespaced-item install
+/// sites (the start seed, its watchdog retry, and the swap Install arm).
+/// `landed` is the item write's own outcome: only a write that completed
+/// created a new copy of the rotating pair, so a failed one returns `None` —
+/// the warning is success-shaped. `n` is the observed live count including
+/// `session` itself, whose item write just landed; the exact sentence fires
+/// only at `n >= 2`. The event line carries the profile name and the count,
+/// never credential values.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the production call sites are the macOS item-install legs; the decision is pinned on every platform"
+    )
+)]
+fn fanout_warning(
+    landed: bool,
+    profile: &ProfileName,
+    store: &Path,
+    session: &SessionId,
+) -> Option<String> {
+    if !landed {
+        return None;
+    }
+    let n = sessions_holding_store(profile, store, session) + 1;
+    (n >= 2).then(|| {
+        format!(
+            "clauth: warning: '{profile}' has {n} live sessions sharing one rotating login; run `clauth rolling-token {profile}` before one refresh signs the others out"
+        )
+    })
+}
+
 /// [`rotation_blocked_by_live_session`] against the live host and marker state —
 /// what every rotation leg and both TUI pre-refusals call.
 ///
@@ -2212,6 +2265,30 @@ pub(crate) enum SwapRefused {
     /// sessions sharing one marker identity, and teardown unlinks only what it
     /// owns, so the survivor would be reported dead while it runs.
     MarkerNotLockable,
+    /// A same-member convergence's macOS carry-back of the per-session
+    /// Keychain item failed with a non-transient class. The class keys the
+    /// once-per-(member, reason) announcement; the classified locked-keychain
+    /// transient never arrives here ([`converge_leg_disposition`] stops it
+    /// silently).
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "constructed only by the macOS convergence legs; the memo pins construct it on every platform"
+        )
+    )]
+    ConvergeCarryFailed(crate::claude::SecurityExitClass),
+    /// The convergence's macOS sign-out leg failed with a non-transient class
+    /// — the twin of [`Self::ConvergeCarryFailed`] so a carry failure and a
+    /// sign-out failure stay distinct reasons to the announcement memo.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "constructed only by the macOS convergence legs; the memo pins construct it on every platform"
+        )
+    )]
+    ConvergeSignOutFailed(crate::claude::SecurityExitClass),
 }
 
 impl std::fmt::Display for SwapRefused {
@@ -2235,6 +2312,14 @@ impl std::fmt::Display for SwapRefused {
             Self::MarkerNotLockable => {
                 f.write_str("its liveness marker is held by another process")
             }
+            Self::ConvergeCarryFailed(class) => write!(
+                f,
+                "carrying its per-session Keychain pair back failed ({class:?})"
+            ),
+            Self::ConvergeSignOutFailed(class) => write!(
+                f,
+                "signing its per-session Keychain item out failed ({class:?})"
+            ),
         }
     }
 }
@@ -2521,6 +2606,24 @@ impl ShutdownFlag {
     }
 }
 
+/// Whether the same-member source transition the convergence admits holds:
+/// the canonical the cell names parses refreshable while the profile's
+/// install source now selects a DISTINCT refreshless store. Unknown and
+/// unreadable inputs fail the predicate — do nothing, and the existing
+/// fail-closed rotation refusal stays in place.
+fn converge_transition_holds(current: &Path, selected: &Path) -> bool {
+    if current == selected {
+        return false;
+    }
+    let refreshable = crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(current)
+        .ok()
+        .is_some_and(|c| c.refresh_token().is_some());
+    let refreshless = crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(selected)
+        .ok()
+        .is_some_and(|c| c.refresh_token().is_none());
+    refreshable && refreshless
+}
+
 /// The per-session credential swap executor: a live `clauth start` session moving
 /// from the account it launched on to another chain member, without a restart and
 /// without letting a rotation spend a single-use refresh token the live Claude
@@ -2659,6 +2762,7 @@ impl SessionSwap {
             .and_then(|row| row.intended_member)
             .filter(|intended| *intended != self.member())
         else {
+            self.poll_converge();
             return;
         };
         let sid = self.session.as_str();
@@ -2668,6 +2772,31 @@ impl SessionSwap {
             }
             Ok(SwapOutcome::Refused(why)) => self.announce_refusal(&intended, why),
             Err(e) => logline!("clauth: session {sid} could not swap onto {intended}: {e:#}"),
+        }
+    }
+
+    /// The in-place convergence leg: with no cross-member intent standing,
+    /// detect whether this session's own member was armed for rolling tokens
+    /// under it — the canonical still refreshable while the install source now
+    /// selects a refreshless sidecar — and move the session onto the sidecar
+    /// through the same executor. Silent on a refusal: the no-op, the
+    /// unreadable inputs, and the locked-keychain transient are the steady
+    /// state the next poll re-detects, and the fail-closed rotation refusal
+    /// stands until the row's `launch_store` follows the link.
+    fn poll_converge(&self) {
+        let member = self.member();
+        match self.swap_to(&member) {
+            Ok(SwapOutcome::Swapped) => {
+                logline!(
+                    "clauth: session {} converged onto {member}'s rolling token",
+                    self.session.as_str()
+                );
+            }
+            Ok(SwapOutcome::Refused(_)) => {}
+            Err(e) => logline!(
+                "clauth: session {} could not converge onto {member}'s rolling token: {e:#}",
+                self.session.as_str()
+            ),
         }
     }
 
@@ -2689,6 +2818,13 @@ impl SessionSwap {
     /// it returns is the touch step's only key: `load_profile` below is what
     /// clears a crash-staged credential sidecar, and moving the store's mtime
     /// before that clearing would discard the sidecar for good.
+    ///
+    /// A same-member call compares SOURCE identity before the `AlreadyCurrent`
+    /// verdict: the one same-member shape admitted is the armed transition
+    /// ([`converge_transition_holds`] — the canonical refreshable, the install
+    /// source now selecting a distinct refreshless sidecar), which the
+    /// in-place convergence executes. Every other same-member state stays a
+    /// no-op.
     fn precondition(&self, intended: &str) -> Result<SwapPlan, SwapRefused> {
         let intended = ProfileName::from(intended);
         if self.shutdown.is_begun() {
@@ -2703,7 +2839,15 @@ impl SessionSwap {
             return Err(SwapRefused::IsolatedSession);
         }
         if intended == self.member() {
-            return Err(SwapRefused::AlreadyCurrent);
+            let store = crate::claude::install_source_path(&intended)
+                .map_err(|e| SwapRefused::ProfileUnreadable(format!("{e:#}")))?;
+            if !converge_transition_holds(&self.canonical(), &store) {
+                return Err(SwapRefused::AlreadyCurrent);
+            }
+            return Ok(SwapPlan {
+                member: intended,
+                store,
+            });
         }
         let profile = crate::profile::load_profile(&intended)
             .map_err(|e| SwapRefused::ProfileUnreadable(format!("{e:#}")))?;
@@ -2777,6 +2921,9 @@ impl SessionSwap {
             Ok(plan) => plan,
             Err(refused) => return Ok(SwapOutcome::Refused(refused)),
         };
+        if plan.member.as_str() == self.member() {
+            return self.converge_in_place(&plan);
+        }
         let _rotation = RotationGuard::acquire(&plan.member)?;
         let link = self.runtime.join(".credentials.json");
         // The install source of the member being LEFT — what the macOS
@@ -2908,6 +3055,20 @@ impl SessionSwap {
                                     &owned,
                                 )
                             });
+                            // Before the row repoint below: the row still names
+                            // the outgoing member's store, so the fan-out count
+                            // adds this session by construction rather than off
+                            // its row. Only a landed write created a new copy
+                            // of the rotating pair, so the failed outcome
+                            // cannot raise the success-shaped warning.
+                            if let Some(line) = fanout_warning(
+                                write.is_ok(),
+                                &plan.member,
+                                &plan.store,
+                                &self.session,
+                            ) {
+                                logline!("{line}");
+                            }
                             match write {
                                 // The item now holds the incoming member's pair,
                                 // so that is what the session reads: the row's
@@ -2982,6 +3143,211 @@ impl SessionSwap {
             }
         }
         Ok(outcome)
+    }
+
+    /// The same-member convergence executor, reached only for a plan
+    /// [`precondition`](Self::precondition) admitted: the canonical the cell
+    /// names parses refreshable while the profile's install source now selects
+    /// a distinct refreshless sidecar. Moves the session onto the sidecar
+    /// without changing member — drain, clear the per-session Keychain item,
+    /// then repoint the link.
+    ///
+    /// ONE rotation guard spans the sequence. The state flock is taken in two
+    /// holds — the drain hold, then the commit hold after the keychain legs,
+    /// because a `security` subprocess must never span the flock. The
+    /// transition is REVALIDATED from disk at the head of the commit hold:
+    /// a profile disarmed in the gap (or a sidecar re-filled with a rotating
+    /// pair) stops the move with the row and cell untouched. Inside the
+    /// commit hold the order is the swap's own: everything fallible runs
+    /// before the link moves, and the cell publishes only once it has.
+    ///
+    /// macOS ordering is load-bearing: the item legs land BEFORE the commit.
+    /// A failed carry or sign-out returns a refusal with nothing moved — the
+    /// item still holds the rotating pair, so a repoint would strand the
+    /// session on the pair while the row said sidecar, the fail-open
+    /// direction. The bearer is never installed into the item.
+    fn converge_in_place(&self, plan: &SwapPlan) -> Result<SwapOutcome> {
+        let _rotation = RotationGuard::acquire(&plan.member)?;
+        let link = self.runtime.join(".credentials.json");
+        // The store being converged OFF of — what the macOS carry-back below
+        // writes the session's Keychain pair into. Captured inside the hold.
+        #[cfg(target_os = "macos")]
+        let mut previous_store: Option<std::path::PathBuf> = None;
+        with_state_lock(|_held| {
+            let current = self.canonical();
+            #[cfg(target_os = "macos")]
+            {
+                previous_store = Some(current.clone());
+            }
+            // DRAIN. A Claude Code re-login sitting in the runtime file belongs
+            // to the member the link STILL resolves to; once canonical moves,
+            // the next tick would write those bytes into the sidecar and the
+            // refresh token would be gone.
+            sync_credentials_unlocked(&link, &current)?;
+            Ok(())
+        })?;
+        // macOS: CARRY, then SIGN OUT — in that order, and the sign-out only
+        // runs if the carry could: the item may hold the freshest pair once CC
+        // has refreshed there, and signing out over a failed carry would
+        // destroy it. A failed leg returns a refusal with nothing moved — the
+        // session stays on the rotating pair with the row and cell naming it,
+        // and the next poll retries. A failure classified as the
+        // locked-keychain transient (the carry's Err, the sign-out's
+        // SkippedLocked) stops silently, and every other class announces once
+        // per (member, class) through the cell's refusal memo — so neither
+        // shape writes a line per tick while the keychain stays locked.
+        // `enabled()` is a runtime check so a macOS `cfg(test)` build (no
+        // keychain) converges on the file layer alone, exactly like the seed.
+        #[cfg(target_os = "macos")]
+        if crate::keychain::enabled() {
+            let carried = previous_store
+                .as_deref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("the rotating store this session converges off of is unknown")
+                })
+                .and_then(|store| crate::claude::carry_session_item_into(store, &self.runtime));
+            match carried {
+                Ok(()) => match converge_item_arm(
+                    crate::profile::read_json_file::<crate::profile::ClaudeCredentials>(
+                        &plan.store,
+                    )
+                    .ok()
+                    .as_ref(),
+                ) {
+                    SwapItemArm::SignOut => {
+                        let sign_out = namespaced_keychain_ledger::authorize_write(
+                            &self.runtime,
+                            &plan.member,
+                            &self.session,
+                        )
+                        .and_then(|owned| {
+                            crate::keychain::keychain_sign_out_for_config_dir(&self.runtime, &owned)
+                        });
+                        match sign_out {
+                            Ok(crate::keychain::SignOutOutcome::SignedOut) => {}
+                            // The item still serves the rotating pair (locked,
+                            // or the sign-out failed): committing would repoint
+                            // the link and row while the session keeps reading
+                            // the item — the fail-open direction. Stop on the
+                            // safe side; the next poll retries.
+                            Ok(crate::keychain::SignOutOutcome::SkippedLocked) => {
+                                return Ok(SwapOutcome::Refused(SwapRefused::AlreadyCurrent));
+                            }
+                            Err(e) => {
+                                let class = crate::keychain::classified_exit(&e);
+                                // The classified locked-keychain transient is
+                                // the steady state the next poll clears once
+                                // the keychain unlocks; a line per tick for
+                                // its whole duration is the noise the seed's
+                                // disposition pattern exists to avoid. Silent
+                                // — no memo, nothing to announce.
+                                if converge_leg_disposition(class) == ConvergeLegDisposition::Silent
+                                {
+                                    return Ok(SwapOutcome::Refused(SwapRefused::AlreadyCurrent));
+                                }
+                                if self.should_announce(
+                                    plan.member.as_str(),
+                                    &SwapRefused::ConvergeSignOutFailed(class),
+                                ) {
+                                    logline!(
+                                        "clauth: session {} could not converge onto {}'s rolling \
+                                         token: signing its per-session Keychain item out failed: \
+                                         {e:#}. The session stays on the rotating pair; the next \
+                                         poll retries",
+                                        self.session.as_str(),
+                                        plan.member
+                                    );
+                                }
+                                return Ok(SwapOutcome::Refused(
+                                    SwapRefused::ConvergeSignOutFailed(class),
+                                ));
+                            }
+                        }
+                    }
+                    // Unreachable by admission (the transition selects a
+                    // refreshless store) and never executed: installing the
+                    // bearer would strand the session on a snapshot the
+                    // re-stamp leg can no longer reach.
+                    SwapItemArm::Install => {
+                        return Ok(SwapOutcome::Refused(SwapRefused::AlreadyCurrent));
+                    }
+                },
+                Err(e) => {
+                    let class = crate::keychain::classified_exit(&e);
+                    // The classified locked-keychain transient is the steady
+                    // state the next poll clears once the keychain unlocks; a
+                    // line per tick for its whole duration is the noise the
+                    // seed's disposition pattern exists to avoid. Silent — no
+                    // memo, nothing to announce.
+                    if converge_leg_disposition(class) == ConvergeLegDisposition::Silent {
+                        return Ok(SwapOutcome::Refused(SwapRefused::AlreadyCurrent));
+                    }
+                    if self.should_announce(
+                        plan.member.as_str(),
+                        &SwapRefused::ConvergeCarryFailed(class),
+                    ) {
+                        logline!(
+                            "clauth: session {} could not converge onto {}'s rolling token: \
+                             carrying the per-session Keychain pair back into the rotating store \
+                             failed: {e:#}. The session stays on the rotating pair; the next poll \
+                             retries",
+                            self.session.as_str(),
+                            plan.member
+                        );
+                    }
+                    return Ok(SwapOutcome::Refused(SwapRefused::ConvergeCarryFailed(
+                        class,
+                    )));
+                }
+            }
+        }
+        with_state_lock(|_held| {
+            // REVALIDATE the transition after the lock gap. Two holds cannot
+            // pin it: `RotationGuard::acquire` blocks, and the keychain legs
+            // above release the flock, so the profile could have been disarmed
+            // (or the sidecar re-filled) since `precondition` read it. If it
+            // no longer holds, stop on the safe side — nothing has moved, and
+            // the row and cell stay truthful.
+            if !converge_transition_holds(&self.canonical(), &plan.store) {
+                return Ok(SwapOutcome::Refused(SwapRefused::AlreadyCurrent));
+            }
+            let current = self.canonical();
+            let paths =
+                SessionPaths::resolve(&plan.member, self.isolation, &self.session, self.mode)?;
+            let claim = self.claim_markers(&paths)?;
+            if matches!(claim, MarkerClaim::Foreign) {
+                return Ok(SwapOutcome::Refused(SwapRefused::MarkerNotLockable));
+            }
+            // Re-checked in the hold for the same reason the swap's is: the
+            // sidecar could have been removed since the revalidation above.
+            if !plan.store.exists() {
+                return Ok(SwapOutcome::Refused(SwapRefused::NoCredentialStore));
+            }
+            touch_store(plan, file_mtime(&current))?;
+            relink_to_canonical(&link, &plan.store)?;
+
+            // Past here the session IS on the sidecar, so nothing may report
+            // otherwise. The row's `launch_store` follows in the same hold on
+            // every platform: the item legs landed BEFORE this hold, so the
+            // session's Claude Code already reads the file layer the link
+            // just moved.
+            self.publish_swap(plan, claim);
+            if let Err(e) =
+                crate::live_sessions::update_as_session(self.session.as_str(), |fields| {
+                    fields.set_current_member(plan.member.as_str());
+                    fields.set_last_swap_at(crate::usage::now_ms());
+                    fields.set_launch_store(plan.store.clone());
+                })
+            {
+                logline!(
+                    "clauth: session {} converged onto {}'s rolling token but its row did not \
+                     update: {e:#}",
+                    self.session.as_str(),
+                    plan.member
+                );
+            }
+            Ok(SwapOutcome::Swapped)
+        })
     }
 
     /// Point the row's rotation verdict at the store the plan repointed the
@@ -4544,6 +4910,62 @@ fn swap_item_arm(store: Option<&crate::profile::ClaudeCredentials>) -> SwapItemA
     }
 }
 
+/// The Keychain arm for the same-member convergence, pinned pure like
+/// [`swap_item_arm`] while the macOS leg that executes it is unreachable by
+/// `cfg(test)`. The convergence admits only a refreshless selected source
+/// ([`converge_transition_holds`]), so the arm is [`SwapItemArm::SignOut`]
+/// for every store the transition can select — the bearer is never installed
+/// into the item, which would strand the session on a snapshot the re-stamp
+/// leg can no longer reach. Delegates to [`swap_item_arm`] so the one
+/// refreshless→SignOut rule has one home.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS convergence leg; the arm choice is pinned on every platform"
+    )
+)]
+fn converge_item_arm(store: Option<&crate::profile::ClaudeCredentials>) -> SwapItemArm {
+    swap_item_arm(store)
+}
+
+/// What a convergence Keychain leg does with a failure's classified exit.
+/// PURE so the routing is pinned on every platform while the legs themselves
+/// only a Mac exercises: the locked-keychain transient (the one measured
+/// shape a locked keychain hands a read back) stops silently — it is the
+/// steady state the next poll clears once the keychain unlocks, and a line
+/// per tick for its whole duration is the noise the seed's disposition
+/// pattern exists to avoid. Every other class announces through the cell's
+/// once-per-(member, reason) memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production callers are the macOS convergence legs; the routing is pinned on every platform"
+    )
+)]
+enum ConvergeLegDisposition {
+    Silent,
+    Announce,
+}
+
+/// See [`ConvergeLegDisposition`].
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production callers are the macOS convergence legs; the routing is pinned on every platform"
+    )
+)]
+fn converge_leg_disposition(class: crate::claude::SecurityExitClass) -> ConvergeLegDisposition {
+    match class {
+        crate::claude::SecurityExitClass::InteractionNotAllowed => ConvergeLegDisposition::Silent,
+        crate::claude::SecurityExitClass::ItemNotFound
+        | crate::claude::SecurityExitClass::Unclassified => ConvergeLegDisposition::Announce,
+    }
+}
+
 /// What the session-start Keychain seed does with a leg that failed, keyed on
 /// the `security` exit classification: the one measured transient (a locked
 /// keychain, [`crate::claude::SecurityExitClass::InteractionNotAllowed`])
@@ -4639,7 +5061,16 @@ fn seed_session_keychain_item(
                                     )
                                 });
                         match write {
-                            Ok(()) => return None,
+                            Ok(()) => {
+                                // A second live session now holds this rotating
+                                // login: warn, then return. The failed arm below
+                                // created no copy and must not reach the
+                                // success-shaped warning.
+                                if let Some(line) = fanout_warning(true, name, canonical, session) {
+                                    logline!("{line}");
+                                }
+                                return None;
+                            }
                             Err(e) => (
                                 "writing its per-session Keychain item",
                                 "Its Claude Code falls back to the runtime credentials file, where \
@@ -4735,6 +5166,17 @@ fn retry_seeded_keychain_item(swap: &SessionSwap, seed_retry: &std::sync::Mutex<
         .err(),
         Err(e) => Some(e),
     };
+    // The retry's write outcome feeds the fan-out decision: a re-seed that
+    // landed copied the rotating pair into a second live session's item, a
+    // failed one created no copy.
+    if let Some(line) = fanout_warning(
+        failed.is_none(),
+        &ProfileName::from(swap.member()),
+        &target,
+        &swap.session,
+    ) {
+        logline!("{line}");
+    }
     match failed {
         None => {
             logline!("clauth: re-seeded the per-session Keychain item after the keychain unlocked")
