@@ -9573,6 +9573,244 @@ fn gc_finishes_a_stranded_rescue_tombstone() {
     assert!(!tombstone.exists(), "the tombstone must be collected");
 }
 
+#[test]
+fn namespaced_keychain_owner_records_service_profile_session_owner_only() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/ledgered/runtime-700-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("ledgered");
+    let session = SessionId::for_test("700-1");
+    let derived = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+    let persisted = std::cell::Cell::new(false);
+    let owned =
+        namespaced_keychain_ledger::authorize_write_with(&runtime, &profile, &session, |owners| {
+            persisted.set(true);
+            namespaced_keychain_ledger::save(owners)
+        })
+        .expect("persist owner before write");
+
+    assert!(
+        persisted.get(),
+        "the persist leg ran before the witness minted"
+    );
+    assert_eq!(
+        owned.service(),
+        derived,
+        "the witness names the service the durable row authorizes"
+    );
+    let owners = namespaced_keychain_ledger::load().expect("read ledger");
+    assert_eq!(
+        owners.owners,
+        vec![namespaced_keychain_ledger::Owner {
+            service: owned.service().to_string(),
+            profile,
+            session: "700-1".to_string(),
+        }],
+        "the durable row carries the semantic service/profile/session owner"
+    );
+    assert_eq!(
+        namespaced_keychain_ledger::owned_services().expect("owned services"),
+        BTreeSet::from([owned.service().to_string()]),
+        "the census view is derived from the durable owner rows"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = namespaced_keychain_ledger::path().expect("ledger path");
+        let mode = fs::metadata(&path)
+            .expect("ledger metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the ledger is born owner-only");
+        let dir_mode = fs::metadata(path.parent().expect("ledger parent"))
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "the ledger parent is owner-only");
+    }
+}
+
+#[test]
+fn failed_owner_persist_prevents_the_namespaced_item_write_decision() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join("runtime-701-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("blocked");
+    let session = SessionId::for_test("701-1");
+
+    let result =
+        namespaced_keychain_ledger::authorize_write_with(&runtime, &profile, &session, |_| {
+            anyhow::bail!("posed ledger persist failure")
+        });
+
+    assert!(
+        result.is_err(),
+        "the ledger failure is returned — no write witness exists to reach a Keychain sink"
+    );
+    assert!(
+        namespaced_keychain_ledger::load()
+            .expect("read ledger")
+            .owners
+            .is_empty(),
+        "the failed persist strands no ownership row"
+    );
+}
+
+/// The ownership-first wiring, structurally: every namespaced producer routes
+/// through `authorize_write`, whose [`OwnedKeychainWrite`] witness is the only
+/// argument the macOS Keychain sinks accept, so a `/usr/bin/security` write
+/// cannot run without a durable row behind it (the type enforces it on the
+/// macOS build). The producer blocks and sink signatures are macOS-only code no
+/// Linux run compiles, so the pin is a source scan, the same mechanism the
+/// `run_delegate` wiring pins use.
+#[test]
+fn the_namespaced_keychain_sinks_require_a_durable_ownership_witness() {
+    let runtime_src = include_str!("../../src/runtime.rs");
+    assert_eq!(
+        runtime_src
+            .matches("namespaced_keychain_ledger::authorize_write(")
+            .count(),
+        5,
+        "every namespaced producer (swap install + sign-out, start sign-out + install, \
+         watchdog retry) takes the ownership-first path"
+    );
+
+    let keychain_src = include_str!("../../src/keychain.rs");
+    for sink in [
+        "pub(crate) fn keychain_install_for_config_dir(",
+        "pub(crate) fn keychain_sign_out_for_config_dir(",
+    ] {
+        let signature = keychain_src
+            .split_once(sink)
+            .expect("the sink is defined")
+            .1
+            .split_once('{')
+            .expect("the sink body opens")
+            .0;
+        assert!(
+            signature.contains("OwnedKeychainWrite"),
+            "the {sink} sink accepts only the durable-ownership witness, never a raw service \
+             string: {signature}"
+        );
+    }
+
+    let claude_src = include_str!("../../src/claude.rs");
+    let signature = claude_src
+        .split_once("pub(crate) fn keychain_mirror_source_for_config_dir(")
+        .expect("the mirror source is defined")
+        .1
+        .split_once('{')
+        .expect("the mirror body opens")
+        .0;
+    assert!(
+        signature.contains("OwnedKeychainWrite"),
+        "the mirror source accepts only the durable-ownership witness: {signature}"
+    );
+}
+
+/// The walk-derived collector takes the same salvage path the census does:
+/// readable bytes are quarantined before its delete, and no direct delete
+/// survives beside it. The collector is macOS-only code no Linux run compiles,
+/// so the pin is a source scan.
+#[test]
+fn the_stale_runtime_collector_takes_the_salvage_path() {
+    let runtime_src = include_str!("../../src/runtime.rs");
+    let collector = runtime_src
+        .split_once("fn collect_orphaned_keychain_item(")
+        .expect("the collector is defined")
+        .1
+        .split_once("pub(crate) fn shared_runtime_dirs")
+        .expect("the collector body ends where the shared-dirs walk begins")
+        .0;
+    assert!(
+        collector.contains("crate::keychain::salvage_delete_namespaced_item(service)"),
+        "the walk-derived collector salvages readable bytes before its delete: {collector}"
+    );
+    assert!(
+        !collector.contains("delete_at("),
+        "no direct delete survives beside the salvage path: {collector}"
+    );
+}
+
+#[test]
+fn retiring_a_namespaced_keychain_owner_removes_later_delete_authority() {
+    let _home = HomeSandbox::new();
+    let service = "Claude Code-credentials-deadbeef";
+    let profile = crate::profile::ProfileName::from("retired");
+    let session = SessionId::for_test("702-1");
+    namespaced_keychain_ledger::record(service, &profile, &session).expect("record owner");
+
+    namespaced_keychain_ledger::retire(service).expect("retire owner");
+
+    assert!(
+        namespaced_keychain_ledger::owned_services()
+            .expect("owned services")
+            .is_empty(),
+        "a reused service has no delete authority after its row retires"
+    );
+}
+
+#[test]
+fn the_namespaced_keychain_ledger_rejects_malformed_owner_rows() {
+    let _home = HomeSandbox::new();
+    let path = namespaced_keychain_ledger::path().expect("ledger path");
+    fs::create_dir_all(path.parent().expect("ledger parent")).expect("clauth dir");
+    let write = |body: &str| fs::write(&path, body).expect("fixture ledger");
+
+    write(r#"{"owners":[{"service":"not-a-namespaced-service","profile":"p","session":"1-1"}]}"#);
+    assert!(
+        namespaced_keychain_ledger::owned_services().is_err(),
+        "a service the naming rule could not produce must reject the whole ledger"
+    );
+
+    write(
+        r#"{"owners":[{"service":"Claude Code-credentials-deadbeef","profile":"bad/name","session":"1-1"}]}"#,
+    );
+    assert!(
+        namespaced_keychain_ledger::owned_services().is_err(),
+        "a profile name the charset gate refuses must reject the whole ledger"
+    );
+
+    write(
+        r#"{"owners":[{"service":"Claude Code-credentials-deadbeef","profile":"p","session":"not-a-sid"}]}"#,
+    );
+    assert!(
+        namespaced_keychain_ledger::owned_services().is_err(),
+        "a session id outside the minted shape must reject the whole ledger"
+    );
+
+    write(
+        r#"{"owners":[{"service":"Claude Code-credentials-deadbeef","profile":"p","session":"1-1"},{"service":"Claude Code-credentials-cafebabe","profile":"q","session":"broken"}]}"#,
+    );
+    assert!(
+        namespaced_keychain_ledger::owned_services().is_err(),
+        "one malformed row among good ones fails the whole ledger closed"
+    );
+}
+
+#[test]
+fn a_ledger_row_outlives_its_profile_and_stays_authoritative() {
+    let _home = HomeSandbox::new();
+    namespaced_keychain_ledger::record(
+        "Claude Code-credentials-deadbeef",
+        &crate::profile::ProfileName::from("gone"),
+        &SessionId::for_test("703-1"),
+    )
+    .expect("record owner");
+
+    assert_eq!(
+        namespaced_keychain_ledger::owned_services().expect("owned services"),
+        BTreeSet::from(["Claude Code-credentials-deadbeef".to_string()]),
+        "a row whose profile was deleted stays authoritative — profile-deletion orphans \
+         are exactly the census's stranding-input class"
+    );
+}
+
 /// The arm selection for the macOS session-start Keychain seed — pure, so
 /// the absent→sign-out / refreshless→skip / else→carry decision is pinned on
 /// every platform while the seeding itself only a Mac exercises. The

@@ -4253,8 +4253,27 @@ fn is_namespaced_keychain_service_admits_only_suffixed_hex() {
 /// derives. PURE over text so the decision is pinned on every platform; the
 /// `security` I/O it feeds is macOS-only (`keychain::census_namespaced_items`).
 #[test]
-fn the_census_collects_only_namespaced_services_no_live_dir_explains() {
+fn the_census_spares_a_foreign_namespaced_item() {
+    let dump = "    0x00000007 <blob>=\"Claude Code-credentials-deadbeef\"\n";
+
+    assert!(
+        census_orphan_keychain_services(
+            dump,
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+        )
+        .is_empty(),
+        "shape alone must not authorize deleting a foreign CLAUDE_CONFIG_DIR item"
+    );
+}
+
+#[test]
+fn the_census_collects_only_owned_namespaced_services_no_live_dir_explains() {
     let live = std::collections::BTreeSet::from(["Claude Code-credentials-c56fc9bd".to_string()]);
+    let owned = std::collections::BTreeSet::from([
+        "Claude Code-credentials-c56fc9bd".to_string(),
+        "Claude Code-credentials-deadbeef".to_string(),
+    ]);
     let dump = "\
 keychain: \"/Users/u/Library/Keychains/login.keychain-db\"
 version: 512
@@ -4276,24 +4295,110 @@ attributes:
     0x00000007 <blob>=\"clauth-test-1234\"
 ";
     assert_eq!(
-        census_orphan_keychain_services(dump, &live),
+        census_orphan_keychain_services(dump, &live, &owned),
         vec!["Claude Code-credentials-deadbeef".to_string()],
-        "exactly the one namespaced service no live dir explains"
+        "exactly the owned namespaced service no live dir explains"
     );
-    // With nothing live both namespaced services are orphans; the bare item
-    // and the non-namespaced name still never are.
     assert_eq!(
-        census_orphan_keychain_services(dump, &std::collections::BTreeSet::new()).len(),
+        census_orphan_keychain_services(dump, &std::collections::BTreeSet::new(), &owned,).len(),
         2,
-        "an empty live set collects every namespaced service in the dump"
+        "an empty live set collects every ledgered namespaced service in the dump"
     );
     assert!(
         census_orphan_keychain_services(
             "    0x00000007 <blob>=\"Claude Code-credentials-c56fc9bd\"\n",
-            &live
+            &live,
+            &owned,
         )
         .is_empty(),
         "a dump naming only a live dir's service collects nothing"
+    );
+}
+
+#[test]
+fn the_census_parses_the_real_hex_dump_form() {
+    let service = "Claude Code-credentials-deadbeef";
+    let owned = std::collections::BTreeSet::from([service.to_string()]);
+    let dump = "    0x00000007 <blob>=0x436c6175646520436f64652d63726564656e7469616c732d6465616462656566  \"Claude Code-credentials-deadbeef\"\n";
+
+    assert_eq!(
+        census_orphan_keychain_services(dump, &std::collections::BTreeSet::new(), &owned),
+        vec![service.to_string()],
+        "the quoted service after a real hex value is still the service attribute"
+    );
+}
+
+/// The shared salvage-then-delete ordering, pure over injected legs: readable
+/// bytes are quarantined BEFORE the delete, a refused or failed salvage is
+/// named rather than fabricated as success (and the delete still lands), and
+/// the delete-side shape guard refuses a service the naming rule could not
+/// produce. The real `/usr/bin/security` legs compile on macOS alone; this
+/// pins the ordering every platform runs.
+#[test]
+fn the_namespaced_delete_salvages_readable_bytes_before_delete() {
+    let order = std::cell::RefCell::new(Vec::new());
+    let preserved = PathBuf::from("/sandbox/keychain-quarantine/item.json");
+    let result = salvage_delete_namespaced_item_with(
+        "Claude Code-credentials-deadbeef",
+        "test-account",
+        |_, _| {
+            order.borrow_mut().push("read");
+            Ok(Some("raw credential bytes".to_string()))
+        },
+        |_, raw| {
+            order.borrow_mut().push("quarantine");
+            assert_eq!(raw, "raw credential bytes");
+            Ok(preserved.clone())
+        },
+        |_, _| {
+            order.borrow_mut().push("delete");
+            Ok(())
+        },
+    )
+    .expect("collect ledgered item");
+
+    assert!(
+        matches!(result, SalvageOutcome::Preserved(path) if path == preserved),
+        "the collection reports the landed salvage"
+    );
+    assert_eq!(
+        order.into_inner(),
+        vec!["read", "quarantine", "delete"],
+        "readable bytes are preserved before the destructive call"
+    );
+
+    // A refused read is named and the delete still lands — never fabricated
+    // success, never a skipped collection.
+    let failed = salvage_delete_namespaced_item_with(
+        "Claude Code-credentials-deadbeef",
+        "test-account",
+        |_, _| anyhow::bail!("read refused"),
+        |_, _| unreachable!("no bytes to quarantine after a refused read"),
+        |_, _| Ok(()),
+    )
+    .expect("the delete still runs after a refused read");
+    let tail = salvage_tail(&failed);
+    assert!(
+        matches!(failed, SalvageOutcome::Failed(_)),
+        "a refused read reports a failed salvage: {tail}"
+    );
+    assert!(
+        tail.contains("could not be preserved first") && tail.contains("interaction prompt"),
+        "the operator-visible tail names the refusal class without claiming a prompt always \
+         appears: {tail}"
+    );
+
+    // The delete-side shape guard runs before any leg.
+    assert!(
+        salvage_delete_namespaced_item_with(
+            "Claude Code-credentials",
+            "test-account",
+            |_, _| unreachable!("the shape guard refuses before the read"),
+            |_, _| unreachable!("the shape guard refuses before the quarantine"),
+            |_, _| unreachable!("the shape guard refuses before the delete"),
+        )
+        .is_err(),
+        "a service the naming rule could not produce is refused, legs untouched"
     );
 }
 

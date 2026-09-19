@@ -15,11 +15,11 @@
 use super::{
     Keep, PutTransport, SECURITY_ARGV_VALUE_MAX, SECURITY_BIN, SECURITY_STDIN_LINE_MAX, SecurityOp,
     UnparseableItem, VerifyOutcome, WriteDisposition, account, add_generic_password_line,
-    carried_raw, census_namespaced_items, classified_exit, delete_at, delete_namespaced_item,
-    disposition_verdict, dump_keychain, keychain_service_for_config_dir, login_blob_is_ours,
-    merge_and_put_at, merge_write, merged_blob, put_blob_at, put_transport, quarantine_path,
-    quarantine_tail, read_blob_at, run_with_deadline, security_deadline, security_error,
-    security_quote, sign_out_at, verify_outcome, write_disposition,
+    carried_raw, census_namespaced_items, classified_exit, delete_at, disposition_verdict,
+    dump_keychain, keychain_service_for_config_dir, login_blob_is_ours, merge_and_put_at,
+    merge_write, merged_blob, put_blob_at, put_transport, quarantine_path, quarantine_tail,
+    read_blob_at, run_with_deadline, salvage_delete_namespaced_item, security_deadline,
+    security_error, security_quote, sign_out_at, verify_outcome, write_disposition,
 };
 use crate::logline::LogLines;
 use crate::profile::{ClaudeCredentials, OAuthToken};
@@ -1729,10 +1729,13 @@ fn the_census_collects_unexplained_items_and_spares_live_dirs() {
     // Spare every namespaced service the dump lists except the throwaway
     // orphan, so the decision selects exactly the orphan and nothing the
     // operator owns.
-    let every_namespaced: BTreeSet<String> =
-        crate::claude::census_orphan_keychain_services(&dump, &BTreeSet::new())
-            .into_iter()
-            .collect();
+    let every_namespaced: BTreeSet<String> = crate::claude::census_orphan_keychain_services(
+        &dump,
+        &BTreeSet::new(),
+        &BTreeSet::from([live_service.clone(), orphan_service.clone()]),
+    )
+    .into_iter()
+    .collect();
     assert!(
         every_namespaced.contains(&orphan_service),
         "the dump lists the throwaway orphan: {every_namespaced:?}"
@@ -1747,13 +1750,18 @@ fn the_census_collects_unexplained_items_and_spares_live_dirs() {
         .cloned()
         .collect();
     assert_eq!(
-        crate::claude::census_orphan_keychain_services(&dump, &live),
+        crate::claude::census_orphan_keychain_services(
+            &dump,
+            &live,
+            &BTreeSet::from([live_service.clone(), orphan_service.clone()]),
+        ),
         vec![orphan_service.clone()],
         "exactly the one namespaced service no live dir explains is collected"
     );
 
-    // The delete leg the production census drives, on the throwaway only.
-    delete_namespaced_item(&orphan_service).expect("collect the orphan");
+    // The salvage-then-delete leg the production census drives, on the
+    // throwaway only.
+    salvage_delete_namespaced_item(&orphan_service).expect("collect the orphan");
     assert!(
         read_blob_at(&orphan_service, &account)
             .expect("read orphan")

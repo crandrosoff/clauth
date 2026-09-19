@@ -77,6 +77,12 @@ use serde_json::Value;
 use crate::logline::logline;
 use crate::profile::ClaudeCredentials;
 
+macro_rules! census_log {
+    ($($arg:tt)*) => {
+        crate::logline::to_logfile(format_args!($($arg)*))
+    };
+}
+
 /// Apple's Keychain CLI. Absolute path so a hostile `PATH` can't shim it.
 const SECURITY_BIN: &str = "/usr/bin/security";
 
@@ -1022,26 +1028,23 @@ fn delete_at(service: &str, account: &str) -> Result<()> {
     }
 }
 
-/// Delete the NAMESPACED Keychain item at an already-derived `service` — the
-/// stale-runtime GC's collector for a runtime tree it just removed
-/// (`runtime::gc_one_pair`). The item holds a login only that tree's dir hash
-/// resolves, so once the dir is gone it is inert clutter; this is the
-/// collector half of the m4 LEAVE ruling (2026-09-12:
-/// teardown pays no `security` subprocess, the GC pays it here instead).
-///
-/// Guarded on the service SHAPE (`claude::is_namespaced_keychain_service`):
-/// this deletes by name, and a caller handing it the bare item — or anything
-/// else the naming rule cannot have produced — would destroy a login no GC
-/// decision explains. Idempotent like [`delete_at`]: a missing item is `Ok`,
-/// so a re-run after a half-completed sweep costs one subprocess and nothing
-/// else.
-pub(crate) fn delete_namespaced_item(service: &str) -> Result<()> {
-    anyhow::ensure!(
-        crate::claude::is_namespaced_keychain_service(service),
-        "refusing to delete Keychain item `{service}` through the GC path: it is not a \
-         per-config-dir item name"
-    );
-    delete_at(service, &account()?)
+/// Collect a NAMESPACED Keychain item through the shared salvage-then-delete
+/// core: any readable bytes are quarantined first ([`quarantine_item_bytes`]),
+/// then the item is deleted, and what the salvage saw rides the outcome for
+/// the caller's event line — a refused or prompted read (a foreign item's ACL,
+/// a locked keychain) is named, never fabricated as success. The ordering is
+/// pinned cross-platform in [`crate::claude::salvage_delete_namespaced_item_with`];
+/// this is the macOS wiring only.
+pub(crate) fn salvage_delete_namespaced_item(
+    service: &str,
+) -> Result<crate::claude::SalvageOutcome> {
+    crate::claude::salvage_delete_namespaced_item_with(
+        service,
+        &account()?,
+        read_raw_at,
+        quarantine_item_bytes,
+        delete_at,
+    )
 }
 
 /// The census half of the m4 LEAVE ruling's collector (2026-09-12): collect
@@ -1051,12 +1054,11 @@ pub(crate) fn delete_namespaced_item(service: &str) -> Result<()> {
 /// stranding inputs (a canonicalize failure, a crash between the tombstone
 /// rename and the post-closure delete, a stuck-keychain delete failure) leave
 /// items no walked dir explains. `security dump-keychain` lists everything,
-/// the historical orphans included; the pure decision
-/// ([`crate::claude::census_orphan_keychain_services`]) deletes only a
-/// NAMESPACED service outside `live` — the set
-/// [`crate::runtime::live_namespaced_keychain_services`] derives from the dirs
-/// it enumerates — so a live dir's item is never touched and a live foreign
-/// `CLAUDE_CONFIG_DIR` item is accepted collateral (ruled 2026-09-12).
+/// but the pure decision ([`crate::claude::census_orphan_keychain_services`])
+/// admits only services in clauth's durable ownership ledger and outside the
+/// `live` set [`crate::runtime::live_namespaced_keychain_services`] derives from
+/// runtime dirs. A foreign `CLAUDE_CONFIG_DIR` item enters neither source and is
+/// untouched; an unreadable ledger or live set deletes nothing.
 ///
 /// Runs on every `clauth mcp` boot (accepted with the ruling). Skipped whole
 /// under the Plugin tab's boot probe ([`crate::mcp::MCP_PROBE_ENV`]), whose 3 s
@@ -1084,17 +1086,27 @@ pub(crate) fn census_namespaced_items() {
     let dump = match dump_keychain() {
         Ok(dump) => dump,
         Err(e) => {
-            logline!(
+            census_log!(
                 "clauth: the Keychain census failed ({e:#}); orphaned per-session items stay in \
                  the Keychain until a later census"
             );
             return;
         }
     };
-    let orphans = match crate::runtime::live_namespaced_keychain_services() {
-        Ok(live) => crate::claude::census_orphan_keychain_services(&dump, &live),
+    let owned = match crate::runtime::namespaced_keychain_ledger::owned_services() {
+        Ok(owned) => owned,
         Err(e) => {
-            logline!(
+            census_log!(
+                "clauth: the Keychain census cannot read its ownership ledger ({e:#}); deleting \
+                 nothing — unreadable ownership must never authorize a delete"
+            );
+            return;
+        }
+    };
+    let orphans = match crate::runtime::live_namespaced_keychain_services() {
+        Ok(live) => crate::claude::census_orphan_keychain_services(&dump, &live, &owned),
+        Err(e) => {
+            census_log!(
                 "clauth: the Keychain census cannot derive the live set ({e:#}); deleting nothing \
                  — an underivable set must never read as every item orphaned"
             );
@@ -1110,7 +1122,7 @@ pub(crate) fn census_namespaced_items() {
         let live = match crate::runtime::live_namespaced_keychain_services() {
             Ok(live) => live,
             Err(e) => {
-                logline!(
+                census_log!(
                     "clauth: the Keychain census cannot re-derive the live set ({e:#}); stopping \
                      the census, the remaining items stay for a later one"
                 );
@@ -1120,12 +1132,17 @@ pub(crate) fn census_namespaced_items() {
         if live.contains(&service) {
             continue;
         }
-        match delete_namespaced_item(&service) {
-            Ok(()) => logline!(
-                "clauth: collected the orphaned per-session Keychain item {service} (no existing \
-                 config dir explains it)"
-            ),
-            Err(e) => logline!(
+        match salvage_delete_namespaced_item(&service) {
+            Ok(salvage) => {
+                let retirement = crate::runtime::namespaced_keychain_ledger::retire(&service);
+                census_log!(
+                    "clauth: collected the orphaned per-session Keychain item {service} (no existing \
+                     config dir explains it); {}; {}",
+                    crate::claude::salvage_tail(&salvage),
+                    crate::claude::retirement_tail(&retirement)
+                );
+            }
+            Err(e) => census_log!(
                 "clauth: collecting the orphaned per-session Keychain item {service} failed: \
                  {e:#}. It stays inert in the Keychain until a later census removes it"
             ),
@@ -1279,8 +1296,18 @@ pub(crate) fn keychain_install(store: &Value) -> Result<()> {
 /// Same merge codepath, same [`Keep::CarriedOnly`] (the MCP-login carry needs
 /// no rule of its own), and the same non-object refusal as [`keychain_install`]:
 /// one Keychain path, two service names.
-pub(crate) fn keychain_install_for_config_dir(store: &Value, config_dir: &Path) -> Result<()> {
+pub(crate) fn keychain_install_for_config_dir(
+    store: &Value,
+    config_dir: &Path,
+    owned: &crate::runtime::namespaced_keychain_ledger::OwnedKeychainWrite,
+) -> Result<()> {
     let service = keychain_service_for_config_dir(config_dir)?;
+    anyhow::ensure!(
+        service == owned.service(),
+        "refusing to write per-session Keychain item `{service}`: the durable ownership row names \
+         `{}`",
+        owned.service()
+    );
     install_at(&service, store)
 }
 
@@ -1418,8 +1445,18 @@ pub(crate) fn keychain_sign_out() -> Result<SignOutOutcome> {
 /// session's Claude Code resolves this item before any file, so a departed
 /// account's login left in it (an endpoint recapture's leftover under a
 /// shared or recycled runtime dir) would keep serving that account.
-pub(crate) fn keychain_sign_out_for_config_dir(config_dir: &Path) -> Result<SignOutOutcome> {
-    sign_out_at(&keychain_service_for_config_dir(config_dir)?, &account()?)
+pub(crate) fn keychain_sign_out_for_config_dir(
+    config_dir: &Path,
+    owned: &crate::runtime::namespaced_keychain_ledger::OwnedKeychainWrite,
+) -> Result<SignOutOutcome> {
+    let service = keychain_service_for_config_dir(config_dir)?;
+    anyhow::ensure!(
+        service == owned.service(),
+        "refusing to write per-session Keychain item `{service}`: the durable ownership row names \
+         `{}`",
+        owned.service()
+    );
+    sign_out_at(&service, &account()?)
 }
 
 /// What a sign-out actually did, so a caller whose downstream state follows

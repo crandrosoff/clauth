@@ -64,6 +64,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::claude::{build_claude_settings_json, create_symlink};
 use crate::lock::with_state_lock;
@@ -236,6 +237,11 @@ impl SessionId {
             std::process::id(),
             SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[cfg(test)]
+    fn for_test(value: &str) -> Self {
+        Self(value.to_string())
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -1140,6 +1146,178 @@ pub(crate) fn live_namespaced_keychain_services() -> Result<BTreeSet<String>> {
     Ok(live)
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the ownership ledger is consumed by macOS Keychain writes and census; its persistence and decisions are pinned on every platform"
+    )
+)]
+pub(crate) mod namespaced_keychain_ledger {
+    use super::*;
+
+    const PATH: &str = "keychain-item-owners.json";
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct Owner {
+        pub(crate) service: String,
+        pub(crate) profile: ProfileName,
+        pub(crate) session: String,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    pub(crate) struct Owners {
+        pub(crate) owners: Vec<Owner>,
+    }
+
+    pub(crate) fn path() -> Result<PathBuf> {
+        Ok(clauth_dir()?.join(PATH))
+    }
+
+    pub(crate) fn load() -> Result<Owners> {
+        let path = path()?;
+        let owners = match std::fs::read_to_string(&path) {
+            Ok(body) => serde_json::from_str::<Owners>(&body)
+                .with_context(|| format!("failed to parse {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Owners::default()),
+            Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+        };
+        // The ledger is an external boundary: what a clauth writer records is
+        // always shape-valid, so anything outside the shapes clauth itself
+        // mints is a hand edit or corruption and must fail the WHOLE ledger
+        // closed — an invalid row can never mint delete authority, and neither
+        // can its valid siblings.
+        for owner in &owners.owners {
+            if !crate::claude::is_namespaced_keychain_service(&owner.service) {
+                anyhow::bail!(
+                    "the namespaced Keychain ownership ledger names a service the naming rule \
+                     could not produce (`{}`) — refusing to authorize any delete",
+                    owner.service
+                );
+            }
+            if let Err(e) = crate::actions::validate_name_chars(owner.profile.as_str()) {
+                anyhow::bail!(
+                    "the namespaced Keychain ownership ledger holds an invalid profile name \
+                     (`{}`): {e} — refusing to authorize any delete",
+                    owner.profile
+                );
+            }
+            if !is_session_id(&owner.session) {
+                anyhow::bail!(
+                    "the namespaced Keychain ownership ledger holds a session id outside the \
+                     minted shape (`{}`) — refusing to authorize any delete",
+                    owner.session
+                );
+            }
+        }
+        Ok(owners)
+    }
+
+    pub(crate) fn save(owners: &Owners) -> Result<()> {
+        let path = path()?;
+        if let Some(parent) = path.parent() {
+            crate::profile::mkdir_700(parent)
+                .context("failed to create the namespaced Keychain ownership ledger directory")?;
+            crate::profile::enforce_clauth_perms(parent);
+        }
+        let bytes = serde_json::to_vec_pretty(owners)
+            .context("failed to serialize the namespaced Keychain ownership ledger")?;
+        atomic_write_600(&path, bytes)
+            .context("failed to persist the namespaced Keychain ownership ledger")
+    }
+
+    pub(crate) fn owned_services() -> Result<BTreeSet<String>> {
+        Ok(load()?
+            .owners
+            .into_iter()
+            .map(|owner| owner.service)
+            .collect())
+    }
+
+    pub(crate) fn record(service: &str, profile: &ProfileName, session: &SessionId) -> Result<()> {
+        record_with(service, profile, session, save)
+    }
+
+    pub(crate) fn record_with(
+        service: &str,
+        profile: &ProfileName,
+        session: &SessionId,
+        persist: impl FnOnce(&Owners) -> Result<()>,
+    ) -> Result<()> {
+        with_state_lock(|_held| {
+            let mut owners = load()?;
+            if let Some(owner) = owners
+                .owners
+                .iter_mut()
+                .find(|owner| owner.service == service)
+            {
+                owner.profile = profile.clone();
+                owner.session = session.as_str().to_string();
+            } else {
+                owners.owners.push(Owner {
+                    service: service.to_string(),
+                    profile: profile.clone(),
+                    session: session.as_str().to_string(),
+                });
+            }
+            persist(&owners)
+        })
+    }
+
+    pub(crate) fn retire(service: &str) -> Result<()> {
+        with_state_lock(|_held| {
+            let mut owners = load()?;
+            let before = owners.owners.len();
+            owners.owners.retain(|owner| owner.service != service);
+            if owners.owners.len() != before {
+                save(&owners)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn authorize_write(
+        runtime: &Path,
+        profile: &ProfileName,
+        session: &SessionId,
+    ) -> Result<OwnedKeychainWrite> {
+        authorize_write_with(runtime, profile, session, save)
+    }
+
+    pub(crate) fn authorize_write_with(
+        runtime: &Path,
+        profile: &ProfileName,
+        session: &SessionId,
+        persist: impl FnOnce(&Owners) -> Result<()>,
+    ) -> Result<OwnedKeychainWrite> {
+        let service =
+            crate::claude::namespaced_keychain_service(&runtime.canonicalize().with_context(
+                || format!("failed to canonicalize config dir: {}", runtime.display()),
+            )?);
+        record_with(&service, profile, session, persist)?;
+        Ok(OwnedKeychainWrite { service })
+    }
+
+    /// Proof that a namespaced Keychain write is durably owned: minted only by
+    /// [`authorize_write`] AFTER the `(service, profile, session)` row persisted
+    /// under the state flock, and the field is private to this module so nothing
+    /// else can conjure one (the `StateLockHeld` pattern). The macOS Keychain
+    /// sinks take this witness as their only proof, so no `/usr/bin/security`
+    /// write for a per-session item can run without a durable ownership row
+    /// behind it — the ownership-first order is a type, not a call-site
+    /// convention.
+    #[derive(Debug)]
+    pub(crate) struct OwnedKeychainWrite {
+        service: String,
+    }
+
+    impl OwnedKeychainWrite {
+        pub(crate) fn service(&self) -> &str {
+            &self.service
+        }
+    }
+}
+
 /// Drop the markers of bare `claude` sessions that have exited — the ordinary
 /// case, since such a session never runs clauth code and leaves its file behind.
 /// The same per-entry prune the paired trees get, minus the tree removal: this
@@ -1313,14 +1491,15 @@ fn gc_one_pair_synced(
 
     remint_interleave();
 
-    // macOS: collect the tree's Keychain item, before the rescue — the delete
-    // is one subprocess, the rescue is a tree-sized copy, and a crash during
-    // the copy must not strand an item whose dir is already gone. The pair is
-    // re-checked under a fresh state-lock hold taken immediately before the
-    // delete: between the collection above and this point a concurrently
-    // starting session can re-mint this same path, and the delete must key on
-    // the world it runs in. Lock taken, inputs sampled, lock dropped, THEN
-    // the delete — the subprocess still never spans the flock.
+    // macOS: collect the tree's Keychain item, before the rescue — the
+    // collection is a salvage read then a delete (two subprocesses), the rescue
+    // is a tree-sized copy, and a crash during the copy must not strand an item
+    // whose dir is already gone. The pair is re-checked under a fresh
+    // state-lock hold taken immediately before the delete: between the
+    // collection above and this point a concurrently starting session can
+    // re-mint this same path, and the delete must key on the world it runs in.
+    // Lock taken, inputs sampled, lock dropped, THEN the collection — the
+    // subprocesses still never span the flock.
     #[cfg(target_os = "macos")]
     if let Some(service) = with_state_lock(|_held| {
         Ok::<_, anyhow::Error>(orphaned_keychain_item(
@@ -1408,24 +1587,34 @@ fn tree_keychain_service(runtime: &Path) -> Option<String> {
     crate::keychain::keychain_service_for_config_dir(runtime).ok()
 }
 
-/// macOS: delete one orphaned namespaced Keychain item — the collector half of
+/// macOS: collect one orphaned namespaced Keychain item — the collector half of
 /// the m4 LEAVE ruling (2026-09-12: a session's item is
-/// never cleared at teardown, so this sweep is what clears it). Runs after the
+/// never cleared at teardown, so this sweep is what clears it). Goes through
+/// the same salvage-then-delete core the census takes: any readable bytes are
+/// quarantined first, a refused or prompted read (a foreign item's ACL, a
+/// locked keychain) is named on the event line rather than read as success,
+/// and the ownership row is retired only after the delete lands so a failed
+/// collection stays collectible by a later census. Runs after the
 /// state-flock closure (a `security` subprocess must never span it), inside
 /// the shared subprocess budget [`gc_stale_runtimes`] arms, and is
-/// loud-not-fatal: the item is inert without its dir, so a failed delete
+/// loud-not-fatal: the item is inert without its dir, so a failed collection
 /// leaves stale clutter rather than breaking anything.
 #[cfg(target_os = "macos")]
 fn collect_orphaned_keychain_item(service: &str) {
-    match crate::keychain::delete_namespaced_item(service) {
-        Ok(()) => logline!(
-            "clauth: collected the orphaned per-session Keychain item {service} (its runtime tree \
-             is gone)"
-        ),
+    match crate::keychain::salvage_delete_namespaced_item(service) {
+        Ok(salvage) => {
+            let retirement = namespaced_keychain_ledger::retire(service);
+            logline!(
+                "clauth: collected the orphaned per-session Keychain item {service} (its runtime tree \
+                 is gone); {}; {}",
+                crate::claude::salvage_tail(&salvage),
+                crate::claude::retirement_tail(&retirement)
+            );
+        }
         Err(e) => logline!(
             "clauth: collecting the orphaned per-session Keychain item {service} failed: {e:#}. It \
              holds a login only the removed tree's dir resolved, so it stays inert in the Keychain \
-             until a later sweep removes a tree at the same path"
+             until a later sweep or census removes it"
         ),
     }
 }
@@ -2707,10 +2896,19 @@ impl SessionSwap {
                         .as_ref(),
                     ) {
                         SwapItemArm::Install => {
-                            match crate::claude::keychain_mirror_source_for_config_dir(
-                                &plan.store,
+                            let write = namespaced_keychain_ledger::authorize_write(
                                 &self.runtime,
-                            ) {
+                                &plan.member,
+                                &self.session,
+                            )
+                            .and_then(|owned| {
+                                crate::claude::keychain_mirror_source_for_config_dir(
+                                    &plan.store,
+                                    &self.runtime,
+                                    &owned,
+                                )
+                            });
+                            match write {
                                 // The item now holds the incoming member's pair,
                                 // so that is what the session reads: the row's
                                 // verdict follows.
@@ -2726,7 +2924,18 @@ impl SessionSwap {
                             }
                         }
                         SwapItemArm::SignOut => {
-                            match crate::keychain::keychain_sign_out_for_config_dir(&self.runtime) {
+                            let sign_out = namespaced_keychain_ledger::authorize_write(
+                                &self.runtime,
+                                &plan.member,
+                                &self.session,
+                            )
+                            .and_then(|owned| {
+                                crate::keychain::keychain_sign_out_for_config_dir(
+                                    &self.runtime,
+                                    &owned,
+                                )
+                            });
+                            match sign_out {
                                 // The item holds nothing now, so the session
                                 // falls back to the file layer this swap moved:
                                 // the row's verdict follows.
@@ -4401,7 +4610,11 @@ fn seed_session_keychain_item(
     );
     match arm {
         SessionSeedArm::SignOut => {
-            if let Err(e) = crate::keychain::keychain_sign_out_for_config_dir(runtime) {
+            let sign_out = namespaced_keychain_ledger::authorize_write(runtime, name, session)
+                .and_then(|owned| {
+                    crate::keychain::keychain_sign_out_for_config_dir(runtime, &owned)
+                });
+            if let Err(e) = sign_out {
                 logline!(
                     "clauth: session {} started on {}, which stores no Claude login, but signing \
                      its per-session Keychain item out failed: {e:#}. The session's Claude Code may \
@@ -4418,9 +4631,14 @@ fn seed_session_keychain_item(
             let (what, consequence, e) =
                 match crate::claude::carry_session_item_into(canonical, runtime) {
                     Ok(()) => {
-                        match crate::claude::keychain_mirror_source_for_config_dir(
-                            canonical, runtime,
-                        ) {
+                        let write =
+                            namespaced_keychain_ledger::authorize_write(runtime, name, session)
+                                .and_then(|owned| {
+                                    crate::claude::keychain_mirror_source_for_config_dir(
+                                        canonical, runtime, &owned,
+                                    )
+                                });
+                        match write {
                             Ok(()) => return None,
                             Err(e) => (
                                 "writing its per-session Keychain item",
@@ -4506,9 +4724,15 @@ fn retry_seeded_keychain_item(swap: &SessionSwap, seed_retry: &std::sync::Mutex<
     }
     let _budget = crate::lock::SharedSubprocessBudget::arm(SESSION_SEED_BUDGET);
     let failed = match crate::claude::carry_session_item_into(&target, &swap.runtime) {
-        Ok(()) => {
-            crate::claude::keychain_mirror_source_for_config_dir(&target, &swap.runtime).err()
-        }
+        Ok(()) => namespaced_keychain_ledger::authorize_write(
+            &swap.runtime,
+            &ProfileName::from(swap.member()),
+            &swap.session,
+        )
+        .and_then(|owned| {
+            crate::claude::keychain_mirror_source_for_config_dir(&target, &swap.runtime, &owned)
+        })
+        .err(),
         Err(e) => Some(e),
     };
     match failed {

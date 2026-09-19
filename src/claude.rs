@@ -1191,9 +1191,13 @@ fn keychain_mirror_source(path: &Path, absent: AbsentSource) -> Result<()> {
 /// member re-runs it — the executor refuses `AlreadyCurrent`, so there is no
 /// same-member retry. Callers pair it with [`carry_session_item_into`] first.
 #[cfg(target_os = "macos")]
-pub(crate) fn keychain_mirror_source_for_config_dir(path: &Path, config_dir: &Path) -> Result<()> {
+pub(crate) fn keychain_mirror_source_for_config_dir(
+    path: &Path,
+    config_dir: &Path,
+    owned: &crate::runtime::namespaced_keychain_ledger::OwnedKeychainWrite,
+) -> Result<()> {
     let store = checked_store_at(path)?;
-    crate::keychain::keychain_install_for_config_dir(&store, config_dir)
+    crate::keychain::keychain_install_for_config_dir(&store, config_dir, owned)
 }
 
 /// macOS: carry the pair the session's Claude Code left in its per-config-dir
@@ -1358,14 +1362,11 @@ pub(crate) fn is_namespaced_keychain_service(service: &str) -> bool {
 }
 
 /// The census decision over one `security dump-keychain` text: the NAMESPACED
-/// services it lists that no live dir explains. Fed the live set
-/// [`crate::runtime::live_namespaced_keychain_services`] derives from the dirs
-/// it enumerates, it collects exactly the orphans the walk-derived sweep
-/// cannot reach — a clean teardown's `Drop`, a profile deletion, the sweep's
-/// own stranding inputs — and never a service an existing dir derives. A live
-/// foreign `CLAUDE_CONFIG_DIR` item elsewhere in the dump is accepted
-/// collateral (ruled 2026-09-12): the service is a one-way hash of the dir, so
-/// a census cannot tell it apart.
+/// services it lists that clauth's durable ownership ledger authorizes and no
+/// existing runtime dir explains. Shape is only a parser guard: a foreign
+/// `CLAUDE_CONFIG_DIR` item never enters the ledger or live set and is therefore
+/// left untouched. `owned` is loaded fail-closed by the caller; an unreadable or
+/// malformed ledger reaches no decision at all.
 ///
 /// The only lines it reads are the generic-password service attribute, the
 /// shape `security dump-keychain` prints as `0x00000007 <blob>="<name>"` for a
@@ -1382,7 +1383,11 @@ pub(crate) fn is_namespaced_keychain_service(service: &str) -> bool {
         reason = "the only production caller is the macOS Keychain census; the decision is pinned on every platform"
     )
 )]
-pub(crate) fn census_orphan_keychain_services(dump: &str, live: &BTreeSet<String>) -> Vec<String> {
+pub(crate) fn census_orphan_keychain_services(
+    dump: &str,
+    live: &BTreeSet<String>,
+    owned: &BTreeSet<String>,
+) -> Vec<String> {
     let mut orphans = BTreeSet::new();
     for line in dump.lines() {
         let Some(value) = line.trim_start().strip_prefix("0x00000007 <blob>=") else {
@@ -1394,11 +1399,111 @@ pub(crate) fn census_orphan_keychain_services(dump: &str, live: &BTreeSet<String
         else {
             continue;
         };
-        if is_namespaced_keychain_service(service) && !live.contains(service) {
+        if is_namespaced_keychain_service(service)
+            && owned.contains(service)
+            && !live.contains(service)
+        {
             orphans.insert(service.to_string());
         }
     }
     orphans.into_iter().collect()
+}
+
+/// What a salvage-then-delete namespaced collection observed about the item's
+/// bytes, so the collector names the salvage on its event line without
+/// fabricating one. Carries no raw bytes: the preserved path alone, the error
+/// rendered, never the payload.
+#[derive(Debug)]
+pub(crate) enum SalvageOutcome {
+    /// The item was already gone when the salvage read ran.
+    Absent,
+    /// The raw bytes were quarantined first; the path names the file.
+    Preserved(PathBuf),
+    /// The salvage read or quarantine failed — a refused or prompted read, an
+    /// unwritable quarantine — named, never read as success.
+    Failed(anyhow::Error),
+}
+
+/// The shared destructive-collection core for a namespaced Keychain item:
+/// salvage any readable bytes through the caller's `quarantine`, then delete —
+/// in that order, never the reverse — and report what the salvage saw. The
+/// delete lands whatever the salvage did: the salvage preserves evidence, it
+/// does not refuse the collection, and a failed one is named rather than
+/// fabricated as success. `read`, `quarantine` and `delete` are injected so the
+/// ORDER is pinned on every platform while the real `/usr/bin/security` legs
+/// compile on macOS alone (the `census_orphan_keychain_services` split).
+/// Guarded on the service SHAPE like every delete-by-name in this family, so a
+/// caller passing a name it derived nowhere cannot reach an item it cannot
+/// account for.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the real legs are the macOS Keychain collectors; the ordering decision is pinned on every platform"
+    )
+)]
+pub(crate) fn salvage_delete_namespaced_item_with(
+    service: &str,
+    account: &str,
+    read: impl FnOnce(&str, &str) -> Result<Option<String>>,
+    quarantine: impl FnOnce(&str, &str) -> Result<PathBuf>,
+    delete: impl FnOnce(&str, &str) -> Result<()>,
+) -> Result<SalvageOutcome> {
+    anyhow::ensure!(
+        is_namespaced_keychain_service(service),
+        "refusing to delete Keychain item `{service}` through the salvage path: it is not a \
+         per-config-dir item name"
+    );
+    let salvage = match read(service, account) {
+        Ok(Some(raw)) => match quarantine(service, &raw) {
+            Ok(path) => SalvageOutcome::Preserved(path),
+            Err(e) => SalvageOutcome::Failed(e),
+        },
+        Ok(None) => SalvageOutcome::Absent,
+        Err(e) => SalvageOutcome::Failed(e),
+    };
+    delete(service, account)?;
+    Ok(salvage)
+}
+
+/// How an event line names what the salvage observed, shared by both
+/// destructive collectors so their wording cannot drift apart.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the real legs are the macOS Keychain collectors; the operator-facing wording is pinned on every platform"
+    )
+)]
+pub(crate) fn salvage_tail(outcome: &SalvageOutcome) -> String {
+    match outcome {
+        SalvageOutcome::Absent => "the item was already absent when the salvage read it".into(),
+        SalvageOutcome::Preserved(path) => {
+            format!("its raw bytes were preserved first at {}", path.display())
+        }
+        SalvageOutcome::Failed(e) => format!(
+            "its raw bytes could not be preserved first ({e:#}); the Keychain may have refused the \
+             read or required an interaction prompt"
+        ),
+    }
+}
+
+/// How an event line names the ownership-row retirement after a collected
+/// delete, shared by both destructive collectors.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the real legs are the macOS Keychain collectors; the operator-facing wording is pinned on every platform"
+    )
+)]
+pub(crate) fn retirement_tail(retirement: &Result<()>) -> String {
+    match retirement {
+        Ok(()) => "the ownership row was retired".to_string(),
+        Err(e) => format!(
+            "retiring the ownership row failed ({e:#}); it stays ledgered for a later census"
+        ),
+    }
 }
 
 /// What a `security(1)` exit status means, as far as this codebase has
