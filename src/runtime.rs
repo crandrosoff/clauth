@@ -1287,10 +1287,6 @@ pub(crate) mod namespaced_keychain_ledger {
             .collect())
     }
 
-    pub(crate) fn record(service: &str, profile: &ProfileName, session: &SessionId) -> Result<()> {
-        record_with(service, profile, session, save)
-    }
-
     pub(crate) fn record_with(
         service: &str,
         profile: &ProfileName,

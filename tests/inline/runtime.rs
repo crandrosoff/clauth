@@ -10226,7 +10226,13 @@ fn retiring_a_namespaced_keychain_owner_removes_later_delete_authority() {
     let service = "Claude Code-credentials-deadbeef";
     let profile = crate::profile::ProfileName::from("retired");
     let session = SessionId::for_test("702-1");
-    namespaced_keychain_ledger::record(service, &profile, &session).expect("record owner");
+    namespaced_keychain_ledger::record_with(
+        service,
+        &profile,
+        &session,
+        namespaced_keychain_ledger::save,
+    )
+    .expect("record owner");
 
     namespaced_keychain_ledger::retire(service).expect("retire owner");
 
@@ -10279,10 +10285,11 @@ fn the_namespaced_keychain_ledger_rejects_malformed_owner_rows() {
 #[test]
 fn a_ledger_row_outlives_its_profile_and_stays_authoritative() {
     let _home = HomeSandbox::new();
-    namespaced_keychain_ledger::record(
+    namespaced_keychain_ledger::record_with(
         "Claude Code-credentials-deadbeef",
         &crate::profile::ProfileName::from("gone"),
         &SessionId::for_test("703-1"),
+        namespaced_keychain_ledger::save,
     )
     .expect("record owner");
 
