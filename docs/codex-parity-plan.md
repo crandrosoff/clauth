@@ -1,6 +1,6 @@
 # Codex parity: the follow-up series (spec, 2026-09-19)
 
-The codex harness landed in #69 (from #45): a second roster in `codex-profiles.toml`, capture and browser login, `clauth start <codex>` under a private `CODEX_HOME`, the `wham/usage` poll, a separate chain with its own walk, and one read-only section on the Overview. Everything else a Claude Code account gets in clauth — actions on its row, a Setup page, a chain editor, the Usage breakdown, the Config keys, the Tokens lens, `delegate` — stops at the harness line, by the parity map in `docs/codex-plan.md`. This spec is the series that carries codex over that line, one slice per PR, each independently mergeable and each keeping the rulings #69 recorded.
+The codex harness landed in #69 (from #45): a second roster in `codex-profiles.toml`, capture and browser login, `clauth start <codex>` under a private `CODEX_HOME`, the `wham/usage` poll, a separate chain with its own walk, and one read-only section on the Overview. Everything else a Claude Code account gets in clauth — actions on its row, a Setup page, a chain editor, the Usage breakdown, the Config keys, the Tokens lens, `delegate` — stops at the harness line, by the parity map in `docs/codex-plan.md`. This spec is the series that carries codex over that line, one slice per PR, each independently mergeable. It keeps #69's rulings except for the two amendments named below, which it asks for openly.
 
 Written from a fork, offered for rulings first. Most of #69's rulings are **preserved** unchanged.
 Two are **amendments this spec asks for**, and it says so rather than presenting them as settled:
@@ -12,7 +12,7 @@ its own under "rulings wanted".
      was inaccurate for B's disable/enable and for the withdrawn A's switch semantics. -->
 
 ```options
-Second roster, tab by tab | Keeps #69's two files and every ruling; each tab draws a codex section and acts on codex rows through one selection type; the most mergeable | More code per tab, and the selection type threads through three tabs | chosen
+Second roster, tab by tab | Keeps #69's two files, and every ruling except the two amendments named below; each tab draws a codex section and acts on codex rows through one selection type; the most mergeable | More code per tab, and the selection type threads through three tabs | chosen
 One unified roster | Cleanest UI code, one list everywhere | Reverses #69's core decision, thousands of lines, and the MCP tools would see codex profiles they cannot serve | rejected
 Separate codex dashboard | Lowest risk per tab, nothing touches the claude tabs | Two dashboards, and the two chains never sit side by side | rejected
 ```
@@ -78,6 +78,7 @@ pub(crate) enum RowSel {
 - `ActionMenuState` gains a `context` variant for a codex row; its `scoped` items are the codex actions (slice B).
 - The hot-reload fingerprint already covers `codex-profiles.toml` (#69 folded fix 6); the TUI's `poll_codex_rows` (`src/tui/app.rs:10127-10137`) keeps the codex rows fresh on its interval, so a CLI switch shows up in an open TUI.
 - **A bare index is not an identity, and this is a correctness rule, not a nicety.** `poll_codex_rows` replaces `app.codex_rows` **wholesale every second**, ungated by tab and by filter (`src/tui/app.rs:10127-10137`). A `clauth delete` or a reorder in another terminal can therefore make `Codex(1)` name a **different account** between the moment the operator selects it and the moment the action runs. So:
+  - **The cursor itself survives a reload by identity, not by index.** `poll_codex_rows` replaces the vector every second whether or not a menu is open (`src/tui/app.rs:10135-10136`), so an index retained across that replacement can already name another account **before** any menu opens. On each replacement the cursor is re-resolved to the profile name it held; when that name is gone, the cursor moves to a defined neighbor rather than staying on a stale index.
   - `RowSel` is resolved to a **profile name** the instant a menu, modal or confirmation opens, and that name — with its harness — is frozen in the action state.
   - Before any mutation, the frozen target is **revalidated** against the current roster. A target that no longer exists, or whose row moved, refuses with the roster's own words and closes the menu.
   - `RowSel` represents an **empty selection** explicitly (an empty roster, or a filter that hides every row), rather than defaulting to index 0.
@@ -114,20 +115,49 @@ An atomic rename of the *symlink* does not make the *read → network refresh �
 atomic. So A2 never writes a credential file at all.
 
 **The boundary, stated plainly.** A switch lands at the **next `codex` launch**, never mid-session.
-This is the same boundary `clauth start` already documents for `--with-fallback`: *"codex reads
-auth.json once at start, so a chain lands at the NEXT start, not mid-session"* (`src/main.rs:456`).
-A2 does not narrow that boundary and does not claim to.
+Said precisely: **which account a running codex spends is fixed at start; that same account's
+credentials can still refresh while it runs.** `clauth start` already refuses `--with-fallback` on
+exactly this boundary (`src/main.rs:453-458`), though its wording — *"codex reads auth.json once at
+start"* — is loose: codex does reload the file, and then checks that the account matches
+(`reload_if_account_id_matches`). A2 does not narrow the boundary and does not claim to.
+<!-- verify-A5: "reads auth.json once" is not literally true. The reload happens; the ACCOUNT is
+     what is pinned. Stating it loosely here would repeat the mistake that sank slice A. -->
 
 **Behavior.**
 
 - `codex_shim = false` in `codex-profiles.toml`, default off. Turning it on makes clauth generate
   the shim. Turning it off removes it. The key is the intent, the file is derived from it, and one
   converge function makes the file match the key (see the failure contract below).
-- With the shim on `PATH` ahead of the real codex, `codex <args>` runs
+- With the shim on `PATH` ahead of the real codex, a **session-starting** `codex <args>` runs
   `clauth start <active-codex-profile> -- <args>`. The session gets that profile's own
   `CODEX_HOME` (`~/.clauth/profiles/<name>/codex-home-<sid>`), which is exactly what
   `clauth start <name>` gives today (`wiki/Codex.md`, "Run"). Args after `--` reach codex verbatim,
   which is the documented `clauth start` contract already.
+- **The shim routes an ALLOWLIST, and everything else execs the real codex unchanged.** This is the
+  single most important rule in A2, and it is an allowlist rather than a denylist on purpose: a
+  codex subcommand added in a future release then defaults to the safe side instead of silently
+  acquiring a managed account.
+  - **Routed through clauth:** no subcommand at all (the interactive session), `exec`, `resume`,
+    `fork`, `review`. These start or continue a session, which is what the shim exists for.
+  - **Passed straight to the real codex, with the operator's own environment untouched:**
+    everything else, and **`login` and `logout` above all**.
+
+  **Why that rule exists, and what it prevents.** `clauth start` pins `CODEX_HOME` to the profile's
+  runtime home and forces `cli_auth_credentials_store="file"`, then appends the caller's arguments
+  verbatim (`codex_spawn_command`, `src/start.rs:559-573`); that home's `auth.json` is a link onto
+  the profile's own credential store (`src/runtime.rs:5401-5405`). So a naive shim would turn a
+  plain `codex login` into a login **against the active managed profile**, truncating and replacing
+  that profile's chain — and `wiki/Codex.md` already warns in its own words that codex's login and
+  logout *"revoke the login they find"*, server-side, with no re-capture able to bring it back.
+  A2 must not re-create by accident the exact hazard the wiki warns about.
+  <!-- verify-A6 (CONFIRMED, the severe one): the reviewer showed that forwarding every argument
+       makes `codex login` write into the active profile's store. Confirmed against
+       `src/start.rs:559-573` and `src/runtime.rs:5401-5405`. The allowlist is the repair. -->
+
+  **What A2 does NOT fix here.** If the operator's own `~/.codex/auth.json` is already an adopted
+  link from `clauth login <name> --codex`, then a passed-through `codex login` still reaches the
+  profile's chain — that is the pre-existing hazard the wiki documents, and it behaves exactly as
+  it does with no shim installed. A2 neither worsens it nor repairs it.
 - **No active codex profile** (the marker is unset, or `SwitchAction::Off` cleared it): the shim
   execs the **real codex** with the arguments unchanged. Typing `codex` must never fail because
   clauth has nothing to offer. Nothing is printed on this path.
@@ -144,10 +174,15 @@ A2 does not narrow that boundary and does not claim to.
        untouched by A2, because A2 reads no link — it stays an open upstream question, recorded
        here so it is not lost with slice A. -->
 - **Windows: no shim, and clauth says so.** `clauth codex shim install` refuses on Windows with a
-  reason, rather than installing something that half works. clauth's own CLI resolution prefers a
-  native `.exe` over a `.cmd`/`.bat` whenever both resolve (`src/runtime.rs:3570-3582`), so a
-  `codex.cmd` shim beside a real `codex.exe` would be skipped by clauth itself while a plain shell
-  found it — two different `codex` programs depending on who asks. Refusing is the honest answer.
+  reason, rather than installing something that half works. `resolve_cli_command` enumerates every
+  `PATHEXT` match in `PATH` order and **prefers a native `.exe` before falling back to the first
+  match** (`src/runtime.rs:3575-3583`). The divergence is therefore **configuration-dependent, not
+  automatic**: with a `codex.cmd` shim in an EARLIER `PATH` directory and a real `codex.exe` in a
+  LATER one, a plain shell runs the shim while clauth skips it and runs the real binary — two
+  different `codex` programs depending on who asks. That configuration is the normal one for a shim,
+  which is why refusing is the honest answer. Not executed on Windows; read from source only.
+  <!-- verify-A3: the earlier wording said "beside each other", which implied the divergence is
+       inevitable whenever both exist. It is not; it depends on PATH order. -->
 
 **Mechanism.**
 
@@ -159,11 +194,17 @@ A2 does not narrow that boundary and does not claim to.
    on Linux, `~/Library/Application Support/clauth/bin/codex` on macOS). clauth already owns
    `<data_dir>/clauth` — that is where the Claude Code plugin materializes
    (`src/plugin_host.rs:442-447`) — so this adds a sibling `bin/`, not a new root.
-   <!-- correction-shim-dir: the earlier draft called `<data_dir>/clauth/current@claude` a shim
-        directory clauth already ships on PATH. It is not. That path is agentgear's plugin
-        materialization tree (`src/plugin_host.rs:442-447`); it holds `.claude-plugin/` and
-        `hooks/`, has no `bin/`, and is on no PATH. Verified on this host 2026-09-19. A2 therefore
-        creates `<data_dir>/clauth/bin` and says so. -->
+   **Why not `<data_dir>/clauth/current@claude/bin`, which does appear on some `PATH`s.** That
+   directory is agentgear's **plugin** materialization tree (`expected_pointer`,
+   `src/plugin_host.rs:441-447`); on this host it holds `.claude-plugin/` and `hooks/` and **has no
+   `bin/` at all**. A `.../current@claude/bin` entry *is* present on the `PATH` of a Claude Code
+   session — Claude Code adds each installed plugin's `bin/`, and clauth is registered at that path
+   in `~/.claude/settings.json` — but it is **absent from a clean login shell** (both checked on
+   this host, 2026-09-19). A shim placed there would work inside Claude Code and nowhere else,
+   which is the opposite of what an operator-facing `codex` needs. Hence a separate `bin/`.
+   <!-- correction-shim-dir + verify-A2: the first draft said that directory is "on no PATH",
+        which is too broad — it IS on a Claude Code session's PATH, just not the operator's. The
+        design conclusion is unchanged and now rests on the right reason. -->
 
    ```sh
    #!/bin/sh
@@ -174,14 +215,28 @@ A2 does not narrow that boundary and does not claim to.
    exec "@CLAUTH_BIN@" start --codex-active -- "$@"
    ```
 
-   `@REAL_CODEX@` and `@CLAUTH_BIN@` are **absolute paths baked in at generation time**, resolved
-   from `PATH` with the shim's own directory excluded. The shim therefore does no `PATH` lookup and
-   cannot find itself, whatever the operator's `PATH` order.
-3. **The recursion guard, twice over.** clauth spawns codex through `codex_command()`, which is a
-   bare `PATH` lookup (`src/runtime.rs:3575-3586`) and would otherwise find the shim. So
-   `CodexEngine` sets `CLAUTH_CODEX_SHIM_BYPASS=1` on every codex spawn, beside the keys it already
-   scrubs (`CODEX_MANAGED_ENV_KEYS`, `src/harness.rs:149-159`). The baked absolute path closes the
-   same loop from the other end. Either alone is sufficient. Both are cheap.
+   The snippet above is **illustrative**: it shows the routing decision, not the allowlist or the
+   stale-path fallback, both of which the generated file must also implement.
+
+   `@REAL_CODEX@` and `@CLAUTH_BIN@` are **absolute paths baked in at generation time**. Resolution
+   must reject a candidate by **canonical identity**, not by directory: excluding only the shim's
+   own directory is not enough, because a symlink in another `PATH` directory can point back at the
+   shim, and baking that alias as `@REAL_CODEX@` makes the bypass branch exec itself forever.
+   Generation **and** the stale-path fallback both resolve every candidate to its real path and
+   reject any that is the shim.
+   <!-- verify-A1b: the reviewer's alias counterexample. A directory exclusion does not survive a
+        symlink alias; canonical-identity rejection does. -->
+3. **The recursion guard. The env key is load-bearing; the baked path is not a substitute.**
+   clauth spawns codex through `codex_command()`, a bare `PATH` lookup on unix
+   (`src/runtime.rs:3560-3586`), and would otherwise find the shim. So `CodexEngine` sets
+   `CLAUTH_CODEX_SHIM_BYPASS=1` on every codex spawn, beside the keys it already scrubs
+   (`CODEX_MANAGED_ENV_KEYS`, `src/harness.rs:149-159`). **That key alone is what breaks the
+   loop.** An earlier draft of this spec claimed the baked absolute path was independently
+   sufficient. It is not: baking a path into the shim does not change where *clauth* looks, so
+   without the key the cycle `clauth → PATH codex → shim → clauth` still closes. The baked path is
+   defense in depth against a `PATH` that no longer contains the real codex, nothing more.
+   <!-- verify-A1: the "either alone is sufficient" claim was false and is corrected here rather
+        than softened. -->
 4. **PATH is the operator's to edit.** clauth prints the exact line to add
    (`export PATH="$HOME/.local/share/clauth/bin:$PATH"`) and never writes a shell rc file. `install`
    reports whether the directory is already on `PATH` and whether anything else on `PATH` named
@@ -195,9 +250,18 @@ A2 does not narrow that boundary and does not claim to.
 <!-- astra-objection-3: slice A had no state/link consistency or partial-failure contract.
      A2's equivalent is stated here rather than assumed. -->
 
+- **Converge is serialized against the state, and re-reads the intent it is about to enforce.**
+  Committing the key and converging afterwards is not enough on its own: `install` can commit
+  `true`, `uninstall` can then commit `false` and remove the file, and `install`'s delayed converge
+  can recreate a shim the roster says should not exist (`CodexState::update` saves and releases,
+  `src/codex_profiles.rs:191-199`). So converge runs **under the same state lock**, re-reads the
+  current key, and enforces *that* value — never the value its caller happened to write. Every
+  entry point converges through the one function: the CLI, the TUI Config toggle, and `doctor`.
+  <!-- verify-P3: the reviewer's competing-writer counterexample. Re-reading the intent under the
+       lock is what makes the last writer win rather than the last converger. -->
 - One converge function owns the file: given the key, it writes, rewrites or removes
   `<data_dir>/clauth/bin/codex` and returns what it did. `install` / `uninstall` set the key inside
-  `CodexState::update`'s lock and converge **after** the state save commits, so a failed save never
+  `CodexState::update`'s lock, so a failed save never
   leaves a shim the roster does not claim.
 - A converge failure is reported with the reason and the key's value, never announced as success.
   The withdrawn slice A logged success unconditionally while its helper returned `false`.
@@ -217,6 +281,20 @@ worsens that; it simply stops adding a new writer.
 
 - Key on → converge writes an executable shim whose baked paths are absolute and whose
   `@REAL_CODEX@` is not the shim itself; key off → converge removes it; both are idempotent.
+- **`login` and `logout` are NOT routed through clauth.** Stage a fake codex, run the shim with
+  `login`, and assert the fake receives `login` with the operator's own environment — no
+  `CODEX_HOME` pinned to a profile, no `clauth start` in the chain. The same for `logout`. This is
+  the test that would have caught the hazard the reviewer found, so it is written first.
+- A subcommand the allowlist does not name (stand in an invented `codex frobnicate`) execs the real
+  codex unchanged, proving the default is pass-through and not route-through.
+- Each allowlisted form (`<no subcommand>`, `exec`, `resume`, `fork`, `review`) DOES route through
+  `clauth start`.
+- **The symlink alias case.** Put a symlink to the shim in a second `PATH` directory, generate, and
+  assert the baked `@REAL_CODEX@` resolves to neither the shim nor its alias. Run the stale-path
+  fallback with the same layout and assert it makes the same rejection.
+- **The converge race.** Commit `true`, then commit `false` and remove the file, then run the first
+  caller's delayed converge, and assert no shim exists — converge enforced the current key, not its
+  caller's.
 - `start --codex-active` with an active profile starts that profile, under its own `CODEX_HOME`.
 - `start --codex-active` with **no** active profile execs the real codex with the arguments
   unchanged and prints nothing.
@@ -241,7 +319,11 @@ three wiki sections. Larger than the withdrawn A, and it ships a behavior that h
 `<data_dir>/clauth/bin/codex`, with `PATH` left to the operator. R3: with no active codex profile,
 fall through to the real codex (spec) versus refuse with a message. R3b: spell the target as
 `clauth start --codex-active` (spec) versus a reserved name. R3c: Windows — refuse (spec) versus
-ship a `.cmd` shim and change `resolve_cli_command`'s `.exe` preference.
+ship a `.cmd` shim and change `resolve_cli_command`'s `.exe` preference. **R3d, and this is the one
+I would most like you to look at:** the routed allowlist (`<no subcommand>`, `exec`, `resume`,
+`fork`, `review`) with everything else — `login` and `logout` above all — passed straight to the
+real codex. An allowlist is the spec's answer because a future codex subcommand then defaults to
+safe. Name anything you would add or remove.
 
 ### B. Overview and Setup: codex rows take actions
 
@@ -296,7 +378,8 @@ ship a `.cmd` shim and change `resolve_cli_command`'s `.exe` preference.
 
 1. `~/.clauth/profiles/<name>/codex-home/sessions/` — the durable per-profile store. **Every shared `clauth start <name>` session writes here**, because the session home links `sessions/` into the store (`wiki/Codex.md`, "Run"). This is the primary root, and the one the earlier draft missed.
 2. `~/.clauth/profiles/<name>/codex-home/archived_sessions/` — archiving a thread keeps it; it must not vanish from the totals.
-3. The **operator home**: `$CODEX_HOME/sessions` when that variable is set, else `~/.codex/sessions`. It is one root, not necessarily one account.
+3. The **operator home**: `$CODEX_HOME/sessions` **and `$CODEX_HOME/archived_sessions`** when that variable is set, else the same two under `~/.codex`. Both, because clauth already treats them as one pair — `CODEX_ROLLOUT_ROOTS = ["sessions", "archived_sessions"]` (`src/runtime.rs:5238-5247`), and archiving MOVES a rollout between them. It is one root pair, not necessarily one account.
+   <!-- verify-P6: the earlier draft listed archives for the profile store but not for the operator home, and F inherited the omission. -->
 4. `--isolated` sessions write into a per-session home that is **removed at exit** (`wiki/Codex.md`, "Run"). Their rollouts are unrecoverable by design. This is a stated coverage gap, not a bug to fix, and the UI must not imply the totals are complete.
 
 **Deduplication.** A shared session's rollout is reachable by two paths — through the session home's link and through the store itself. Walk each root, resolve every candidate to its canonical path, and key by that. A file counted twice is a wrong number presented confidently.
@@ -358,8 +441,15 @@ Every delegate option is **supported, translated, or refused by name** — never
 | `permission_mode` | **refused pending a ruling** | codex's nearest are `-s/--sandbox {read-only,workspace-write,danger-full-access}` and `--approve-for-me`. The mapping is not one-to-one, so it needs an explicit ruling rather than a guess |
 | `subagent_type` | **refused** | no codex equivalent |
 | `resume` | **refused in this slice** | codex has `codex exec resume <id>`, but clauth's resume resolves the **workspace** from a claude transcript (`resolve_resume_workspace`, `src/mcp/mod.rs:3444-3452`). Two different session stores; a codex resume is its own PR |
+| `args` (raw extra CLI arguments) | **translated with its own refusal list** | This row was missing from the first draft and it is the one that matters most: `args` is where a caller passes `--dangerously-skip-permissions` today, so it IS a permission control (`src/mcp/mod.rs:819-829`). The codex arm needs its own refusal list, because the claude one names claude flags (`--session-id`, `--resume`, `--fork-session`). At minimum it must refuse codex's sandbox-defeating flags — `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust` — unless the delegate contract is extended to carry that intent explicitly |
+<!-- verify-P9b: the reviewer found `args` omitted from the table. Omitting it would have let a
+     permission control through unexamined, which is precisely what this table exists to stop. -->
 
-**Lifecycle, matched to the claude arm.** `ProfileRuntime::acquire` wraps the spawn as an RAII guard and tears the runtime down on return (`src/mcp/mod.rs:3464-3466`) — the codex arm takes the same guard, not a bare spawn. Env composition goes through the **codex** engine, not `apply_delegate_env`, which pins `ClaudeEngine` and `CLAUDE_CONFIG_DIR` by construction (`src/mcp/mod.rs:3384-3403`): the codex twin scrubs `CODEX_MANAGED_ENV_KEYS` and pins `CODEX_HOME` (`src/harness.rs:149-186`). The `CLAUTH_MCP_DEPTH` recursion guard is set on the codex child too, so a nested `delegate` is refused there exactly as it is for claude. Cancellation, a non-zero exit, and output produced before a failure each have a defined result shape rather than an empty one.
+**Lifecycle, matched to the claude arm — but through the CODEX runtime type.** The claude delegate takes `ProfileRuntime::acquire` (`src/mcp/mod.rs:3464-3466`), whose acquisition builds Claude Code state. The codex arm must take **`CodexRuntime::acquire(name, isolation)`** instead — the type `clauth start` already uses for a codex session (`src/start.rs:750-753`, `src/runtime.rs:5477-5488`), with its own `Drop` teardown (`src/runtime.rs:5621`) — not a bare spawn and not the claude type.
+<!-- verify-P9a: the first draft named `ProfileRuntime::acquire` for the codex arm. Wrong type;
+     it would have built claude state for a codex run. --> Env composition goes through the **codex** engine, not `apply_delegate_env`, which pins `ClaudeEngine` and `CLAUDE_CONFIG_DIR` by construction (`src/mcp/mod.rs:3384-3403`): the codex twin scrubs `CODEX_MANAGED_ENV_KEYS` and pins `CODEX_HOME` (`src/harness.rs:149-186`). The `CLAUTH_MCP_DEPTH` recursion guard is set on the codex child too, so a nested `delegate` is refused there exactly as it is for claude. **Cancellation, a non-zero exit, and output produced before a failure each need a result shape written down in this slice, and this spec does not yet define them.** Naming them as "defined" without defining them is the gap the reviewer caught. The spec's position: the codex arm **inherits the claude arm's shapes verbatim** where they exist, and any case the claude arm does not already cover is an open item for the PR that implements G, listed in its description rather than discovered at review time.
+<!-- verify-P9c: promising a shape is not specifying one. Inheriting explicitly, and naming the
+     residue as open, is the honest version. -->
 
 **Tests.** A shimmed `codex exec` produces the documented output; the formatter yields the same result keys as the claude formatter; a codex name that is quarantined is refused with the CLI's words; **each refused option is refused by name** with its reason, and none is silently dropped; the codex child carries `CODEX_HOME` and `CLAUTH_MCP_DEPTH` and none of `CODEX_MANAGED_ENV_KEYS` inherited; a cancelled run and a non-zero exit each return the defined shape; the runtime guard tears down on every exit path.
 
@@ -398,9 +488,33 @@ audited in place.
 | Copy fix: R3b's "new active" is misleading | **Dissolved with slice A** — that R3b is gone, and A2's R3b is a different question |
 | Issue text: six corrections | Applied in `docs/codex-parity-issue-draft.md` |
 
-**Not done, and worth saying:** this fold was written by the same model family that wrote the spec
-Astra reviewed. It has had **no second review**. The A2 design in particular is new text that no
-independent reviewer has seen.
+### Second round: the repair-verification pass
+
+A2 was new text no reviewer had seen, so it went back to the same reviewer for a **repair
+verification** pass — one question per item, plus an adversarial pass on A2 alone. It returned
+`REJECT`. Full text: `docs/superpowers/astra-fold-verification.md`. Every finding was confirmed
+against source before it was acted on, and every repair is marked in place with a `verify-` comment.
+
+| Finding | Confirmed how | Repair |
+|---|---|---|
+| **A2 forwarded `codex login` into the active profile's store** | `codex_spawn_command` appends arguments verbatim after pinning `CODEX_HOME` (`src/start.rs:559-573`) onto a home whose `auth.json` links to the profile store (`src/runtime.rs:5401-5405`) | The routed **allowlist**, with `login`/`logout` passed straight through (R3d) |
+| "Either recursion guard alone is sufficient" was false | The baked path does not change where *clauth* looks; unix keeps the bare lookup (`src/runtime.rs:3560-3586`) | The env key is named load-bearing; the baked path is demoted to defense in depth |
+| A symlink alias to the shim defeats a directory exclusion | Reasoning on the same lookup | Rejection by **canonical identity**, in generation and in the fallback |
+| "on no PATH" too broad | `.../current@claude/bin` IS on a Claude Code session's PATH and NOT on a clean login shell's (both checked, 2026-09-19) | Stated precisely, with the design conclusion unchanged |
+| Windows divergence described as automatic | `resolve_cli_command` scans matches in PATH order and prefers `.exe` (`src/runtime.rs:3575-3583`) | Described as configuration-dependent |
+| "codex reads auth.json once" | codex reloads and checks the account matches | Reworded: the account is pinned, credentials can still refresh |
+| Converge could recreate a shim the roster disowned | `CodexState::update` saves and releases (`src/codex_profiles.rs:191-199`) | Converge runs under the lock and re-reads the current key |
+| Cursor identity only frozen at menu-open | `poll_codex_rows` replaces the vector regardless (`src/tui/app.rs:10135-10136`) | The cursor survives each replacement by name |
+| Operator `archived_sessions` omitted | `CODEX_ROLLOUT_ROOTS = ["sessions", "archived_sessions"]` (`src/runtime.rs:5238-5247`) | Both operator roots listed; F inherits |
+| Delegate named the wrong runtime type | `clauth start` uses `CodexRuntime::acquire` (`src/start.rs:750-753`) | Corrected to `CodexRuntime::acquire` |
+| Delegate option table omitted raw `args` | `args` carries `--dangerously-skip-permissions` today (`src/mcp/mod.rs:819-829`) | Added, with its own refusal list |
+| Result shapes promised but not defined | Read of the spec's own text | Says so, inherits the claude shapes, names the residue as open |
+| Two lines still claimed "every ruling" is kept | Read of lines 3 and 15 | Both reworded |
+
+**Not done, and worth saying:** these repairs have had **no third review**. Re-running a broad
+discovery review after each repair round is the loop that exhausts a budget without improving the
+artifact, so this spec stops here and says where it stopped. The A2 allowlist in particular is a
+one-round-old design.
 
 ## Out of scope, kept from the parity map
 
