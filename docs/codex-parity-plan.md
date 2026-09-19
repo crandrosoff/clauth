@@ -2,7 +2,14 @@
 
 The codex harness landed in #69 (from #45): a second roster in `codex-profiles.toml`, capture and browser login, `clauth start <codex>` under a private `CODEX_HOME`, the `wham/usage` poll, a separate chain with its own walk, and one read-only section on the Overview. Everything else a Claude Code account gets in clauth — actions on its row, a Setup page, a chain editor, the Usage breakdown, the Config keys, the Tokens lens, `delegate` — stops at the harness line, by the parity map in `docs/codex-plan.md`. This spec is the series that carries codex over that line, one slice per PR, each independently mergeable and each keeping the rulings #69 recorded.
 
-Written from a fork, offered for rulings first. Nothing here reverses a #69 decision; where a slice needs one, it says so under "rulings wanted".
+Written from a fork, offered for rulings first. Most of #69's rulings are **preserved** unchanged.
+Two are **amendments this spec asks for**, and it says so rather than presenting them as settled:
+**disable / enable on a codex name**, which settled question 8 refuses (`codex-plan.md:217`), and
+**launch-time account selection**, which extends decision 4's "a codex switch writes only
+`codex-profiles.toml`" (`codex-plan.md:21`) without changing what a switch writes. Each slice names
+its own under "rulings wanted".
+<!-- astra-contradictions: the earlier line claimed "nothing here reverses a #69 decision", which
+     was inaccurate for B's disable/enable and for the withdrawn A's switch semantics. -->
 
 ```options
 Second roster, tab by tab | Keeps #69's two files and every ruling; each tab draws a codex section and acts on codex rows through one selection type; the most mergeable | More code per tab, and the selection type threads through three tabs | chosen
@@ -16,7 +23,7 @@ One type, `RowSel { Claude(i) | Codex(i) }`, carries the harness with the cursor
 ```
 
 ```chips
-A follow_active | wip
+A2 codex shim | planned
 B overview + setup | planned
 C fallback tab | planned
 D usage tab | planned
@@ -36,13 +43,18 @@ measured | 2026-09-19, codex 0.155.0, a Pro and a Business workspace
 1. **Two rosters stay.** `profiles.toml` and `codex-profiles.toml` remain disjoint sets in one namespace (`codex-plan.md`, decision 1-2). No slice merges them. The MCP tools keep failing closed on a codex name until slice G gives `delegate` a codex runner.
 2. **Tabs learn a second list; they do not learn a second app.** Each tab draws its claude rows as today and a codex section under them (the Overview already does), and the cursor can land on either. One selection type carries the harness with the index, so every action handler asks "which harness" once, at the top, and routes to the writer that already exists for that harness.
 3. **Codex writers are the CLI's.** `switch_codex_profile`, the codex login and delete paths, `CodexState::update` — the TUI calls the same functions the CLI does. No second implementation of a codex mutation.
-4. **The switch that follows is opt-in.** `follow_active = false` by default, so #69's "a switch moves the marker and nothing else" stays the shipped behavior until an operator turns the key.
+4. **A switch still writes only the marker.** #69's decision 4 stands untouched: `clauth <codex-name>` moves the active marker in `codex-profiles.toml` and changes no credential file. What A2 adds is a separate, opt-in **launcher** (`codex_shim = false` by default) that reads that marker at launch. A switch therefore lands at the next `codex` launch, never mid-session — the boundary `clauth start` already states for `--with-fallback` (`src/main.rs:456`).
+   <!-- astra-objection-1: the withdrawn slice A made this decision a link mutation and claimed
+        live adoption. Both are gone. -->
 5. **No new wire.** The series reads what `wham/usage`, the local `~/.codex/sessions` rollouts and `codex exec` already give. A feature with no OpenAI equivalent (kick, spend ceiling, per-session fallback, keychain) stays out, per the parity map.
 6. **Refuse loudly, never silently.** A codex row that cannot take an action says why in the same words the CLI uses (`--with-fallback is not available on a codex profile …`), the way #69 fixed the "profile not found" copy.
 
 ## Measured tonight, on codex 0.155.0
 
-- A Pro plan reports **one window**: `token_count.rate_limits.primary.window_minutes = 10080`, `secondary = null` (a live rollout, 2026-09-19). So the empty `5h` cell on a codex row is correct wire data, not a mapping bug. Slice D renders that honestly instead of a dash.
+- **One observed rollout**, on one Pro account, 2026-09-19, reported a single window: `token_count.rate_limits.primary.window_minutes = 10080`, `secondary = null`. That is a 7-day window **by its duration**, which is how the existing contract maps windows (`codex-plan.md:44,205,212`) — not by position and not by plan name. The sample supports one claim only: *this* account's *rollout* feed reported one window on that day. It does **not** establish that every Pro or Business account reports one window, and it does **not** by itself prove the empty `5h` cell is correct, because the cell is fed by the `wham/usage` **poll**, which this sample did not capture. Slice D must obtain a matching poll fixture before the `5h` dash is called correct data.
+  <!-- astra-objection-7: the earlier bullet generalized one rollout to "a Pro plan reports one
+       window", conflated the rollout feed with the poll, and used "weekly" as a plan property
+       rather than a duration. -->
 - Every codex turn writes an `event_msg/token_count` event carrying `rate_limits` (used percent, reset epoch, plan) into `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. That is a passive local feed, fresher than the poll while a session runs. Slice D may read it as a supplement; it is never the only source, because an idle account writes nothing.
 - The harness's own tests were verified against codex 0.145; this host runs 0.155 and every `clauth start work` / capture path exercised tonight behaved as the wiki says.
 
@@ -63,98 +75,331 @@ pub(crate) enum RowSel {
 - The Overview, Setup and Fallback cursors become a `RowSel`. Movement walks claude rows first, then codex rows, honoring the harness filter (`c`): a filter that hides a harness skips its rows.
 - Every handler that reads the cursor matches on `RowSel` once. `Claude(i)` takes the existing path unchanged. `Codex(i)` takes the codex branch the slice adds, or a refusal (pinned decision 6).
 - `ActionMenuState` gains a `context` variant for a codex row; its `scoped` items are the codex actions (slice B).
-- The hot-reload fingerprint already covers `codex-profiles.toml` (#69 folded fix 6); the TUI's `poll_codex_rows` (`tui/app.rs:~10130`) keeps the codex rows fresh on its interval, so a CLI switch shows up in an open TUI.
+- The hot-reload fingerprint already covers `codex-profiles.toml` (#69 folded fix 6); the TUI's `poll_codex_rows` (`src/tui/app.rs:10127-10137`) keeps the codex rows fresh on its interval, so a CLI switch shows up in an open TUI.
+- **A bare index is not an identity, and this is a correctness rule, not a nicety.** `poll_codex_rows` replaces `app.codex_rows` **wholesale every second**, ungated by tab and by filter (`src/tui/app.rs:10127-10137`). A `clauth delete` or a reorder in another terminal can therefore make `Codex(1)` name a **different account** between the moment the operator selects it and the moment the action runs. So:
+  - `RowSel` is resolved to a **profile name** the instant a menu, modal or confirmation opens, and that name — with its harness — is frozen in the action state.
+  - Before any mutation, the frozen target is **revalidated** against the current roster. A target that no longer exists, or whose row moved, refuses with the roster's own words and closes the menu.
+  - `RowSel` represents an **empty selection** explicitly (an empty roster, or a filter that hides every row), rather than defaulting to index 0.
+  - Tests: delete and reorder a codex profile while its action menu is open, and assert the mutation lands on the frozen name or refuses — never on whatever now sits at that index.
+  <!-- astra-objection-5: the earlier draft carried only `RowSel::Codex(usize)` plus a hot-reload
+       paragraph, which prevents a cross-harness mistake but not a wrong-account mutation. -->
 
 That is the whole architectural change. Everything else is per-tab work against it.
 
 ## The slices
 
-### A. `follow_active`: the operator's codex follows the chain
+### A2. The `codex` shim: launch-time account selection
 
-**Behavior.** With `follow_active = true` in `codex-profiles.toml`, every codex switch — `clauth <codex-name>`, or the chain's auto-switch — also repoints the operator's own login file (`$CODEX_HOME/auth.json`, default `~/.codex/auth.json`) onto the new active profile's store, `~/.clauth/profiles/<name>/auth.json`. A plain `codex` then starts on the chain's pick with no launcher. A running codex adopts the new chain at its next token refresh: it reloads `auth.json` from disk before spending and, when the file changed under it, uses what it finds (`codex-plan.md`, "Verified codex-0.145 behavior"). Off by default (pinned 4).
+<!-- astra-objection-1: slice A (live adoption by repointing the operator's auth.json link)
+     is WITHDRAWN. codex 0.155's `reload_if_account_id_matches` makes a running codex REFUSE a
+     reloaded auth.json naming a different account, and codex persists refreshed tokens BY PATH,
+     so a repoint during an in-flight refresh can write account A's tokens into B's store.
+     A2 replaces it: choose the account at launch, mutate no link, claim no live adoption. -->
 
-**Mechanism.** One place, because both switch paths already funnel through it: `actions::switch_codex_profile` (`src/actions.rs:1143`), called by `cmd_switch` (`src/main.rs:~1688`) and by the scheduler's auto-switch (`src/usage/scheduler.rs:~3629`). After `state.set_active(Some(name))` commits:
+**What it is, in one sentence.** A small generated `codex` program early on your `PATH` that starts
+the codex chain's active profile through `clauth start`, so typing `codex` runs the account clauth
+says is active, in that account's own home, with nothing repointed and nothing adopted.
 
-1. Read the operator slot path: `$CODEX_HOME/auth.json` else `~/.codex/auth.json`.
-2. If it is **not** a symlink into `~/.clauth/profiles/*/auth.json`, do nothing. An unadopted login is the operator's own; the key never hijacks it. (An absent file, a regular file, a link elsewhere: all "do nothing".)
-3. Else repoint it to `profiles/<name>/auth.json` through the existing tmp-sibling-then-rename helper (`adopt_operator_auth_slot`, `src/actions.rs:1588`, hoisted so both callers share it). The rename is atomic; a codex holding the old file open keeps reading the old chain until its next reload, which is the documented boundary.
-4. Log `clauth: <path> now follows '<name>'`. On `SwitchAction::Off` (every member spent, slot cleared) leave the link where it is and log that the operator's codex stays on `'<old>'`: a cleared slot must not strand a working login.
+**Why not the link.** The withdrawn slice A repointed `$CODEX_HOME/auth.json` and claimed a running
+codex would adopt the new account at its next refresh. It will not. codex 0.155's auth manager
+compares the reloaded account against the cached one in `reload_if_account_id_matches`, and
+`refresh_token` returns a permanent account-mismatch error rather than adopting the new account
+([codex 0.155 `login/src/auth/manager.rs`](https://raw.githubusercontent.com/openai/codex/rust-v0.155.0/codex-rs/login/src/auth/manager.rs)).
+Worse, codex persists refreshed tokens by PATH: repointing the link between a refresh request and
+its response can merge account A's replacement tokens into account B's store and leave A holding a
+spent token ([codex 0.145 `manager.rs`](https://raw.githubusercontent.com/openai/codex/rust-v0.145.0/codex-rs/login/src/auth/manager.rs),
+[`storage.rs`](https://raw.githubusercontent.com/openai/codex/rust-v0.145.0/codex-rs/login/src/auth/storage.rs)).
+An atomic rename of the *symlink* does not make the *read → network refresh → persist* transaction
+atomic. So A2 never writes a credential file at all.
 
-The quarantine guard (`refuse_if_quarantined`) already runs before the marker moves, so the link never lands on a dead chain. On a host without symlinks the operator slot is a separate copy (wiki, "Windows and hosts without symlinks"), which step 2 reads as "not adopted", so the key is inert there and the wiki says so. `clauth delete` of the followed profile keeps its shipped behavior: the link is detached and the operator is told to `codex login` (wiki, "Remove").
+**The boundary, stated plainly.** A switch lands at the **next `codex` launch**, never mid-session.
+This is the same boundary `clauth start` already documents for `--with-fallback`: *"codex reads
+auth.json once at start, so a chain lands at the NEXT start, not mid-session"* (`src/main.rs:456`).
+A2 does not narrow that boundary and does not claim to.
 
-**Why this is safe with two chains.** Each profile's chain is one physical file with one refresher; the link only chooses which file the operator's codex reads. No copy of any chain is created (decision 8 in `codex-plan.md`), so the single-use refresh token is never carried twice.
+**Behavior.**
 
-**Tests** (inline, sandbox HOME): knob on + adopted link → switch repoints, and the auto-switch path repoints through the same function; knob off → link untouched; knob on + regular file → untouched; knob on + link to a non-store target → untouched; `Off` → link untouched and the log names the account it stays on.
+- `codex_shim = false` in `codex-profiles.toml`, default off. Turning it on makes clauth generate
+  the shim. Turning it off removes it. The key is the intent, the file is derived from it, and one
+  converge function makes the file match the key (see the failure contract below).
+- With the shim on `PATH` ahead of the real codex, `codex <args>` runs
+  `clauth start <active-codex-profile> -- <args>`. The session gets that profile's own
+  `CODEX_HOME` (`~/.clauth/profiles/<name>/codex-home-<sid>`), which is exactly what
+  `clauth start <name>` gives today (`wiki/Codex.md`, "Run"). Args after `--` reach codex verbatim,
+  which is the documented `clauth start` contract already.
+- **No active codex profile** (the marker is unset, or `SwitchAction::Off` cleared it): the shim
+  execs the **real codex** with the arguments unchanged. Typing `codex` must never fail because
+  clauth has nothing to offer. Nothing is printed on this path.
+- **Inside a clauth codex session** the shim steps aside and execs the real codex, so a `codex`
+  typed inside `clauth start work` stays in `work`'s home rather than starting a second session.
+  This mirrors the cross-harness scrub clauth already does for a claude session started inside a
+  codex one (`src/harness.rs:107-116`).
+  <!-- astra-objection-2: slice A could not tell an operator slot from a managed session slot, so
+       a switch would repoint a RUNNING session's private link while the registry still named the
+       old profile. A2 has no such ambiguity: it mutates nothing, and a managed session is
+       recognized by the bypass env key clauth itself sets on the spawn. The ownership-check
+       weakness Astra found in `clauth_auth_store_owner` (`src/actions.rs:1573`, which matches the
+       `profiles/<name>/auth.json` SUFFIX rather than membership under the real clauth root) is
+       untouched by A2, because A2 reads no link — it stays an open upstream question, recorded
+       here so it is not lost with slice A. -->
+- **Windows: no shim, and clauth says so.** `clauth codex shim install` refuses on Windows with a
+  reason, rather than installing something that half works. clauth's own CLI resolution prefers a
+  native `.exe` over a `.cmd`/`.bat` whenever both resolve (`src/runtime.rs:3570-3582`), so a
+  `codex.cmd` shim beside a real `codex.exe` would be skipped by clauth itself while a plain shell
+  found it — two different `codex` programs depending on who asks. Refusing is the honest answer.
 
-**Docs.** `wiki/Codex.md` Switch and Auto-switch sections; `wiki/Configuration.md` `codex-profiles.toml` table gains the key.
+**Mechanism.**
 
-**Size.** ~60 lines of Rust, ~120 of tests, two wiki paragraphs.
+1. **A new start target, so the shim holds no logic.** `clauth start --codex-active -- <args>`
+   resolves `CodexState::active_profile()` and starts it, or — when there is no active profile —
+   execs the real codex with `<args>` unchanged. Every decision stays in Rust, where it is testable.
+   The shim never parses TOML and never reads the roster.
+2. **The shim file**, generated at `<data_dir>/clauth/bin/codex` (`~/.local/share/clauth/bin/codex`
+   on Linux, `~/Library/Application Support/clauth/bin/codex` on macOS). clauth already owns
+   `<data_dir>/clauth` — that is where the Claude Code plugin materializes
+   (`src/plugin_host.rs:442-447`) — so this adds a sibling `bin/`, not a new root.
+   <!-- correction-shim-dir: the earlier draft called `<data_dir>/clauth/current@claude` a shim
+        directory clauth already ships on PATH. It is not. That path is agentgear's plugin
+        materialization tree (`src/plugin_host.rs:442-447`); it holds `.claude-plugin/` and
+        `hooks/`, has no `bin/`, and is on no PATH. Verified on this host 2026-09-19. A2 therefore
+        creates `<data_dir>/clauth/bin` and says so. -->
 
-**Rulings wanted.** R1: default off (spec says yes). R2: the key name `follow_active`. R3: on `Off`, leave the link (spec) versus detach it. R3b: on `delete` of the followed profile with the key on, keep the shipped detach (spec) versus repoint to the new active.
+   ```sh
+   #!/bin/sh
+   # Generated by clauth. Do not edit — `clauth codex shim install` rewrites it.
+   if [ -n "${CLAUTH_CODEX_SHIM_BYPASS-}" ]; then
+     exec "@REAL_CODEX@" "$@"
+   fi
+   exec "@CLAUTH_BIN@" start --codex-active -- "$@"
+   ```
+
+   `@REAL_CODEX@` and `@CLAUTH_BIN@` are **absolute paths baked in at generation time**, resolved
+   from `PATH` with the shim's own directory excluded. The shim therefore does no `PATH` lookup and
+   cannot find itself, whatever the operator's `PATH` order.
+3. **The recursion guard, twice over.** clauth spawns codex through `codex_command()`, which is a
+   bare `PATH` lookup (`src/runtime.rs:3575-3586`) and would otherwise find the shim. So
+   `CodexEngine` sets `CLAUTH_CODEX_SHIM_BYPASS=1` on every codex spawn, beside the keys it already
+   scrubs (`CODEX_MANAGED_ENV_KEYS`, `src/harness.rs:149-159`). The baked absolute path closes the
+   same loop from the other end. Either alone is sufficient. Both are cheap.
+4. **PATH is the operator's to edit.** clauth prints the exact line to add
+   (`export PATH="$HOME/.local/share/clauth/bin:$PATH"`) and never writes a shell rc file. `install`
+   reports whether the directory is already on `PATH` and whether anything else on `PATH` named
+   `codex` comes first.
+5. **A stale bake.** If `@REAL_CODEX@` no longer exists (an npm reinstall moved it), the shim falls
+   back to a `PATH` walk that skips its own directory, runs what it finds, and prints one line on
+   stderr naming `clauth codex shim install` as the repair. A moved codex must not make `codex`
+   stop working.
+
+**Failure and consistency contract.**
+<!-- astra-objection-3: slice A had no state/link consistency or partial-failure contract.
+     A2's equivalent is stated here rather than assumed. -->
+
+- One converge function owns the file: given the key, it writes, rewrites or removes
+  `<data_dir>/clauth/bin/codex` and returns what it did. `install` / `uninstall` set the key inside
+  `CodexState::update`'s lock and converge **after** the state save commits, so a failed save never
+  leaves a shim the roster does not claim.
+- A converge failure is reported with the reason and the key's value, never announced as success.
+  The withdrawn slice A logged success unconditionally while its helper returned `false`.
+- Converge is idempotent and runs on `install`, `uninstall`, and `clauth doctor`. It does **not**
+  run on every switch: a switch writes no file under this design, which is the point.
+- `SwitchAction::Off` needs no special case. The shim asks for the active profile at launch, finds
+  none, and execs the real codex. Compare slice A, which had to reason about a cleared marker
+  stranding a link (`src/usage/scheduler.rs:3637` bypasses `switch_codex_profile` entirely).
+
+**What A2 does NOT claim.** It does not make a running codex change accounts. It does not
+coordinate two writers on one credential file — clauth's stand-down still depends on
+`has_live_session` (`src/codex_auth.rs:894`), which reads clauth session markers
+(`src/runtime.rs:635`), and a bare operator codex writes no such marker. A2 neither fixes nor
+worsens that; it simply stops adding a new writer.
+
+**Tests** (inline, sandbox HOME, a fake `codex` on a sandbox `PATH`):
+
+- Key on → converge writes an executable shim whose baked paths are absolute and whose
+  `@REAL_CODEX@` is not the shim itself; key off → converge removes it; both are idempotent.
+- `start --codex-active` with an active profile starts that profile, under its own `CODEX_HOME`.
+- `start --codex-active` with **no** active profile execs the real codex with the arguments
+  unchanged and prints nothing.
+- Args after `--` reach codex verbatim, including a flag both programs spell.
+- A codex spawned by `clauth start` carries `CLAUTH_CODEX_SHIM_BYPASS`, so the shim on `PATH` is
+  not re-entered (assert on the built `Command`'s env, the way the scrub tests do).
+- The shim with the bypass set execs the real codex and never calls clauth.
+- A baked `@REAL_CODEX@` that no longer exists falls back to the `PATH` walk, skips the shim's own
+  directory, and names the repair on stderr.
+- Windows: `codex shim install` refuses, with the `.exe`-over-`.cmd` reason in the message.
+- A state-save failure inside `install` leaves no shim on disk.
+
+**Docs.** `wiki/Codex.md` gains a "Type `codex` and get the active account" section carrying the
+next-launch boundary in the same words as the `--with-fallback` refusal.
+`wiki/Configuration.md`'s `codex-profiles.toml` table gains `codex_shim`.
+`wiki/Install.md` gains the `PATH` line.
+
+**Size.** ~120 lines of Rust (the converge function, the start target, the env key), ~200 of tests,
+three wiki sections. Larger than the withdrawn A, and it ships a behavior that holds.
+
+**Rulings wanted.** R1: the key name `codex_shim`, default off. R2: the shim location
+`<data_dir>/clauth/bin/codex`, with `PATH` left to the operator. R3: with no active codex profile,
+fall through to the real codex (spec) versus refuse with a message. R3b: spell the target as
+`clauth start --codex-active` (spec) versus a reserved name. R3c: Windows — refuse (spec) versus
+ship a `.cmd` shim and change `resolve_cli_command`'s `.exe` preference.
 
 ### B. Overview and Setup: codex rows take actions
 
-**Behavior.** A codex row can be selected on the Overview. `↵` / `a` opens the action menu with the codex set: `switch` (moves the marker; with slice A on, the link too), `re-login` (browser mint into the same name), `disable` / `enable`, `delete`, `rename`. `⇧↑`/`⇧↓` reorders the codex section in `profiles` display order. The Setup tab shows a codex profile's page with the rows that apply: name, harness, plan, the chain it belongs to, `hooks_json`, the store path; the claude-only rows (endpoint, api key, env, model routing, auto-start) are absent, not greyed.
+**Behavior.** A codex row can be selected on the Overview. `↵` / `a` opens the action menu with the codex set: `switch` (moves the marker, and nothing else — pinned decision 4), `re-login` (browser mint into the same name), `disable` / `enable`, `delete`, `rename`. `⇧↑`/`⇧↓` reorders the codex section in `profiles` display order. The Setup tab shows a codex profile's page with the rows that apply: name, harness, plan, the chain it belongs to, `hooks_json`, the store path; the claude-only rows (endpoint, api key, env, model routing, auto-start) are absent, not greyed.
 
-**Mechanism.** The selection layer above. `ActionMenuState` gets a `Codex` context; the items call `switch_codex_profile`, the codex login path (`src/codex_login.rs`), and the codex delete path #69 added under `CodexState::update`. `disable` / `enable` do not exist for codex today — the CLI refuses them as claude-only (wiki, "When something is refused") — so this slice adds them to `CodexState` first (a `disabled` set the chain walk and the usage poll skip, mirroring the claude semantics) and to the CLI verbs, then the TUI calls those. Reorder writes `profiles` in `codex-profiles.toml`. The Setup page is a second row-set builder beside `config_rows` (`tui/app.rs:6845`) returning only the rows a codex profile has, plus a `+ codex login` row that runs the browser mint with the modal the claude login already has (`r` reopen, `c` copy the link, `p` paste a code) — noting that codex's callback still has to reach this host's loopback port. Every refusal reuses the CLI's wording from the wiki's refusal table.
+**Mechanism.** The selection layer above. `ActionMenuState` gets a `Codex` context; the items call `switch_codex_profile`, the codex login path (`src/codex_login.rs`), and the codex delete path #69 added under `CodexState::update`. Reorder writes `profiles` in `codex-profiles.toml`. The Setup page is a second row-set builder beside `config_rows` (`tui/app.rs:6845`) returning only the rows a codex profile has, plus a `+ codex login` row that runs the browser mint with the modal the claude login already has (`r` reopen, `c` copy the link, `p` paste a code) — noting that codex's callback still has to reach this host's loopback port. Every refusal reuses the CLI's wording from the wiki's refusal table.
 
-**Tests.** Cursor movement across the harness boundary under each filter; each action against a sandbox roster; the Setup row-set for a codex profile lists no claude-only row.
+**Two of these actions do not exist for codex yet, and this slice must define them before it calls them.**
+<!-- astra-objection-4: the earlier draft routed rename and disable to "the writer that already
+     exists". For codex, neither writer exists, and disable's claude semantics are more than
+     "skip usage and the chain". Both are specified here instead. -->
 
-**Rulings wanted.** R4: the codex action set above. R5: whether `rename` should be allowed while a live session holds the chain (spec: refuse, same as delete).
+- **`rename`.** There is no codex rename writer to route to. `rename_profile` takes an `AppConfig` and moves Claude Code state (`src/actions.rs:991-996`). A codex rename must define all of: the **roster** entry in `profiles`, the **chain** entry in `fallback_chain`, the **active marker** when it names the old name, the **profile directory** `~/.clauth/profiles/<name>/` (which holds `auth.json`, `codex-home/` and the usage cache), the **rotation guard** the claude rename already takes, and the **operator `auth.json` link** when one points into the old directory — capture installs exactly such a link (`wiki/Codex.md`, "Adopt the login your own codex holds"), and moving the directory without repointing or detaching it strands the operator's own codex on a path that no longer exists. Recovery is specified too: a rename that fails after the directory move must leave the roster and the directory naming the same profile, or refuse before moving anything.
+- **`disable` / `enable`.** Settled question 8 refuses these on a codex name (`codex-plan.md:217`), so this is an **amendment**, named as one in the header. Claude's `disable_profile` is not merely "skip the chain and the poll": it refuses the **active** profile (`'<name>' is the active account, switch away first`) and a profile holding a **live session** (`'<name>' has a live session, close it first`) — `src/actions.rs:1638-1651`. The codex twin must carry both refusals in the same words, and every codex entry point that can land on a profile (`switch`, `start`, the chain walk, the usage refresh, and later `delegate`) must reject a disabled target rather than silently using it.
+- If upstream would rather not take those invariants in this slice, **B narrows to `switch`, `re-login`, `delete` and reorder**, and rename plus disable/enable move to their own PR. That is the fallback this spec is happy with.
+
+**Tests.** Cursor movement across the harness boundary under each filter; each action against a sandbox roster; the Setup row-set for a codex profile lists no claude-only row; rename moves roster, chain, marker and directory together, and refuses when the operator link would be stranded; disable refuses the active profile and a live one in the claude wording; every codex entry point rejects a disabled target.
+
+**Rulings wanted.** R4: the codex action set above. R4b: whether rename and disable/enable belong in B at all, or in their own PR (spec: happy either way). R5: whether `rename` should be allowed while a live session holds the chain (spec: refuse, same as delete).
 
 ### C. Fallback tab: the codex chain editor
 
-**Behavior.** A second section on the Fallback tab, under the claude chain: the codex chain in walk order, with add / remove / reorder, the codex `weekly_switch_threshold` line, `wrap_off`, and (from slice A) `follow_active`. The hand-edited file stops being the only way.
+**Behavior.** A second section on the Fallback tab, under the claude chain: the codex chain in walk order, with add / remove / reorder, the codex `weekly_switch_threshold` line, `wrap_off`, and (from A2) `codex_shim`. The hand-edited file stops being the only way.
 
 **Mechanism.** The claude editor keys off `cfg.state.fallback_chain` (`tui/render/chain.rs:76,174`, `tui/app.rs:5149 handle_fallback_chain_key`). The codex section reuses the row widgets against `CodexState` and writes through `CodexState::update`. Focus gains a `CodexChain` arm beside `FallbackFocus::Chain`.
 
-**Tests.** Add/remove/reorder round-trips through the file; the threshold clamps to 50–100 as the file rule says; a member removed while active clears the marker the way the CLI does.
+**Removing a member from the chain is not deleting a profile, and must not behave like one.**
+<!-- astra-objection-8: the earlier test asserted that removing an active member clears the
+     marker "the way the CLI does". No such CLI precedent exists for chain editing. -->
+`CodexState::remove_profile` clears the active marker (`src/codex_profiles.rs:170-175`), but that is the **delete-a-profile** writer, not a chain editor. The claude chain editor removes a member and leaves the marker alone (`remove_chain_member`, `src/tui/app.rs:6292-6304`), and the codex walk simply declines to run when the active profile sits outside the chain — `snapshot_codex_chain` returns `None` (`src/fallback.rs:989-993`). So the codex chain editor **preserves the marker** and matches the claude editor. If upstream wants the other behavior, that is a new ruling (R6b), not existing semantics.
 
-**Rulings wanted.** R6: one tab with two sections (spec) versus a `c` filter like the Overview.
+**Tests.** Add/remove/reorder round-trips through the file; removing the **active** member leaves the marker set and the walk declines, matching `remove_chain_member` and `snapshot_codex_chain`; an out-of-band `weekly_switch_threshold` (a hand-edited `0.98`, a `nan`, a `20`) **resets to the 98.0 default** rather than clamping into 50-100 — `weekly_switch_threshold_pct` filters then falls back to `DEFAULT_WEEKLY_SWITCH_PCT` (`src/codex_profiles.rs:132-136`, `src/profile.rs:1030`), and the editor must show the same number the walk will use.
+<!-- astra-copy-fix-C: the earlier text said "clamps to 50-100". -->
+
+**Rulings wanted.** R6: one tab with two sections (spec) versus a `c` filter like the Overview. R6b: chain removal preserves the active marker (spec, matching the claude editor) versus clearing it.
 
 ### D. Usage tab: codex accounts in the breakdown
 
-**Behavior.** Each codex profile gets its Usage rows: the windows the wire reports, the reset clock, the plan word. A plan with one window shows one bar and says `weekly only`, never a dash that reads as "unknown". Burn and ETA use the same label-driven code (`burn.rs`) since it names no window.
+**Behavior.** Each codex profile gets its Usage rows: the windows the wire reports, the reset clock, the plan word. Burn and ETA use the same label-driven code (`burn.rs`) since it names no window.
 
-**Mechanism.** The Usage renderer reads per-profile `usage_cache.json` through `profile_cache::load_profile_cache`; codex rows load theirs the same way (`tui/app.rs:1582` already does for the Overview). A `RowSel::Codex` cursor selects a codex row's detail. Optional supplement: the newest `token_count.rate_limits` from `~/.codex/sessions` for a profile with a live session, stamped as `live` in the row the way claude's live column reads.
+**Windows are labelled from their own duration, never from a plan name or a position.** That is the existing contract (`codex-plan.md:44,205,212`) and this slice keeps it: a `window_minutes` of 10080 renders as a 7-day window, 300 as a 5-hour one, and an unrecognized duration renders with its own duration spelled out rather than being forced into a named column. A response carrying **one** window shows one bar. Crucially, the UI distinguishes three different states that a dash today collapses into one: **a window the wire did not report**, **a poll that has not run yet**, and **a poll that failed**. Only the first is "this account has one window".
+<!-- astra-objection-7: the earlier draft said "a plan with one window says `weekly only`", which
+     treated a single observation as a plan property and used a name where the contract uses a
+     duration. -->
 
-**Tests.** A one-window cache renders one bar and the `weekly only` label; a two-window cache renders both; the supplement never overrides a fresher poll.
+**Mechanism.** The Usage renderer reads per-profile `usage_cache.json` through `profile_cache::load_profile_cache`; codex rows load theirs the same way (`tui/app.rs:1582` already does for the Overview). A `RowSel::Codex` cursor selects a codex row's detail, resolved to a profile name at open time (see the selection layer). Optional supplement: the newest `token_count.rate_limits` from the rollout roots below, for a profile with a live session, stamped as `live` in the row the way claude's live column reads.
 
-**Docs.** `wiki/Codex.md` says the poll's "two windows" fill the 5h and 7d columns; a Pro or Business plan reports one. The sentence becomes "the windows it reports (one or two)".
+**The rollout roots, enumerated — `~/.codex/sessions` alone is the wrong set.**
+<!-- astra-objection-6: the earlier draft scanned only `~/.codex/sessions`, which misses every
+     session this integration itself launches, and it inferred account ownership from the
+     active marker. Both are corrected here. -->
 
-**Rulings wanted.** R7: read the rollout `token_count` feed at all (spec: yes, supplement only).
+1. `~/.clauth/profiles/<name>/codex-home/sessions/` — the durable per-profile store. **Every shared `clauth start <name>` session writes here**, because the session home links `sessions/` into the store (`wiki/Codex.md`, "Run"). This is the primary root, and the one the earlier draft missed.
+2. `~/.clauth/profiles/<name>/codex-home/archived_sessions/` — archiving a thread keeps it; it must not vanish from the totals.
+3. The **operator home**: `$CODEX_HOME/sessions` when that variable is set, else `~/.codex/sessions`. It is one root, not necessarily one account.
+4. `--isolated` sessions write into a per-session home that is **removed at exit** (`wiki/Codex.md`, "Run"). Their rollouts are unrecoverable by design. This is a stated coverage gap, not a bug to fix, and the UI must not imply the totals are complete.
+
+**Deduplication.** A shared session's rollout is reachable by two paths — through the session home's link and through the store itself. Walk each root, resolve every candidate to its canonical path, and key by that. A file counted twice is a wrong number presented confidently.
+
+**Account attribution, and when to refuse it.** A rollout under `profiles/<name>/codex-home/` is attributable to `<name>` **by path**, which is the only strong attribution available. A rollout under the operator home is **not** attributable: that directory can hold several accounts' history from before clauth, or from a `codex login` the operator ran themselves. Ownership is therefore **never inferred from today's active marker or from where the `auth.json` link currently points** — that is a statement about now, not about the day the rollout was written. An unattributable rollout is reported under an explicit `unattributed` bucket, never folded into a named profile's number.
+
+**Tests.** A one-window cache renders one bar labelled by its duration; a two-window cache renders both; an unreported window, an un-run poll and a failed poll each render distinguishably; the supplement never overrides a fresher poll; a rollout reachable through both a session home link and the store is counted once; a rollout in the operator home lands in `unattributed` and never in a named profile.
+
+**Docs.** `wiki/Codex.md` says the poll's "two windows" fill the 5h and 7d columns. The sentence becomes "the windows it reports, labelled by their duration", with no claim about which plans report how many — this spec has one rollout sample and no matching poll fixture.
+
+**Rulings wanted.** R7: read the rollout `token_count` feed at all (spec: yes, supplement only). R7b: the `unattributed` bucket for operator-home rollouts (spec) versus excluding them entirely.
 
 ### E. Config tab: the codex keys
 
-**Behavior.** A `codex` group on the Config tab: `weekly_switch_threshold`, `wrap_off`, `follow_active`. Same widgets as the claude keys (`tui/render/global_config.rs`).
+**Behavior.** A `codex` group on the Config tab: `weekly_switch_threshold`, `wrap_off`, `codex_shim`. Same widgets as the claude keys (`tui/render/global_config.rs`).
 
-**Mechanism.** Rows bound to `CodexState` fields, written through `CodexState::update`. Trivial once A exists; listed as its own slice so C and E can land in either order.
+**Mechanism.** Rows bound to `CodexState` fields, written through `CodexState::update`. `codex_shim` is the one key with a side effect: toggling it runs A2's converge function **after** the state save commits, and reports what converge did — or why it failed — rather than assuming it worked. Trivial once A2 exists; listed as its own slice so C and E can land in either order.
+
+**Tests.** Toggling `codex_shim` on writes the shim and off removes it; a converge failure surfaces as an error with the key's value, not as a silent success.
 
 ### F. Tokens tab: a codex cost lens
 
 **Behavior.** The Tokens tab totals codex sessions beside Claude Code ones: per day, per model (`turn_context.model`), input / output / cached, and an API-equivalent cost from the price cache, labeled as an estimate exactly like the claude lens.
 
-**Mechanism.** A second feeder beside the claude one (`src/tokens.rs`, `collect_jsonl` at ~963): walk `~/.codex/sessions/**/rollout-*.jsonl`, read `event_msg/token_count` events whose `info` carries the turn's token counts, key by `session_meta.session_id`. `token_ledger` is harness-agnostic already (`codex-plan.md`, settled question 9). The lens gets a harness column and the `c` key the Overview has.
+**Mechanism.** A second feeder beside the claude one (`src/tokens.rs`, `collect_jsonl` at ~963): walk `rollout-*.jsonl` under **every root slice D enumerates** — the per-profile store, its `archived_sessions`, and the operator home — read `event_msg/token_count` events whose `info` carries the turn's token counts, and key by `session_meta.session_id`. `token_ledger` is harness-agnostic already (`codex-plan.md`, settled question 9).
 
-**Tests.** Fixtures from real rollouts (redacted): a session with two turns totals correctly; a rollout with `info: null` events contributes nothing; a session split across two files does not double count.
+F inherits D's root list, its canonical-path deduplication, its `unattributed` bucket for operator-home rollouts, and its stated `--isolated` coverage gap **without restating them** — one enumeration, two consumers.
+<!-- astra-objection-6: the earlier draft walked `~/.codex/sessions` only, which misses every
+     rollout a `clauth start` session writes. -->
 
-**Rulings wanted.** R8: the rollout files as the data source (they are codex's own history, not a clauth artifact). R9: pricing: reuse the price cache keyed by the `turn_context.model` string.
+The lens gets a harness column. **The `c` key is already taken on this tab** — `handle_tokens_key` binds `c` to the persisted cache-counting toggle on both views (`src/tui/app.rs:3403-3411`) — so the harness filter takes `h`, or `c` is explicitly reassigned and the cache toggle moved. The spec takes `h`.
+<!-- astra-copy-fix-F: the earlier draft said "the `c` key the Overview has", which would have
+     collided with the existing cache toggle. -->
+
+**Tests.** Fixtures from real rollouts (redacted): a session with two turns totals correctly; a rollout with `info: null` events contributes nothing; a session split across two files does not double count; a rollout reachable through both a session-home link and the profile store is counted once; an operator-home rollout lands in `unattributed`; `h` filters by harness and `c` still toggles cache counting.
+
+**Rulings wanted.** R8: the rollout files as the data source (they are codex's own history, not a clauth artifact). R9: pricing: reuse the price cache keyed by the `turn_context.model` string. R9b: `h` for the harness filter (spec) versus reassigning `c` and moving the cache toggle.
 
 ### G. `delegate` over `codex exec`, and the Plugin tab
 
 **Behavior.** The MCP `delegate` tool accepts a codex profile and runs the task under `codex exec` in that profile's home; the result comes back in the same shape the claude run returns. The Plugin tab lists codex profiles' live sessions beside the claude ones.
 
-**Mechanism.** `run_delegate` (`src/mcp/mod.rs:3418`) spawns `claude -p … --output-format stream-json`; a codex arm spawns `codex exec` with the profile's `CODEX_HOME` and `-c` overrides that `clauth start` already builds (`src/runtime.rs`), and a per-harness result formatter maps its final message and usage into the delegate result. `AppConfig.profiles` stays claude-only; the MCP layer resolves a codex name through `CodexState` explicitly, so nothing else in the MCP surface changes.
+**Mechanism.** `run_delegate` (`src/mcp/mod.rs:3418`) spawns `claude -p … --output-format stream-json`; a codex arm spawns `codex exec` with the profile's `CODEX_HOME` and the `-c` overrides `clauth start` already builds (`src/runtime.rs`). `AppConfig.profiles` stays claude-only; the MCP layer resolves a codex name through `CodexState` explicitly, so nothing else in the MCP surface changes.
 
-**Tests.** A shimmed `codex exec` produces the documented output; the formatter yields the same result keys as the claude formatter; a codex name that is quarantined is refused with the CLI's words.
+**A result formatter is not the contract. The input and lifecycle contracts are.**
+<!-- astra-objection-9: the earlier draft described only an output shim. Swapping the executable
+     silently drops permission controls, the agent selection, resume-workspace resolution and the
+     runtime teardown that the claude delegate carries today. -->
 
-**Rulings wanted.** R10: `codex exec`'s output contract to pin (its `--json` event stream versus last-message only). R11: whether `delegate` may run a codex profile that is not the active one (spec: yes, like `clauth start`).
+Every delegate option is **supported, translated, or refused by name** — never silently dropped. Flags below are from `codex exec --help` on codex 0.155, read on this host 2026-09-19.
+
+| Option today | Codex arm | Note |
+|---|---|---|
+| `model` | translated → `-m/--model` | direct |
+| `cwd` | translated → `-C/--cd` | direct |
+| `env` | supported | layered the same way, then clauth's own keys win |
+| `isolation` | supported | the same per-session home `clauth start --isolated` builds |
+| `allowed_tools` | **refused** | codex has no per-tool allowlist. Dropping a permission control silently is the one failure this table exists to prevent |
+| `permission_mode` | **refused pending a ruling** | codex's nearest are `-s/--sandbox {read-only,workspace-write,danger-full-access}` and `--approve-for-me`. The mapping is not one-to-one, so it needs an explicit ruling rather than a guess |
+| `subagent_type` | **refused** | no codex equivalent |
+| `resume` | **refused in this slice** | codex has `codex exec resume <id>`, but clauth's resume resolves the **workspace** from a claude transcript (`resolve_resume_workspace`, `src/mcp/mod.rs:3444-3452`). Two different session stores; a codex resume is its own PR |
+
+**Lifecycle, matched to the claude arm.** `ProfileRuntime::acquire` wraps the spawn as an RAII guard and tears the runtime down on return (`src/mcp/mod.rs:3464-3466`) — the codex arm takes the same guard, not a bare spawn. Env composition goes through the **codex** engine, not `apply_delegate_env`, which pins `ClaudeEngine` and `CLAUDE_CONFIG_DIR` by construction (`src/mcp/mod.rs:3384-3403`): the codex twin scrubs `CODEX_MANAGED_ENV_KEYS` and pins `CODEX_HOME` (`src/harness.rs:149-186`). The `CLAUTH_MCP_DEPTH` recursion guard is set on the codex child too, so a nested `delegate` is refused there exactly as it is for claude. Cancellation, a non-zero exit, and output produced before a failure each have a defined result shape rather than an empty one.
+
+**Tests.** A shimmed `codex exec` produces the documented output; the formatter yields the same result keys as the claude formatter; a codex name that is quarantined is refused with the CLI's words; **each refused option is refused by name** with its reason, and none is silently dropped; the codex child carries `CODEX_HOME` and `CLAUTH_MCP_DEPTH` and none of `CODEX_MANAGED_ENV_KEYS` inherited; a cancelled run and a non-zero exit each return the defined shape; the runtime guard tears down on every exit path.
+
+**Rulings wanted.** R10: which `codex exec` output contract to pin — `--json` (JSONL events, the closer twin of `--output-format stream-json`) versus `-o/--output-last-message <FILE>` (spec: `--json`). R10b: the `permission_mode` mapping onto `-s/--sandbox`, or keep refusing it. R11: whether `delegate` may run a codex profile that is not the active one (spec: yes, like `clauth start`).
 
 ## Delivery
 
-Order A, B, C, D, E, F, G. A ships first and alone, because it is the behavior the series exists for and it touches one function. B carries the selection layer that C and D need. E is a one-evening slice once A's key exists. F and G are independent of each other and of C–E.
+Order A2, B, C, D, E, F, G. **A2 does not ship until R1-R3c are ruled on**, because it adds a program to the operator's `PATH` and that is not a decision to take on a fork's say-so. B carries the selection layer that C and D need, and its rename / disable invariants may split into their own PR (R4b). D owns the rollout-root enumeration that F reuses. E is a short slice once A2's key exists. F and G are independent of each other and of C-E.
 
 Each PR: red tests first, the change, the wiki, the whole suite against a recorded baseline, and a cross-model review before it opens.
+
+**What this spec has NOT done.** No slice is implemented. The withdrawn slice A had an implementation plan; it was never built, and the plan is marked withdrawn (`docs/superpowers/plans/2026-09-19-codex-follow-active.md`). The measured evidence here is **one rollout sample** on one Pro account and a read of `codex exec --help` on codex 0.155 — no poll fixture, and no runtime reproduction of any failure Astra described. Those are source-backed arguments, not runs.
+
+## Astra review fold — an audit trail
+
+Every item from the independent cross-model review (gpt-6-astra, high, read-only, 2026-09-19;
+full text in `docs/superpowers/astra-spec-review-verdict.md`, verdict **DISAGREE**) and where it
+landed. Each changed passage also carries an HTML comment naming its item, so the fold can be
+audited in place.
+
+| Item | Where it landed |
+|---|---|
+| Falsifying case + objection 1 (A's safety argument is false) | Slice A **withdrawn**. A2 replaces it, pinned decision 4 is rewritten, and the implementation plan is marked withdrawn |
+| Objection 2 (operator slot vs managed session slot) | A2's in-session behavior, plus the `clauth_auth_store_owner` suffix-match weakness recorded as an open upstream question |
+| Objection 3 (no state/link consistency or failure contract) | A2's "Failure and consistency contract" |
+| Objection 4 (B mutates credentials with undefined invariants) | Slice B, rename and disable each specified; R4b offers to split them out |
+| Objection 5 (selection identity across refreshes) | Architecture, the freeze-and-revalidate rules |
+| Objection 6 (D and F scan the wrong roots; attribution undefined) | Slice D's root enumeration, deduplication and `unattributed` bucket; F inherits it |
+| Objection 7 (D overgeneralizes one measurement) | "Measured tonight" rewritten to one sample; D labels windows by duration and distinguishes absent / un-run / failed |
+| Objection 8 (C treats chain removal as deletion) | Slice C, marker preserved; R6b added |
+| Objection 9 (G needs an input and lifecycle contract) | Slice G's option table and lifecycle paragraph |
+| Contradictions (preserved rulings vs requested amendments) | The header paragraph, and the issue draft |
+| Copy fix: threshold resets to 98, not clamped | Slice C tests |
+| Copy fix: `c` already toggles cache counting on Tokens | Slice F, harness filter moved to `h` (R9b) |
+| Copy fix: the adopt helper is not atomic on Windows | **Dissolved with slice A** — A2 calls no link helper |
+| Copy fix: R3b's "new active" is misleading | **Dissolved with slice A** — that R3b is gone, and A2's R3b is a different question |
+| Issue text: six corrections | Applied in `docs/codex-parity-issue-draft.md` |
+
+**Not done, and worth saying:** this fold was written by the same model family that wrote the spec
+Astra reviewed. It has had **no second review**. The A2 design in particular is new text that no
+independent reviewer has seen.
 
 ## Out of scope, kept from the parity map
 

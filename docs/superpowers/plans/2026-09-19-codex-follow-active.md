@@ -1,5 +1,15 @@
 # `follow_active` (codex parity slice A) Implementation Plan
 
+> **WITHDRAWN 2026-09-19 (decisions D11, D12).** Do not implement this plan. Astra
+> (gpt-6-astra, high, read-only) falsified the design with codex 0.155's own source:
+> `reload_if_account_id_matches` makes a running codex REFUSE a reloaded `auth.json`
+> that names a different account, and codex persists refreshed tokens by PATH, so
+> repointing the link during an in-flight refresh can write account A's new tokens
+> into account B's store. Verdict: `docs/superpowers/astra-spec-review-verdict.md`.
+> Slice A is replaced by **A2, launch-time account selection**, in
+> `docs/codex-parity-plan.md`. This file stands only as the record of the withdrawn
+> design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** With `follow_active = true` in `codex-profiles.toml`, every codex switch (manual `clauth <name>` or the chain's auto-switch) also repoints the operator's own `~/.codex/auth.json` link onto the new active profile's store, so a plain `codex` starts on the chain's pick.
