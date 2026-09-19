@@ -60,7 +60,7 @@ clauth list           # account table with cached usage, no network
 | Command | Flags | Does |
 |---------|-------|------|
 | `clauth` | | open the TUI (with stdout not a terminal: command help on stderr, exit 2) |
-| `clauth <profile>` | | switch to that profile and exit; a codex name moves the codex active marker instead ([Codex](Codex#switch)) |
+| `clauth <profile>` | | switch to that profile and exit — deprecated, use `clauth switch <name>`; a codex name moves the codex active marker instead ([Codex](Codex#switch)) |
 | `clauth start <profile> [claude args…]` | `--isolated`, `--with-fallback`, `--explain` | run `claude` under that profile's own config dir; a codex profile runs `codex` under its own `CODEX_HOME` instead, and `--with-fallback` is refused there ([Codex](Codex#run)) |
 | `clauth start --auto [claude args…]` | `--isolated`, `--with-fallback`, `--explain` | start on the first fallback-chain member with headroom for the models the session will run |
 | `clauth login <profile>` | `--base-url`, `--api-key`, `--setup-token`, `--yes`, `--model` | add an account, or re-authenticate one in place |
@@ -74,6 +74,7 @@ clauth list           # account table with cached usage, no network
 | `clauth which` | `--json` | print the profile owning the loaded credentials; inside a `clauth start` codex session, that codex profile |
 | `clauth list` | `--all` (`--disabled`) | account table from the on-disk caches, never fetches; Claude Code accounts only |
 | `clauth jobs` | `--json` | what the delegates are doing: account, elapsed, last output, live runs first; `--json` also carries each run's `session_id`, the handle `delegate({session_id})` takes after a crash, and whether the run was isolated, which is what decides whether that id is a handle at all |
+| `clauth switch <name>` / `clauth switch <sid> <profile>` | | one name switches the global account (the bare `clauth <name>` form, deprecated); two names move a live session, picked up at its next request |
 | `clauth sessions` | `--json`, `--tokens` | list Claude Code sessions, newest first |
 | `clauth resume <id\|latest>` | `--profile <name>` | resume a session under a chosen account |
 | `clauth info <id\|latest>` | | print a session's resume command, workspace, and storage path |
