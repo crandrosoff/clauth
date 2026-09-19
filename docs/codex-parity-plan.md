@@ -34,6 +34,7 @@ G delegate over codex exec | planned
 
 ```provenance
 source | docs/codex-parity-plan.md, on the crandrosoff/clauth fork, branch docs/codex-parity-plan
+live | https://2026-09-19-clauth-codex-parity-plan.3dstories.ca (doc-harness convention URL, UNVERIFIED from this session: the harness sits behind Cloudflare Access and a made-up subdomain returns the same login page, so a 200 proves nothing)
 builds on | docs/codex-plan.md (#69) and wiki/Codex.md at upstream mommy 37b4ca08
 measured | 2026-09-19, codex 0.155.0, a Pro and a Business workspace
 ```
