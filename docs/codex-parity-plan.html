@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="design-doc-publish">
+<title>Codex parity: the follow-up series (spec, 2026-09-19)</title>
+<style>
+:root{--bg:#12181c;--surface:#1a2228;--ink:#e7edf0;--ink-2:#a8b6bd;--ink-3:#76858f;
+--line:#2a353c;--accent:#2dd4bf;--code:#232d34}
+:root[data-theme=dark]{--bg:#12181c;--surface:#1a2228;--ink:#e7edf0;--ink-2:#a8b6bd;
+--ink-3:#76858f;--line:#2a353c;--accent:#2dd4bf;--code:#232d34}
+:root[data-theme=light]{--bg:#f6f7f8;--surface:#fff;--ink:#1a2126;--ink-2:#4b5a63;
+--ink-3:#667279;--line:#dde3e6;--accent:#0f766e;--code:#eef1f3}
+@media print{:root,:root[data-theme=dark]{--bg:#f6f7f8;--surface:#fff;--ink:#1a2126;
+--ink-2:#4b5a63;--ink-3:#667279;--line:#dde3e6;--accent:#0f766e;--code:#eef1f3}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:900px;margin:0 auto;padding:0 20px 72px}
+header{padding:40px 0 18px;border-bottom:1px solid var(--line);margin-bottom:20px}
+.eyebrow{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+h1{font-size:clamp(22px,4vw,30px);margin:.3em 0;font-weight:750;letter-spacing:-.02em}
+h2{font-size:19px;font-weight:700;margin:1.4em 0 .4em}
+h3{font-size:16px;font-weight:650;margin:1.2em 0 .3em}
+p,li{color:var(--ink-2)}
+code{background:var(--code);border-radius:4px;padding:1px 5px;font:12.5px/1.4 ui-monospace,Menlo,Consolas,monospace}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto}
+pre code{background:none;padding:0}
+blockquote{border-left:3px solid var(--accent);margin:.6em 0;padding:.2em 0 .2em 14px;color:var(--ink-3)}
+table{border-collapse:collapse;width:100%;margin:.6em 0;font-size:13.5px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.telemetry th{white-space:nowrap;color:var(--ink-3);width:1%}
+.telemetry-section{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px 18px 14px;margin-top:24px}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px}
+
+:root{--sev-crit:#f87171;--sev-crit-bg:#3b1717;--sev-high:#fb923c;--sev-high-bg:#3a2410;--sev-med:#fbbf24;--sev-med-bg:#302a14;--sev-low:#a8b6bd;--sev-low-bg:#232d34;--req-c:#2dd4bf;--req-c-bg:#123531}
+:root[data-theme=dark]{--sev-crit:#f87171;--sev-crit-bg:#3b1717;--sev-high:#fb923c;--sev-high-bg:#3a2410;--sev-med:#fbbf24;--sev-med-bg:#302a14;--sev-low:#a8b6bd;--sev-low-bg:#232d34;--req-c:#2dd4bf;--req-c-bg:#123531}
+:root[data-theme=light]{--sev-crit:#b91c1c;--sev-crit-bg:#fdecec;--sev-high:#c2410c;--sev-high-bg:#fdeee2;--sev-med:#955a06;--sev-med-bg:#f8f2e2;--sev-low:#4b5a63;--sev-low-bg:#eef1f3;--req-c:#0f766e;--req-c-bg:#e6f2f0}
+@media print{:root,:root[data-theme=dark]{--sev-crit:#b91c1c;--sev-crit-bg:#fdecec;--sev-high:#c2410c;--sev-high-bg:#fdeee2;--sev-med:#955a06;--sev-med-bg:#f8f2e2;--sev-low:#4b5a63;--sev-low-bg:#eef1f3;--req-c:#0f766e;--req-c-bg:#e6f2f0}}
+a{color:var(--accent)}
+.score{font:11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;font-weight:700;background:var(--code);color:var(--accent);border-radius:5px;padding:1px 6px}
+.sev{font-size:11px;font-weight:700;letter-spacing:.03em;padding:1px 7px;border-radius:999px;text-transform:uppercase;white-space:nowrap}
+.sev-critical{color:var(--sev-crit);background:var(--sev-crit-bg)}
+.sev-high{color:var(--sev-high);background:var(--sev-high-bg)}
+.sev-medium{color:var(--sev-med);background:var(--sev-med-bg)}
+.sev-low{color:var(--sev-low);background:var(--sev-low-bg)}
+.req{font-size:11px;font-weight:700;letter-spacing:.03em;padding:1px 6px;border-radius:5px;color:var(--req-c);background:var(--req-c-bg)}
+.req-must-not,.req-should-not{color:var(--sev-crit);background:var(--sev-crit-bg)}
+.req-may{color:var(--ink-3);background:var(--code)}
+
+:root{--accent-soft:color-mix(in srgb,var(--accent) 12%,transparent)}
+.blk{margin:14px 0}
+.blk-stats{display:flex;flex-wrap:wrap;gap:10px}
+.blk-stats .blk-item{flex:1 1 130px;background:var(--surface);border:1px solid var(--line);
+border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:2px}
+.blk-stats .blk-value{font-size:22px;font-weight:750;letter-spacing:-.02em;color:var(--ink)}
+.blk-stats .is-accent .blk-value{color:var(--accent)}
+.blk-stats .blk-label{font:11px/1.3 ui-monospace,Menlo,Consolas,monospace;
+letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.blk-bar{display:block;height:4px;border-radius:999px;background:var(--code);margin-top:6px}
+.blk-bar .blk-fill{display:block;height:100%;border-radius:999px;background:var(--accent)}
+.blk-verdict .blk-row{display:flex;gap:10px;align-items:baseline;padding:8px 0;
+border-bottom:1px solid var(--line)}
+.blk-verdict .blk-row:last-child{border-bottom:0}
+.blk-verdict .blk-key{font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;font-weight:700;
+letter-spacing:.06em;text-transform:uppercase;color:var(--accent);flex:0 0 auto;min-width:64px}
+.blk-verdict .blk-text{color:var(--ink);font-size:16px;font-weight:600}
+.blk-chips{display:flex;flex-wrap:wrap;gap:6px}
+.blk-chip{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 9px;
+border-radius:999px;text-transform:uppercase;white-space:nowrap;
+color:var(--ink-2);background:var(--code);border:1px solid var(--line)}
+.blk-chip.is-done,.blk-chip.is-shipped,.blk-chip.is-merged{color:var(--req-c);
+background:var(--req-c-bg);border-color:transparent}
+.blk-chip.is-wip,.blk-chip.is-pending{color:var(--sev-med);background:var(--sev-med-bg);
+border-color:transparent}
+.blk-chip.is-blocked,.blk-chip.is-failed{color:var(--sev-crit);background:var(--sev-crit-bg);
+border-color:transparent}
+.blk-callout>.blk-callout{border-left:3px solid var(--ink-3);background:var(--code);
+border-radius:0 8px 8px 0;padding:10px 14px}
+.blk-callout .blk-title{font-weight:700;color:var(--ink);margin-bottom:.2em}
+.blk-callout p{margin:0;color:var(--ink-2)}
+.blk-callout .is-warn,.blk-callout .is-high{border-left-color:var(--sev-high);
+background:var(--sev-high-bg)}
+.blk-callout .is-stop,.blk-callout .is-critical{border-left-color:var(--sev-crit);
+background:var(--sev-crit-bg)}
+.blk-callout .is-note,.blk-callout .is-info{border-left-color:var(--accent)}
+.blk-legend dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
+.blk-legend dt{font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;font-weight:700;
+letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);
+border-left:3px solid var(--ink-3);padding-left:8px}
+.blk-legend dt.is-done{border-left-color:var(--req-c)}
+.blk-legend dt.is-blocked{border-left-color:var(--sev-crit)}
+.blk-legend dt.is-solid{border-left-color:var(--accent)}
+/* #171: the rest of the status vocabulary. Three tokens had a colour and the other ten did
+   not, so a legend whose keys happened to be `crit`/`warn`/`ok`/`note` — the four a roadmap
+   actually uses — rendered four identical grey bars. A legend exists to say what a colour
+   means, and that one could not: every row looked the same as every other.
+   Measured on the live `rawgentic-plan-graph` page before the fix.
+   Grouped to match `.blk-chip` above rather than invented here, so a legend key and a chip
+   carrying the same word cannot disagree about its colour. */
+.blk-legend dt.is-shipped,.blk-legend dt.is-merged,.blk-legend dt.is-ok{
+border-left-color:var(--req-c)}
+.blk-legend dt.is-failed,.blk-legend dt.is-crit{border-left-color:var(--sev-crit)}
+.blk-legend dt.is-wip,.blk-legend dt.is-pending,.blk-legend dt.is-active,
+.blk-legend dt.is-warn{border-left-color:var(--sev-med)}
+/* `note` and `planned` are deliberately absent: they are the declared NEUTRAL states, and the
+   base rule's `--ink-3` is their colour. Adding a rule here would be the same mistake in
+   reverse — see `_PHASE_STATE_NEUTRAL`. A key outside the vocabulary entirely (`solid` above,
+   or a line style in a module map) also keeps the neutral bar, correctly: the legend's key
+   space is open by design, and only the status words carry a status colour. */
+.blk-legend dd{margin:0;color:var(--ink-2);font-size:13.5px}
+.blk-meter{display:grid;grid-template-columns:1fr auto;gap:2px 12px;margin:8px 0}
+.blk-meter .blk-label{color:var(--ink-2);font-size:13.5px}
+.blk-meter .blk-value{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--ink-3)}
+.blk-meter .blk-track{grid-column:1/-1;height:6px;border-radius:999px;background:var(--code);
+overflow:hidden}
+.blk-meter .blk-fill{display:block;height:100%;background:var(--accent)}
+.blk-meter.is-accent .blk-fill{background:var(--accent)}
+.blk-findings .blk-finding{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;
+padding:10px 0;border-bottom:1px solid var(--line)}
+.blk-findings .blk-finding:last-child{border-bottom:0}
+.blk-sev{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+padding:2px 7px;border-radius:999px;white-space:nowrap;align-self:start;
+color:var(--sev-low);background:var(--sev-low-bg)}
+.is-critical>.blk-sev{color:var(--sev-crit);background:var(--sev-crit-bg)}
+.is-high>.blk-sev{color:var(--sev-high);background:var(--sev-high-bg)}
+.is-medium>.blk-sev{color:var(--sev-med);background:var(--sev-med-bg)}
+.blk-findings .blk-title{font-weight:650;color:var(--ink)}
+.blk-findings .blk-text{grid-column:2;color:var(--ink-2);font-size:13.5px}
+.blk-prov{grid-column:2;font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace;
+color:var(--ink-3)}
+.blk-steps ol,.blk-steps{margin:0;padding:0;list-style:none}
+.blk-step{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;padding:9px 0;
+border-bottom:1px solid var(--line)}
+.blk-step:last-child{border-bottom:0}
+.blk-step .blk-n{font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace;font-weight:700;
+color:var(--accent);align-self:start}
+.blk-step .blk-title{font-weight:650;color:var(--ink)}
+.blk-step .blk-text{grid-column:2;color:var(--ink-2);font-size:13.5px}
+.blk-nodes ul{list-style:none;margin:0;padding:0}
+.blk-nodes ul ul{margin-left:18px;padding-left:14px;border-left:1px solid var(--line)}
+.blk-node{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+padding:7px 11px;margin:6px 0;display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
+/* A child list lives INSIDE its parent <li>, so on a flex parent it becomes a flex
+   SIBLING of the label and renders beside it instead of beneath. Found by looking at a
+   rendered three-level tree, not by reading the markup. */
+.blk-node>ul{flex-basis:100%;margin-top:6px}
+/* Two roots in ONE nodes block are a before/after pair; a template opts in by
+   gridding this top-level list. Two separate fences cannot pair — each is its
+   own wrapper with a single child. */
+.blk-nodes>ul{display:grid;gap:0 16px}
+.blk-node .blk-label{font-weight:650;color:var(--ink)}
+.blk-node .blk-text{color:var(--ink-3);font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+.blk-edge{flex-basis:100%;font:10.5px/1.4 ui-monospace,Menlo,Consolas,monospace;
+letter-spacing:.05em;text-transform:uppercase;color:var(--accent)}
+.blk-edge.is-proposed{color:var(--ink-3);border-bottom:1px dashed var(--ink-3);
+align-self:start;display:inline-block;flex-basis:auto}
+.blk-provenance dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;
+font-size:13px}
+.blk-provenance dt{font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;font-weight:700;
+letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3)}
+.blk-provenance dd{margin:0;color:var(--ink-2)}
+
+body.tpl-design{background:radial-gradient(1200px 600px at 50% -10%,rgba(124,156,255,.10),transparent 60%),var(--bg)}
+.tpl-design .wrap{max-width:1080px;padding:0 clamp(16px,4vw,32px) 64px}
+.tpl-design header{padding:clamp(24px,4vw,56px) 0 12px;border-bottom:none;margin-bottom:18px}
+.tpl-design h1{font-size:clamp(26px,3.4vw,40px)}
+.tpl-design h2{font-size:20.8px;margin:1.9em 0 .6em}
+
+/* #76 — the frame's companions only. Two rules, deliberately few.
+   An earlier draft of this PR also added a two-column `.dz-options` grid "so the wide measure
+   pays for itself". Both wrong: the grid was DEAD (the `.dz-options` rule further down sets
+   `display:block` at equal specificity and later source order), and it contradicted a decision
+   this file already records — cards stack FULL WIDTH because "a trade-off you have to READ is
+   not a 220px tile". The width pays for itself inside each card, where the for/against grid is
+   two columns and needs the room. Deleted rather than reconciled. */
+.tpl-design h1{line-height:1.2;max-width:22ch}
+.tpl-design header .eyebrow{font-size:11px;letter-spacing:.14em}
+.tpl-design .dz-lead{background:var(--surface);border:1px solid var(--line);
+border-left:4px solid var(--accent);border-radius:12px;padding:4px 20px 14px;margin:6px 0 26px}
+.tpl-design .dz-lead>p:first-child{font-size:17.5px;line-height:1.55;color:var(--ink);font-weight:550}
+/* Option cards. Stacked full-width, because a trade-off you have to READ is not a 220px tile;
+   the shared layer's flex row is overridden here at higher specificity. */
+.tpl-design .dz-options{margin:22px 0;display:block;counter-reset:dz-opt}
+.tpl-design .dz-options .blk-opt{counter-increment:dz-opt;display:grid;gap:10px 14px;
+grid-template-columns:1fr 1fr;grid-template-areas:"head head" "pro con";
+background:var(--surface);border:1px solid var(--line);border-radius:14px;
+padding:16px 18px;margin:0 0 16px;flex:none}
+.tpl-design .dz-options .blk-opt>.blk-title{grid-area:head;display:flex;gap:12px;
+align-items:baseline;font-size:19px;letter-spacing:-.01em;margin:0}
+.tpl-design .dz-options .blk-opt>.blk-title::before{content:counter(dz-opt,decimal-leading-zero);
+font:700 22px/1.1 ui-monospace,Menlo,Consolas,monospace;color:var(--accent);flex:none}
+.tpl-design .dz-options .blk-for{grid-area:pro;background:var(--req-c-bg);
+border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:13.5px}
+.tpl-design .dz-options .blk-against{grid-area:con;background:var(--sev-high-bg);
+border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:13.5px}
+/* #134 SETTLED THE FOLLOW-UP THIS COMMENT USED TO NAME. It said these labels were CSS-generated
+   content, so not dependable semantic markup, that the reference uses real DOM text
+   (`<h4>Pros</h4>`), and that making it semantic "means changing the renderer, which moves every
+   style's bytes and so cannot ride in a per-template PR". That is exactly what #134 did: `_options`
+   now emits a real `.blk-lbl` element, every rich style's bytes moved, and `plain` did not.
+   So this is no longer a `::before` at all — it RESTYLES the markup label the renderer emits.
+   Only the typography is set here; the colours come from the shared layer, which reaches this
+   template because the wrapper carries both `blk-options` and `dz-options`. `text-transform`
+   keeps the visible form FOR/AGAINST while the accessible name stays the emitted "For"/"Against".
+   The space the renderer emits after the label collapses harmlessly against a block. */
+.tpl-design .dz-options .blk-lbl{display:block;font:700 10px/1.6
+ui-monospace,Menlo,Consolas,monospace;letter-spacing:.07em;text-transform:uppercase}
+/* Restated at (0,4,0): the card rule above is (0,3,0) and was silently beating the shared
+   `.blk-options .is-chosen` (0,2,0), so the chosen card lost its accent border. Measured. */
+.tpl-design .dz-options .blk-opt.is-chosen{border-color:var(--accent);border-width:2px}
+.tpl-design .dz-options .blk-opt.is-rejected{opacity:.72}
+.tpl-design .dz-options .is-chosen>.blk-title::after{content:"CHOSEN";font:700 10px/1.6
+ui-monospace,Menlo,Consolas,monospace;letter-spacing:.07em;color:var(--accent);
+border:1px solid var(--accent);border-radius:999px;padding:1px 8px;margin-left:auto;flex:none}
+@media(max-width:640px){.tpl-design .dz-options .blk-opt{grid-template-columns:1fr;
+grid-template-areas:"head" "pro" "con"}}
+/* A today/proposed pair is TWO ROOTS in one `nodes compare` block, so the
+   grid goes on the top-level list. Two separate fences cannot pair — each is
+   its own wrapper with a single child. */
+@media(min-width:720px){.tpl-design .dz-compare>ul{grid-template-columns:1fr 1fr}}
+.tpl-design .dz-compare{background:var(--code);border-radius:12px;padding:10px 14px}
+/* The verdict band — `.recommend` in the reference. A gradient wash rather than a flat fill, so
+   the decision reads as the page's conclusion and not as one more callout. */
+.tpl-design .dz-decision{margin:24px 0 8px}
+.tpl-design .dz-decision>.blk-callout{border:1px solid var(--accent);border-left-width:1px;
+border-radius:14px;padding:16px 18px;
+background:linear-gradient(180deg,var(--accent-soft),transparent)}
+.tpl-design .dz-decision>.blk-callout>.blk-title::before{content:"DECISION";display:block;
+font:700 10px/1.6 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.07em;color:var(--accent)}
+/* Trade-off table. Styled, deliberately NOT markered: a markdown table emits a bare <table> with
+   no hook, and `section_class` is not a table marker — using it would flip `design` into
+   sectioned rendering and demote its h2s. */
+.tpl-design table{border-collapse:collapse;width:100%;margin:14px 0}
+.tpl-design thead th{font:700 11px/1.6 ui-monospace,Menlo,Consolas,monospace;
+letter-spacing:.06em;text-transform:uppercase;color:var(--accent);
+border-bottom:2px solid var(--accent);text-align:left;padding:6px 10px}
+.tpl-design tbody td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.tpl-design tbody tr:nth-child(even){background:var(--code)}
+.tpl-design h2{border-bottom:2px solid var(--accent);padding-bottom:.15em}
+
+/* An ordinary fenced listing, in a box with its language and a copy button. RICH ONLY —
+   `plain` carries no template CSS by definition and stays a bare <pre>. The box owns the
+   border, radius and ground that `pre` supplies on its own elsewhere, so the bar and the
+   listing share one outline instead of stacking two. */
+.doc-code{margin:0 0 14px;border:1px solid var(--line);border-radius:10px;
+background:var(--code);overflow:hidden}
+.doc-code-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+padding:5px 8px 5px 14px;border-bottom:1px solid var(--line)}
+.doc-code-lang{font:11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--ink-3);
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc-code-copy{flex:none;font:11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;
+color:var(--ink-2);background:var(--surface);border:1px solid var(--line);border-radius:6px;
+padding:3px 10px;cursor:pointer}
+.doc-code-copy:hover{color:var(--accent);border-color:var(--accent)}
+.doc-code-copy:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.doc-code-copy[data-state=ok]{color:var(--accent);border-color:var(--accent)}
+.doc-code-copy[data-state=fail]{color:var(--ink-2);border-color:var(--ink-3)}
+.doc-code>pre{margin:0;border:0;border-radius:0;background:none}
+/* Paper cannot take a copy. Printing the control would print a button that does nothing. */
+@media print{.doc-code-copy{display:none}}
+
+.blk-options{display:flex;flex-wrap:wrap;gap:12px}
+.blk-options .blk-opt{flex:1 1 220px;background:var(--surface);border:1px solid var(--line);
+border-radius:12px;padding:12px 14px}
+.blk-options .is-chosen{border-color:var(--accent);border-width:2px}
+.blk-options .is-rejected{opacity:.72}
+.blk-options .blk-title{display:block;font-weight:700;margin-bottom:6px}
+.blk-options .blk-for,.blk-options .blk-against{display:block;font-size:13px}
+/* #134 — the stance label is MARKUP now (`_options` emits `.blk-lbl`), not `content:"+ "`/`"- "`
+   on a pseudo-element. Generated content is not dependable semantic markup, and keeping a copy
+   here beside the real one would both drift and double-announce. A word also beats a bare sign at
+   a glance and does not lean on colour alone — the argument `design.py` had already made for its
+   own labels. Styled, never hidden: with the glyphs gone, hiding this leaves no stance signal.
+
+   The gap between label and prose is a REAL SPACE in the markup, not a margin here. The old
+   `content:"+ "` carried its own trailing space; an early version of this dropped it and leaned on
+   `margin-right`, which separates the label visually while leaving the DOM text fused as
+   "Forfewest files" — so text extraction, copy-paste, and any consumer that concatenates text nodes
+   got the exact failure this change exists to prevent. One space does both jobs, so there is no
+   margin here to keep in sync with it. Found twice independently: in a browser, and by review. */
+.blk-options .blk-lbl{font-weight:700}
+.blk-options .blk-for .blk-lbl{color:var(--req-c)}
+.blk-options .blk-against .blk-lbl{color:var(--sev-high)}
+
+:root{--accent:#a8b2c2;}
+:root[data-theme=dark]{--accent:#a8b2c2;}
+:root[data-theme=light]{--accent:#5a657c;}
+@media print{:root,:root[data-theme=dark]{--accent:#5a657c;}}
+</style>
+</head>
+<body class="tpl-design">
+<div class="wrap">
+<header>
+<div class="eyebrow">design artifact · updated 2026-09-19 01:56 MDT</div>
+<h1>Codex parity: the follow-up series (spec, 2026-09-19)</h1>
+
+</header>
+<main>
+<div class="dz-lead"><p>The codex harness landed in #69 (from #45): a second roster in <code>codex-profiles.toml</code>, capture and browser login, <code>clauth start &lt;codex&gt;</code> under a private <code>CODEX_HOME</code>, the <code>wham/usage</code> poll, a separate chain with its own walk, and one read-only section on the Overview. Everything else a Claude Code account gets in clauth — actions on its row, a Setup page, a chain editor, the Usage breakdown, the Config keys, the Tokens lens, <code>delegate</code> — stops at the harness line, by the parity map in <code>docs/codex-plan.md</code>. This spec is the series that carries codex over that line, one slice per PR, each independently mergeable and each keeping the rulings #69 recorded.</p>
+<p>Written from a fork, offered for rulings first. Nothing here reverses a #69 decision; where a slice needs one, it says so under &quot;rulings wanted&quot;.</p>
+<div class="blk blk-options dz-options"><div class="blk-opt is-chosen"><span class="blk-title">Second roster, tab by tab</span><span class="blk-for"><span class="blk-lbl">For</span> Keeps #69&#x27;s two files and every ruling; each tab draws a codex section and acts on codex rows through one selection type; the most mergeable</span><span class="blk-against"><span class="blk-lbl">Against</span> More code per tab, and the selection type threads through three tabs</span></div><div class="blk-opt is-rejected"><span class="blk-title">One unified roster</span><span class="blk-for"><span class="blk-lbl">For</span> Cleanest UI code, one list everywhere</span><span class="blk-against"><span class="blk-lbl">Against</span> Reverses #69&#x27;s core decision, thousands of lines, and the MCP tools would see codex profiles they cannot serve</span></div><div class="blk-opt is-rejected"><span class="blk-title">Separate codex dashboard</span><span class="blk-for"><span class="blk-lbl">For</span> Lowest risk per tab, nothing touches the claude tabs</span><span class="blk-against"><span class="blk-lbl">Against</span> Two dashboards, and the two chains never sit side by side</span></div></div>
+<div class="blk blk-callout dz-decision"><div class="blk-callout is-decision"><div class="blk-title">The second roster stays, and the tabs learn a second list</div><p>One type, <code>RowSel { Claude(i) | Codex(i) }</code>, carries the harness with the cursor. Every handler asks &quot;which harness&quot; once and routes to the writer that already exists. Nothing merges the rosters and nothing forks the app.</p></div></div>
+<div class="blk blk-chips"><span class="blk-chip is-wip">A follow_active</span><span class="blk-chip is-planned">B overview + setup</span><span class="blk-chip is-planned">C fallback tab</span><span class="blk-chip is-planned">D usage tab</span><span class="blk-chip is-planned">E config tab</span><span class="blk-chip is-planned">F tokens lens</span><span class="blk-chip is-planned">G delegate over codex exec</span></div>
+<div class="blk blk-provenance"><dl><dt>source</dt><dd>docs/codex-parity-plan.md, on the crandrosoff/clauth fork, branch docs/codex-parity-plan</dd><dt>builds on</dt><dd>docs/codex-plan.md (#69) and wiki/Codex.md at upstream mommy 37b4ca08</dd><dt>measured</dt><dd>2026-09-19, codex 0.155.0, a Pro and a Business workspace</dd></dl></div></div>
+<h2>Pinned decisions</h2>
+<ol>
+<li><strong>Two rosters stay.</strong> <code>profiles.toml</code> and <code>codex-profiles.toml</code> remain disjoint sets in one namespace (<code>codex-plan.md</code>, decision 1-2). No slice merges them. The MCP tools keep failing closed on a codex name until slice G gives <code>delegate</code> a codex runner.</li>
+<li><strong>Tabs learn a second list; they do not learn a second app.</strong> Each tab draws its claude rows as today and a codex section under them (the Overview already does), and the cursor can land on either. One selection type carries the harness with the index, so every action handler asks &quot;which harness&quot; once, at the top, and routes to the writer that already exists for that harness.</li>
+<li><strong>Codex writers are the CLI&#x27;s.</strong> <code>switch_codex_profile</code>, the codex login and delete paths, <code>CodexState::update</code> — the TUI calls the same functions the CLI does. No second implementation of a codex mutation.</li>
+<li><strong>The switch that follows is opt-in.</strong> <code>follow_active = false</code> by default, so #69&#x27;s &quot;a switch moves the marker and nothing else&quot; stays the shipped behavior until an operator turns the key.</li>
+<li><strong>No new wire.</strong> The series reads what <code>wham/usage</code>, the local <code>~/.codex/sessions</code> rollouts and <code>codex exec</code> already give. A feature with no OpenAI equivalent (kick, spend ceiling, per-session fallback, keychain) stays out, per the parity map.</li>
+<li><strong>Refuse loudly, never silently.</strong> A codex row that cannot take an action says why in the same words the CLI uses (<code>--with-fallback is not available on a codex profile …</code>), the way #69 fixed the &quot;profile not found&quot; copy.</li>
+</ol>
+<h2>Measured tonight, on codex 0.155.0</h2>
+<ul>
+<li>A Pro plan reports <strong>one window</strong>: <code>token_count.rate_limits.primary.window_minutes = 10080</code>, <code>secondary = null</code> (a live rollout, 2026-09-19). So the empty <code>5h</code> cell on a codex row is correct wire data, not a mapping bug. Slice D renders that honestly instead of a dash.</li>
+<li>Every codex turn writes an <code>event_msg/token_count</code> event carrying <code>rate_limits</code> (used percent, reset epoch, plan) into <code>~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl</code>. That is a passive local feed, fresher than the poll while a session runs. Slice D may read it as a supplement; it is never the only source, because an idle account writes nothing.</li>
+<li>The harness&#x27;s own tests were verified against codex 0.145; this host runs 0.155 and every <code>clauth start work</code> / capture path exercised tonight behaved as the wiki says.</li>
+</ul>
+<h2>Architecture: the selection layer</h2>
+<p>Today the Overview cursor is an index into <code>config.profiles</code>, and every key on the Overview, Setup and Fallback tabs reads that index (<code>tui/app.rs</code>, the <code>KeyCode::Char(&#x27;a&#x27;)</code> arm at ~3201 opens <code>ActionMenuState</code> on the selected claude profile). Codex rows are drawn from <code>app.codex_rows</code> (<code>tui/app.rs:1573</code>) after the claude rows (<code>tui/render/overview.rs:109-122</code>) and are &quot;never selectable&quot;.</p>
+<p>The series adds one type and threads it through:</p>
+<div class="doc-code"><div class="doc-code-bar"><span class="doc-code-lang">rust</span><button class="doc-code-copy" type="button" hidden>Copy</button></div><pre><code>/// Which row the cursor is on, across both rosters.
+pub(crate) enum RowSel {
+    Claude(usize),   // index into config.profiles
+    Codex(usize),    // index into app.codex_rows
+}</code></pre></div>
+<ul>
+<li>The Overview, Setup and Fallback cursors become a <code>RowSel</code>. Movement walks claude rows first, then codex rows, honoring the harness filter (<code>c</code>): a filter that hides a harness skips its rows.</li>
+<li>Every handler that reads the cursor matches on <code>RowSel</code> once. <code>Claude(i)</code> takes the existing path unchanged. <code>Codex(i)</code> takes the codex branch the slice adds, or a refusal (pinned decision 6).</li>
+<li><code>ActionMenuState</code> gains a <code>context</code> variant for a codex row; its <code>scoped</code> items are the codex actions (slice B).</li>
+<li>The hot-reload fingerprint already covers <code>codex-profiles.toml</code> (#69 folded fix 6); the TUI&#x27;s <code>poll_codex_rows</code> (<code>tui/app.rs:~10130</code>) keeps the codex rows fresh on its interval, so a CLI switch shows up in an open TUI.</li>
+</ul>
+<p>That is the whole architectural change. Everything else is per-tab work against it.</p>
+<h2>The slices</h2>
+<h3>A. <code>follow_active</code>: the operator&#x27;s codex follows the chain</h3>
+<p><strong>Behavior.</strong> With <code>follow_active = true</code> in <code>codex-profiles.toml</code>, every codex switch — <code>clauth &lt;codex-name&gt;</code>, or the chain&#x27;s auto-switch — also repoints the operator&#x27;s own login file (<code>$CODEX_HOME/auth.json</code>, default <code>~/.codex/auth.json</code>) onto the new active profile&#x27;s store, <code>~/.clauth/profiles/&lt;name&gt;/auth.json</code>. A plain <code>codex</code> then starts on the chain&#x27;s pick with no launcher. A running codex adopts the new chain at its next token refresh: it reloads <code>auth.json</code> from disk before spending and, when the file changed under it, uses what it finds (<code>codex-plan.md</code>, &quot;Verified codex-0.145 behavior&quot;). Off by default (pinned 4).</p>
+<p><strong>Mechanism.</strong> One place, because both switch paths already funnel through it: <code>actions::switch_codex_profile</code> (<code>src/actions.rs:1143</code>), called by <code>cmd_switch</code> (<code>src/main.rs:~1688</code>) and by the scheduler&#x27;s auto-switch (<code>src/usage/scheduler.rs:~3629</code>). After <code>state.set_active(Some(name))</code> commits:</p>
+<ol>
+<li>Read the operator slot path: <code>$CODEX_HOME/auth.json</code> else <code>~/.codex/auth.json</code>.</li>
+<li>If it is <strong>not</strong> a symlink into <code>~/.clauth/profiles/*/auth.json</code>, do nothing. An unadopted login is the operator&#x27;s own; the key never hijacks it. (An absent file, a regular file, a link elsewhere: all &quot;do nothing&quot;.)</li>
+<li>Else repoint it to <code>profiles/&lt;name&gt;/auth.json</code> through the existing tmp-sibling-then-rename helper (<code>adopt_operator_auth_slot</code>, <code>src/actions.rs:1588</code>, hoisted so both callers share it). The rename is atomic; a codex holding the old file open keeps reading the old chain until its next reload, which is the documented boundary.</li>
+<li>Log <code>clauth: &lt;path&gt; now follows &#x27;&lt;name&gt;&#x27;</code>. On <code>SwitchAction::Off</code> (every member spent, slot cleared) leave the link where it is and log that the operator&#x27;s codex stays on <code>&#x27;&lt;old&gt;&#x27;</code>: a cleared slot must not strand a working login.</li>
+</ol>
+<p>The quarantine guard (<code>refuse_if_quarantined</code>) already runs before the marker moves, so the link never lands on a dead chain. On a host without symlinks the operator slot is a separate copy (wiki, &quot;Windows and hosts without symlinks&quot;), which step 2 reads as &quot;not adopted&quot;, so the key is inert there and the wiki says so. <code>clauth delete</code> of the followed profile keeps its shipped behavior: the link is detached and the operator is told to <code>codex login</code> (wiki, &quot;Remove&quot;).</p>
+<p><strong>Why this is safe with two chains.</strong> Each profile&#x27;s chain is one physical file with one refresher; the link only chooses which file the operator&#x27;s codex reads. No copy of any chain is created (decision 8 in <code>codex-plan.md</code>), so the single-use refresh token is never carried twice.</p>
+<p><strong>Tests</strong> (inline, sandbox HOME): knob on + adopted link → switch repoints, and the auto-switch path repoints through the same function; knob off → link untouched; knob on + regular file → untouched; knob on + link to a non-store target → untouched; <code>Off</code> → link untouched and the log names the account it stays on.</p>
+<p><strong>Docs.</strong> <code>wiki/Codex.md</code> Switch and Auto-switch sections; <code>wiki/Configuration.md</code> <code>codex-profiles.toml</code> table gains the key.</p>
+<p><strong>Size.</strong> ~60 lines of Rust, ~120 of tests, two wiki paragraphs.</p>
+<p><strong>Rulings wanted.</strong> R1: default off (spec says yes). R2: the key name <code>follow_active</code>. R3: on <code>Off</code>, leave the link (spec) versus detach it. R3b: on <code>delete</code> of the followed profile with the key on, keep the shipped detach (spec) versus repoint to the new active.</p>
+<h3>B. Overview and Setup: codex rows take actions</h3>
+<p><strong>Behavior.</strong> A codex row can be selected on the Overview. <code>↵</code> / <code>a</code> opens the action menu with the codex set: <code>switch</code> (moves the marker; with slice A on, the link too), <code>re-login</code> (browser mint into the same name), <code>disable</code> / <code>enable</code>, <code>delete</code>, <code>rename</code>. <code>⇧↑</code>/<code>⇧↓</code> reorders the codex section in <code>profiles</code> display order. The Setup tab shows a codex profile&#x27;s page with the rows that apply: name, harness, plan, the chain it belongs to, <code>hooks_json</code>, the store path; the claude-only rows (endpoint, api key, env, model routing, auto-start) are absent, not greyed.</p>
+<p><strong>Mechanism.</strong> The selection layer above. <code>ActionMenuState</code> gets a <code>Codex</code> context; the items call <code>switch_codex_profile</code>, the codex login path (<code>src/codex_login.rs</code>), and the codex delete path #69 added under <code>CodexState::update</code>. <code>disable</code> / <code>enable</code> do not exist for codex today — the CLI refuses them as claude-only (wiki, &quot;When something is refused&quot;) — so this slice adds them to <code>CodexState</code> first (a <code>disabled</code> set the chain walk and the usage poll skip, mirroring the claude semantics) and to the CLI verbs, then the TUI calls those. Reorder writes <code>profiles</code> in <code>codex-profiles.toml</code>. The Setup page is a second row-set builder beside <code>config_rows</code> (<code>tui/app.rs:6845</code>) returning only the rows a codex profile has, plus a <code>+ codex login</code> row that runs the browser mint with the modal the claude login already has (<code>r</code> reopen, <code>c</code> copy the link, <code>p</code> paste a code) — noting that codex&#x27;s callback still has to reach this host&#x27;s loopback port. Every refusal reuses the CLI&#x27;s wording from the wiki&#x27;s refusal table.</p>
+<p><strong>Tests.</strong> Cursor movement across the harness boundary under each filter; each action against a sandbox roster; the Setup row-set for a codex profile lists no claude-only row.</p>
+<p><strong>Rulings wanted.</strong> R4: the codex action set above. R5: whether <code>rename</code> should be allowed while a live session holds the chain (spec: refuse, same as delete).</p>
+<h3>C. Fallback tab: the codex chain editor</h3>
+<p><strong>Behavior.</strong> A second section on the Fallback tab, under the claude chain: the codex chain in walk order, with add / remove / reorder, the codex <code>weekly_switch_threshold</code> line, <code>wrap_off</code>, and (from slice A) <code>follow_active</code>. The hand-edited file stops being the only way.</p>
+<p><strong>Mechanism.</strong> The claude editor keys off <code>cfg.state.fallback_chain</code> (<code>tui/render/chain.rs:76,174</code>, <code>tui/app.rs:5149 handle_fallback_chain_key</code>). The codex section reuses the row widgets against <code>CodexState</code> and writes through <code>CodexState::update</code>. Focus gains a <code>CodexChain</code> arm beside <code>FallbackFocus::Chain</code>.</p>
+<p><strong>Tests.</strong> Add/remove/reorder round-trips through the file; the threshold clamps to 50–100 as the file rule says; a member removed while active clears the marker the way the CLI does.</p>
+<p><strong>Rulings wanted.</strong> R6: one tab with two sections (spec) versus a <code>c</code> filter like the Overview.</p>
+<h3>D. Usage tab: codex accounts in the breakdown</h3>
+<p><strong>Behavior.</strong> Each codex profile gets its Usage rows: the windows the wire reports, the reset clock, the plan word. A plan with one window shows one bar and says <code>weekly only</code>, never a dash that reads as &quot;unknown&quot;. Burn and ETA use the same label-driven code (<code>burn.rs</code>) since it names no window.</p>
+<p><strong>Mechanism.</strong> The Usage renderer reads per-profile <code>usage_cache.json</code> through <code>profile_cache::load_profile_cache</code>; codex rows load theirs the same way (<code>tui/app.rs:1582</code> already does for the Overview). A <code>RowSel::Codex</code> cursor selects a codex row&#x27;s detail. Optional supplement: the newest <code>token_count.rate_limits</code> from <code>~/.codex/sessions</code> for a profile with a live session, stamped as <code>live</code> in the row the way claude&#x27;s live column reads.</p>
+<p><strong>Tests.</strong> A one-window cache renders one bar and the <code>weekly only</code> label; a two-window cache renders both; the supplement never overrides a fresher poll.</p>
+<p><strong>Docs.</strong> <code>wiki/Codex.md</code> says the poll&#x27;s &quot;two windows&quot; fill the 5h and 7d columns; a Pro or Business plan reports one. The sentence becomes &quot;the windows it reports (one or two)&quot;.</p>
+<p><strong>Rulings wanted.</strong> R7: read the rollout <code>token_count</code> feed at all (spec: yes, supplement only).</p>
+<h3>E. Config tab: the codex keys</h3>
+<p><strong>Behavior.</strong> A <code>codex</code> group on the Config tab: <code>weekly_switch_threshold</code>, <code>wrap_off</code>, <code>follow_active</code>. Same widgets as the claude keys (<code>tui/render/global_config.rs</code>).</p>
+<p><strong>Mechanism.</strong> Rows bound to <code>CodexState</code> fields, written through <code>CodexState::update</code>. Trivial once A exists; listed as its own slice so C and E can land in either order.</p>
+<h3>F. Tokens tab: a codex cost lens</h3>
+<p><strong>Behavior.</strong> The Tokens tab totals codex sessions beside Claude Code ones: per day, per model (<code>turn_context.model</code>), input / output / cached, and an API-equivalent cost from the price cache, labeled as an estimate exactly like the claude lens.</p>
+<p><strong>Mechanism.</strong> A second feeder beside the claude one (<code>src/tokens.rs</code>, <code>collect_jsonl</code> at ~963): walk <code>~/.codex/sessions/**/rollout-*.jsonl</code>, read <code>event_msg/token_count</code> events whose <code>info</code> carries the turn&#x27;s token counts, key by <code>session_meta.session_id</code>. <code>token_ledger</code> is harness-agnostic already (<code>codex-plan.md</code>, settled question 9). The lens gets a harness column and the <code>c</code> key the Overview has.</p>
+<p><strong>Tests.</strong> Fixtures from real rollouts (redacted): a session with two turns totals correctly; a rollout with <code>info: null</code> events contributes nothing; a session split across two files does not double count.</p>
+<p><strong>Rulings wanted.</strong> R8: the rollout files as the data source (they are codex&#x27;s own history, not a clauth artifact). R9: pricing: reuse the price cache keyed by the <code>turn_context.model</code> string.</p>
+<h3>G. <code>delegate</code> over <code>codex exec</code>, and the Plugin tab</h3>
+<p><strong>Behavior.</strong> The MCP <code>delegate</code> tool accepts a codex profile and runs the task under <code>codex exec</code> in that profile&#x27;s home; the result comes back in the same shape the claude run returns. The Plugin tab lists codex profiles&#x27; live sessions beside the claude ones.</p>
+<p><strong>Mechanism.</strong> <code>run_delegate</code> (<code>src/mcp/mod.rs:3418</code>) spawns <code>claude -p … --output-format stream-json</code>; a codex arm spawns <code>codex exec</code> with the profile&#x27;s <code>CODEX_HOME</code> and <code>-c</code> overrides that <code>clauth start</code> already builds (<code>src/runtime.rs</code>), and a per-harness result formatter maps its final message and usage into the delegate result. <code>AppConfig.profiles</code> stays claude-only; the MCP layer resolves a codex name through <code>CodexState</code> explicitly, so nothing else in the MCP surface changes.</p>
+<p><strong>Tests.</strong> A shimmed <code>codex exec</code> produces the documented output; the formatter yields the same result keys as the claude formatter; a codex name that is quarantined is refused with the CLI&#x27;s words.</p>
+<p><strong>Rulings wanted.</strong> R10: <code>codex exec</code>&#x27;s output contract to pin (its <code>--json</code> event stream versus last-message only). R11: whether <code>delegate</code> may run a codex profile that is not the active one (spec: yes, like <code>clauth start</code>).</p>
+<h2>Delivery</h2>
+<p>Order A, B, C, D, E, F, G. A ships first and alone, because it is the behavior the series exists for and it touches one function. B carries the selection layer that C and D need. E is a one-evening slice once A&#x27;s key exists. F and G are independent of each other and of C–E.</p>
+<p>Each PR: red tests first, the change, the wiki, the whole suite against a recorded baseline, and a cross-model review before it opens.</p>
+<h2>Out of scope, kept from the parity map</h2>
+<p>Kick / auto-start (no codex endpoint), the spend ceiling and scoped weekly windows (no wire), per-session fallback and <code>--with-fallback</code> (codex binds <code>auth.json</code> at start), the macOS keychain mirror (forced file mode), <code>clauth proxy</code> (separate feature), settings sync and the sessions index (codex owns its own).</p>
+
+</main>
+<footer>Last updated: 2026-09-19 01:56 MDT · generated by design-doc-publish — self-contained, no external resources.</footer>
+</div>
+<script>
+(function(){
+var boxes=document.querySelectorAll('.doc-code');
+if(!boxes.length)return;
+function fallback(text){
+var ta=document.createElement('textarea');
+ta.value=text;ta.setAttribute('readonly','');
+ta.style.position='fixed';ta.style.top='-1000px';ta.style.opacity='0';
+document.body.appendChild(ta);ta.select();
+var ok=false;
+try{ok=document.execCommand('copy');}catch(e){ok=false;}
+document.body.removeChild(ta);
+return ok;
+}
+function flash(btn,label,state){
+btn.textContent=label;
+btn.setAttribute('data-state',state);
+window.clearTimeout(btn.getAttribute('data-timer'));
+btn.setAttribute('data-timer',window.setTimeout(function(){
+btn.textContent='Copy';btn.removeAttribute('data-state');},2000));
+}
+Array.prototype.forEach.call(boxes,function(box){
+var btn=box.querySelector('.doc-code-copy');
+var code=box.querySelector('code');
+if(!btn||!code)return;
+btn.hidden=false;
+btn.addEventListener('click',function(){
+var text=code.textContent;
+function done(ok){flash(btn,ok?'Copied':'Press Ctrl+C',ok?'ok':'fail');}
+if(navigator.clipboard&&window.isSecureContext){
+navigator.clipboard.writeText(text).then(function(){done(true);},
+function(){done(fallback(text));});
+}else{done(fallback(text));}
+});
+});
+})();
+</script>
+</body>
+</html>
