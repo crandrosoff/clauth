@@ -2292,14 +2292,31 @@ fn cancel_job(job_id: &str) -> bool {
 ///
 /// An id the registry does not hold is NAMED rather than left to come back as a
 /// plain `running` row, which reads as "the cancel did nothing". Its causes are
-/// hedged the way [`unknown_job_reason`] hedges its own, because nothing here
-/// can tell them apart: the run may already be finalizing (its registry entry
-/// drops only after the result is on disk — [`Handoff::finalize`]), or it may
-/// belong to an earlier server process whose registry went with it. No verdict
-/// renders for an unheld id: there is no run here to observe.
+/// What a cancelling `monitor` can say about the ids this server holds no run
+/// for, split by what the STORE holds about them instead of one hedge: the old
+/// "it may already be finishing, or it may have been started by an earlier
+/// server process" named nothing the caller could act on. Every bucket is a
+/// fact read off the record and the owner's liveness marker; only a record
+/// nothing can attribute keeps the hedge.
 struct CancelWatch {
     asked: Vec<String>,
-    unheld: Vec<String>,
+    /// Running, owned by THIS server, no registry entry: the finalize window
+    /// (the entry drops only after the result is on disk).
+    finishing: Vec<String>,
+    /// Clean `done` records: the ask has nothing left to stop, and the row
+    /// below hands the result back.
+    finished: Vec<String>,
+    /// Running (or the sweep's tombstone), owned by a server whose marker is
+    /// released: the row below is removed or marked dead by the collect.
+    gone: Vec<String>,
+    /// Running, owned by a LIVE server in another process (or another epoch of
+    /// this pid): its cancel flag lives there, so this server can only name it.
+    /// One clause per id — the pid, account, age and the run's own session id
+    /// differ per record.
+    foreign: Vec<(String, String, u32, u64, Option<String>)>,
+    /// Running with no owner stamp (an older server's record): the hedged
+    /// sentence survives for exactly this shape.
+    hedged: Vec<String>,
 }
 
 impl CancelWatch {
@@ -2308,16 +2325,59 @@ impl CancelWatch {
     /// registry key is always a minted id, so an unsafe one is not an unheld
     /// job, and the batch already reports it as `unknown`.
     fn ask(ids: &[String]) -> Self {
-        let (asked, unheld): (Vec<String>, Vec<String>) = ids
-            .iter()
-            .filter(|id| jobs::is_safe_job_id(id))
-            .cloned()
-            .partition(|id| cancel_job(id));
-        Self { asked, unheld }
+        let mut watch = Self {
+            asked: Vec::new(),
+            finishing: Vec::new(),
+            finished: Vec::new(),
+            gone: Vec::new(),
+            foreign: Vec::new(),
+            hedged: Vec::new(),
+        };
+        let mut unheld = Vec::new();
+        for id in ids.iter().filter(|id| jobs::is_safe_job_id(id)) {
+            if cancel_job(id) {
+                watch.asked.push(id.clone());
+            } else {
+                unheld.push(id.clone());
+            }
+        }
+        let my_pid = std::process::id();
+        for id in unheld {
+            let Some(record) = jobs::read(&id) else {
+                // No record: nothing to say here, the row below answers
+                // `unknown` with its own causes.
+                continue;
+            };
+            let dead = record.state == jobs::JobState::Running || record.crashed;
+            if !dead {
+                watch.finished.push(id);
+                continue;
+            }
+            if record.owner_pid == 0 {
+                watch.hedged.push(id);
+            } else if record.owner_pid == my_pid && !jobs::owner_is_gone(&record) {
+                // A self-owned record with no registry entry: the finalize
+                // window (the entry drops only after the result is on disk).
+                // `owner_is_gone` keeps a dead predecessor's record out of this
+                // bucket — the pid is ours but the epoch stamp is not.
+                watch.finishing.push(id);
+            } else if jobs::owner_is_gone(&record) {
+                watch.gone.push(id);
+            } else {
+                watch.foreign.push((
+                    id,
+                    record.profile,
+                    record.owner_pid,
+                    record.owner_started_at,
+                    record.session_id,
+                ));
+            }
+        }
+        watch
     }
 
-    /// The line a cancelling `monitor` opens with: the ask, then the unheld
-    /// hedge.
+    /// The line a cancelling `monitor` opens with: the ask, then one factual
+    /// clause per unheld bucket.
     fn note(self) -> String {
         let list = |ids: &[String]| {
             ids.iter()
@@ -2332,11 +2392,37 @@ impl CancelWatch {
                 list(&self.asked)
             ));
         }
-        if !self.unheld.is_empty() {
+        if !self.finishing.is_empty() {
+            clauses.push(format!("already finishing: {}", list(&self.finishing)));
+        }
+        if !self.finished.is_empty() {
+            clauses.push(format!("already finished: {}", list(&self.finished)));
+        }
+        if !self.gone.is_empty() {
+            clauses.push(format!(
+                "{} was started by a server that is gone",
+                list(&self.gone)
+            ));
+        }
+        for (id, profile, pid, started_at, session_id) in self.foreign {
+            let mut clause = format!("`{id}` is owned by a live server on `{profile}` (pid {pid}");
+            if started_at > 0 {
+                clause.push_str(&format!(
+                    ", started {} ago",
+                    crate::format::humanize_span((now_ms().saturating_sub(started_at)) / 1000)
+                ));
+            }
+            if let Some(sid) = session_id {
+                clause.push_str(&format!(", session {sid}"));
+            }
+            clause.push_str("); cancel it from that server's session");
+            clauses.push(clause);
+        }
+        if !self.hedged.is_empty() {
             clauses.push(format!(
                 "no running delegate here for {}: it may already be finishing, or it may have been \
                  started by an earlier server process",
-                list(&self.unheld)
+                list(&self.hedged)
             ));
         }
         if clauses.is_empty() {
@@ -2503,7 +2589,7 @@ async fn monitor_one(job_id: String, digest: &DigestTracker) -> Result<CallToolR
             let reason = match &before_sweep {
                 Some(record)
                     if record.state == jobs::JobState::Running
-                        && jobs::running_is_silent(record, now) =>
+                        && jobs::running_is_corpse(record, now) =>
                 {
                     orphan_job_reason(&job_id, record)
                         .unwrap_or_else(|| unknown_job_reason(&job_id, now))
@@ -2589,7 +2675,7 @@ async fn monitor_batch(
                 unknown_job_id_count += 1;
                 if let Some(record) = prior
                     && record.state == jobs::JobState::Running
-                    && jobs::running_is_silent(record, now)
+                    && jobs::running_is_corpse(record, now)
                     && let Some(reason) = orphan_job_reason(&id, record)
                 {
                     orphan_reasons.push(reason);
@@ -2738,10 +2824,12 @@ enum WaitOutcome {
 /// owns it. An absent file is `Unknown`; a running file is `Running`.
 fn read_collectable(job_id: &str) -> WaitOutcome {
     match jobs::read(job_id) {
-        Some(r) if r.state == jobs::JobState::Done => match jobs::claim(job_id) {
-            jobs::Claim::Owned(r) | jobs::Claim::Refused(r) => WaitOutcome::Done(r),
-            jobs::Claim::Lost => WaitOutcome::Unknown,
-        },
+        Some(r) if r.state == jobs::JobState::Done => {
+            match jobs::claim(job_id, jobs::Claimant::Monitor) {
+                jobs::Claim::Owned(r) | jobs::Claim::Refused(r) => WaitOutcome::Done(r),
+                jobs::Claim::Lost => WaitOutcome::Unknown,
+            }
+        }
         Some(r) => WaitOutcome::Running(r),
         None => WaitOutcome::Unknown,
     }
@@ -2868,20 +2956,24 @@ fn crashed_job_reason(job_id: &str, record: &jobs::JobRecord) -> Option<String> 
 
 /// Why an id names no job file, and what the caller can do about it.
 ///
-/// Only the FIRST branch is a derivation, and only of the SHAPE: a token that is
-/// not `d-<base36>-<digits>` was never a clauth job at all. Past that gate the
-/// stamp bounds a job's age and nothing more — it cannot say which cause fired,
-/// since a job minted a day ago may equally have been collected five minutes
-/// ago, and it cannot even say the id was minted, because the base-36 stamp
-/// admits any lowercase word. So both age branches hedge every cause they name
-/// AND carry the never-minted one, rather than asserting a cause and telling the
-/// caller to spend another window on it. Which of the two a caller lands in is
-/// the stamp's accident: the aged branch (the stamp older than
-/// [`jobs::DONE_TTL_MS`]) is the only one a sweep can explain — neither reap
-/// runs from less than a day back ([`jobs::RUNNING_TTL_MS`] adds a 600 s
-/// grace on top), so a younger id cannot have been swept — and collection
-/// leads there because every collect evicts while the sweep runs at startup
-/// alone.
+/// A delivery ledger (see [`jobs::DeliveryLedger`]) turns the most common
+/// cause into a FACT instead of a guess: every collect and auto-delivery
+/// records who delivered the job and when, so an id whose result already
+/// reached someone is answered with that delivery rather than hedged. Past
+/// that, only the FIRST branch is a derivation, and only of the SHAPE: a token
+/// that is not `d-<base36>-<digits>` was never a clauth job at all. Past that
+/// gate the stamp bounds a job's age and nothing more — it cannot say which
+/// cause fired, since a job minted a day ago may equally have been collected
+/// five minutes ago, and it cannot even say the id was minted, because the
+/// base-36 stamp admits any lowercase word. So both age branches hedge every
+/// cause they name AND carry the never-minted one, rather than asserting a
+/// cause and telling the caller to spend another window on it. Which of the
+/// two a caller lands in is the stamp's accident: the aged branch (the stamp
+/// older than [`jobs::DONE_TTL_MS`]) is the only one a sweep can explain —
+/// neither reap runs from less than a day back ([`jobs::RUNNING_TTL_MS`] adds
+/// a 600 s grace on top), so a younger id cannot have been swept — and
+/// collection leads there because every collect evicts while the sweep runs at
+/// startup alone.
 fn unknown_job_reason(job_id: &str, now: u64) -> String {
     // Checked FIRST, because it is the one cause this function can actually
     // know. Everything below hedges; this does not. A blocking delegate's record
@@ -2895,6 +2987,12 @@ fn unknown_job_reason(job_id: &str, now: u64) -> String {
              its result goes back through the call that started it, so there is \
              nothing here for `monitor` to collect"
         );
+    }
+    // Second, and also unhedged: a delivery ledger is proof the job was real
+    // and names who took its result. The speculation below is for ids with no
+    // trace left at all.
+    if let Some(ledger) = jobs::delivery_ledger(job_id) {
+        return delivered_job_reason(job_id, &ledger);
     }
     let Some(minted_at) = job_id_minted_at(job_id) else {
         return format!(
@@ -2928,6 +3026,32 @@ fn unknown_job_reason(job_id: &str, now: u64) -> String {
         "unknown job_id: {job_id} — most likely {collected}. \
          {unminted}. check this session's earlier replies for the result"
     )
+}
+
+/// The unknown-id answer when a delivery ledger names who took the result: a
+/// fact, never the never-minted hedge — the ledger is proof the job was real.
+/// The stamp is the operator's local wall clock through the one formatter
+/// (`format::local_stamp`) every prose stamp routes through.
+fn delivered_job_reason(job_id: &str, ledger: &jobs::DeliveryLedger) -> String {
+    let at = crate::format::local_stamp((ledger.at / 1000) as i64)
+        .map(|stamp| format!(" at {stamp}"))
+        .unwrap_or_default();
+    match ledger.by.as_str() {
+        "hook" => format!(
+            "unknown job_id: {job_id} — its result was delivered by clauth's auto-delivery \
+             hook{at}; check this session's earlier replies for it"
+        ),
+        "monitor" => format!(
+            "unknown job_id: {job_id} — its result was collected by an earlier `monitor` \
+             call{at}; check that reply for it"
+        ),
+        // A `by` value this build does not write is named for what it says
+        // rather than asserted to be one of the two known deliverers.
+        other => format!(
+            "unknown job_id: {job_id} — its result was delivered by `{other}`{at}; check this \
+             session's earlier replies for it"
+        ),
+    }
 }
 
 fn token_is_job_id(token: &str) -> bool {
@@ -4216,6 +4340,10 @@ fn mint_spec(mint: &MintSpec, kind: jobs::RecordKind) -> jobs::RunningSpec {
         provider: mint.provider.clone(),
         isolated: mint.isolation == Isolation::Isolated,
         kind,
+        // The owning server's liveness marker, so a later server reads the
+        // record dead the moment this one dies — see `jobs::hold_server_marker`.
+        owner_pid: jobs::server_owner_pid(),
+        owner_started_at: jobs::server_started_at(),
     }
 }
 
@@ -5145,6 +5273,18 @@ fn startup() -> Option<std::fs::File> {
 
 pub(crate) fn serve() -> Result<()> {
     let _bare_marker = startup();
+    // Held across `block_on` exactly like the bare marker: the flock drops with
+    // the process however it dies, so every record this server mints carries an
+    // owner a later server reads alive exactly as long as this one is. A failed
+    // registration is logged and stepped over — records then mint ownerless,
+    // and the silence window is their only corpse rule.
+    let _server_marker = match jobs::hold_server_marker() {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            logline!("clauth: server marker not registered: {e:#}");
+            None
+        }
+    };
     // The delegate-dot knob, read once at startup from the on-demand config.
     // A missing or unreadable profiles.toml answers the default (dot on), so
     // the knob can never fail the server.
@@ -5242,7 +5382,7 @@ fn await_job_outcomes(
                 // `Done` in the same instant finds the file gone and answers
                 // its hedged unknown copy, so exactly one full envelope
                 // reaches the conversation.
-                match jobs::claim(id) {
+                match jobs::claim(id, jobs::Claimant::Hook) {
                     jobs::Claim::Owned(r) | jobs::Claim::Refused(r) => {
                         let (envelope, _is_error) = fold_done_envelope(&r, DigestMode::Skip);
                         delivered.push(envelope);

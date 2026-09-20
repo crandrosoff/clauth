@@ -197,6 +197,8 @@ fn the_delegates_pane_reads_the_store_in_banded_order() {
                 isolated: false,
                 idle_secs: Some(300),
                 kind: jobs::RecordKind::Collectable,
+                owner_pid: 0,
+                owner_started_at: 0,
             },
             now - anchor_ago,
             "working",

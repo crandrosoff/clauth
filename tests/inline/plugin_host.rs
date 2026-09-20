@@ -39,6 +39,42 @@ fn embedded_tree_is_baked_in() {
     );
 }
 
+/// The delegate hook's wake-notification title: the bundled manifest names the
+/// event in `rewakeSummary` instead of letting the host render its internal
+/// "Stop hook feedback" placeholder, which reads as an empty notification. The
+/// value must stay true for BOTH exit-2 shapes the hook produces — a delivered
+/// fan-out and a mixed one with jobs still running — so a copy that claims
+/// readiness for the whole set ("result ready") contradicts the still-running
+/// clause the body prints. Pinned as a literal so a manifest edit cannot drift
+/// the summary without redding here.
+#[test]
+fn the_delegate_hook_names_its_wake_summary_instead_of_the_host_placeholder() {
+    let hooks: serde_json::Value =
+        serde_json::from_str(include_str!("../../plugins/hooks/hooks.json"))
+            .expect("plugins/hooks/hooks.json parses");
+    let entry = hooks["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("PostToolUse is an array")
+        .iter()
+        .find_map(|group| {
+            group["matcher"]
+                .as_str()
+                .is_some_and(|m| m == "mcp__plugin_clauth_clauth__delegate$")
+                .then(|| group["hooks"].as_array())
+                .flatten()
+        })
+        .and_then(|hooks| hooks.first())
+        .expect("the delegate matcher carries one hook entry");
+    assert_eq!(
+        entry["rewakeSummary"], "clauth delegate results",
+        "the manifest names the wake notification instead of the host's placeholder"
+    );
+    assert_ne!(
+        entry["rewakeSummary"], "Stop hook feedback",
+        "the host's internal placeholder must never be the shipped summary"
+    );
+}
+
 /// The SessionStart wiring the self-heal rides on: the committed hooks.json
 /// must carry BOTH hooks — the profile-change note keeps working, and the new
 /// self-heal entry points at the hidden `clauth self-heal` subcommand. A drift

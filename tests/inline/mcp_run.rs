@@ -1352,6 +1352,10 @@ fn running_spec(job_id: &str, profile: &str, started_at: u64) -> jobs::RunningSp
         // A background job's record is collectable from its reserve; the
         // liveness spelling belongs to a blocking run alone.
         kind: jobs::RecordKind::Collectable,
+        // The legacy shape: a record an older server wrote carries no owner, so
+        // the silence window is its only corpse rule.
+        owner_pid: 0,
+        owner_started_at: 0,
     }
 }
 
@@ -4237,6 +4241,156 @@ fn an_unknown_job_id_names_which_cause_it_was() {
     }
 }
 
+/// The row's demanded shape for the unknown-id text: a collected or
+/// auto-delivered job left a ledger behind, so the answer says what happened to
+/// it — by whom, when — instead of speculating it was never minted.
+#[test]
+fn an_unknown_id_with_a_delivery_on_record_names_the_delivery() {
+    let _home = HomeSandbox::new();
+    let now = 1_786_881_748_135u64;
+
+    let hooked = jobs::new_job_id(now - 1_000);
+    jobs::write_delivery_ledger_for_test(&hooked, jobs::Claimant::Hook, now - 900);
+    let reason = unknown_job_reason(&hooked, now);
+    assert!(
+        reason.contains("delivered by clauth's auto-delivery hook"),
+        "the hook delivery is named: {reason}"
+    );
+    assert!(
+        reason.contains("check this session's earlier replies"),
+        "the fix clause points at the reply the hook injected: {reason}"
+    );
+    assert!(
+        !reason.contains("never minted") && !reason.contains("most likely"),
+        "a delivery on record is a fact, not a hedge: {reason}"
+    );
+
+    let collected = jobs::new_job_id(now - 2_000);
+    jobs::write_delivery_ledger_for_test(&collected, jobs::Claimant::Monitor, now - 1_800);
+    let reason = unknown_job_reason(&collected, now);
+    assert!(
+        reason.contains("collected by an earlier `monitor` call"),
+        "the monitor collection is named: {reason}"
+    );
+    assert!(
+        !reason.contains("never minted") && !reason.contains("most likely"),
+        "a collection on record is a fact, not a hedge: {reason}"
+    );
+
+    // A `by` value this build does not write is NAMED for what it says, never
+    // asserted to be one of the two known deliverers.
+    let odd = jobs::new_job_id(now - 3_000);
+    jobs::write_delivery_ledger_for_test_with_by(&odd, "carrier-pigeon", now - 2_700);
+    let reason = unknown_job_reason(&odd, now);
+    assert!(
+        reason.contains("delivered by `carrier-pigeon`"),
+        "an unknown deliverer is named for what the ledger says: {reason}"
+    );
+    assert!(
+        !reason.contains("auto-delivery hook") && !reason.contains("earlier `monitor` call"),
+        "an unknown deliverer is not asserted to be a known one: {reason}"
+    );
+
+    // The ledger names the delivery, so the mint-shape gate cannot refuse a
+    // real id early: the reason still leads with the unknown marker.
+    for reason in [
+        unknown_job_reason(&hooked, now),
+        unknown_job_reason(&collected, now),
+    ] {
+        assert!(
+            reason.starts_with("unknown job_id: "),
+            "every cause keeps the lead the caller greps for: {reason}"
+        );
+    }
+}
+
+/// A dead owner's row lists as `orphaned` — a dead state — in the no-`job_ids`
+/// listing, at most one poll after the owner's death, never as `running` off
+/// the stored phase alone.
+#[test]
+fn a_dead_owners_row_lists_as_orphaned_not_running() {
+    let _home = HomeSandbox::new();
+    let id = "d-779500-0";
+    jobs::write_heartbeat_with_session(
+        &jobs::RunningSpec {
+            owner_pid: 42_424,
+            ..running_spec(id, "work", crate::usage::now_ms())
+        },
+        0,
+        "",
+        Some("sess-listed-1"),
+    )
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: None,
+        cancel: None,
+    });
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "the listing is a success-shaped reply"
+    );
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    assert!(
+        text.contains(&format!("job `{id}` orphaned")),
+        "a dead owner's row lists with a dead state, not as running: {text}"
+    );
+    assert!(
+        text.contains("resume with session id `sess-listed-1`"),
+        "the orphaned row keeps its resume sentence: {text}"
+    );
+    assert!(
+        jobs::read(id).is_some(),
+        "the listing destroys nothing: the record survives for a collect"
+    );
+}
+
+/// A corpse whose server died answers the collect with its session id, the
+/// owner-ruled orphan copy — the owner marker makes that fire at the owner's
+/// death rather than a day later.
+#[test]
+fn a_dead_owners_record_answered_by_id_names_the_crash_and_its_handle() {
+    let _home = HomeSandbox::new();
+    let id = "d-779600-0";
+    jobs::write_heartbeat_with_session(
+        &jobs::RunningSpec {
+            owner_pid: 42_424,
+            ..running_spec(id, "work", crate::usage::now_ms())
+        },
+        0,
+        "",
+        Some("sess-orph-owner-1"),
+    )
+    .unwrap();
+
+    let result = call_monitor(id);
+    assert_eq!(result.is_error, Some(true), "a corpse's id is a tool error");
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    assert_eq!(
+        text,
+        format!(
+            "error: unknown job_id: {id}. it died without finishing and its record was removed. \
+             it's still resumable from its session id: sess-orph-owner-1"
+        ),
+        "the reply is the owner's orphan copy with the surviving handle: {text}"
+    );
+    assert!(
+        jobs::read(id).is_none(),
+        "the collect reaped the dead owner's record"
+    );
+}
+
 /// Seed a `running` record silent past the corpse window — the file a dead
 /// server leaves behind — with the session id the test names, under an id whose
 /// stamp really decodes that old. The real clock rather than a synthetic one:
@@ -5634,12 +5788,12 @@ fn cancelling_a_live_job_flips_its_flag_and_the_reply_says_so() {
     );
 }
 
-/// A named id this server holds no run for is NAMED, with its causes hedged the
-/// way `unknown_job_reason` hedges its four. Coming back as a plain `running`
-/// row reads as "the cancel did nothing", which is the ambiguity this rework
-/// exists to kill.
+/// A named id this server holds no run for is NAMED with the fact the store
+/// holds about it, never the old hedge that named nothing actionable. A record
+/// that is already DONE says so — the ask has nothing left to stop, and the row
+/// below hands the result back.
 #[test]
-fn cancelling_a_job_this_server_does_not_hold_names_it_and_hedges_why() {
+fn cancelling_a_finished_job_this_server_does_not_hold_says_it_finished() {
     let _home = HomeSandbox::new();
     let id = "d-779000-0";
     jobs::write_done(
@@ -5663,15 +5817,274 @@ fn cancelling_a_job_this_server_does_not_hold_names_it_and_hedges_why() {
         .and_then(|c| c.as_text())
         .map(|t| t.text.clone())
         .expect("reply text");
-    assert!(text.contains(id), "the id is named: {text}");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!("already finished: `{id}`."),
+        "a done record is named as finished, not hedged: {text}"
+    );
     assert!(
-        text.contains("already be finishing") && text.contains("earlier server process"),
-        "both indistinguishable causes are hedged: {text}"
+        text.contains("landed first"),
+        "the row below still hands the result back: {text}"
     );
     assert_eq!(
         result.content.len(),
         1,
         "one content block per reply, cancel report included"
+    );
+}
+
+/// A running record owned by THIS server with no registry entry is the
+/// finalize window: the entry drops only after the result is on disk, so an
+/// unheld id over a live self-owned record means the finish is already landing.
+#[test]
+fn cancelling_an_unheld_self_owned_running_record_says_it_is_finishing() {
+    let _home = HomeSandbox::new();
+    let id = "d-779100-0";
+    let _marker = jobs::hold_server_marker().expect("hold the server marker");
+    jobs::write_running(&jobs::RunningSpec {
+        owner_pid: std::process::id(),
+        owner_started_at: jobs::server_started_at(),
+        ..running_spec(id, "work", crate::usage::now_ms())
+    })
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!("already finishing: `{id}`."),
+        "an unheld self-owned running record is the finalize window: {text}"
+    );
+}
+
+/// The row's demanded shape: cancel on a job whose server is GONE ends the row.
+/// The note names the gone server; the collect below reaps the record and
+/// answers the orphan copy with the surviving handle.
+#[test]
+fn cancelling_a_job_whose_server_is_gone_removes_its_row_and_says_so() {
+    let _home = HomeSandbox::new();
+    let id = "d-779200-0";
+    jobs::write_heartbeat_with_session(
+        &jobs::RunningSpec {
+            owner_pid: 42_424,
+            ..running_spec(id, "work", crate::usage::now_ms())
+        },
+        0,
+        "",
+        Some("sess-gone-1"),
+    )
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!("`{id}` was started by a server that is gone."),
+        "the old 'earlier server process' hedge is gone; the note names the fact: {text}"
+    );
+    assert!(
+        text.contains("its record was removed") && text.contains("sess-gone-1"),
+        "the row below renders the orphan copy with the handle: {text}"
+    );
+    assert!(
+        jobs::read(id).is_none(),
+        "the cancel ended the dead job's row"
+    );
+}
+
+/// The pid-reuse corner: a record minted by a DEAD server whose pid this
+/// process now holds must not read as this server's. The owner start stamp is
+/// what tells the two epochs apart — the pid is ours, the stamp is not, so the
+/// cancel names the gone server instead of the false "already finishing".
+#[test]
+fn cancelling_a_record_from_a_dead_epoch_of_this_pid_names_the_gone_server() {
+    let _home = HomeSandbox::new();
+    let id = "d-779150-0";
+    let _marker = jobs::hold_server_marker().expect("hold the server marker");
+    jobs::write_running(&jobs::RunningSpec {
+        owner_pid: std::process::id(),
+        owner_started_at: 1,
+        ..running_spec(id, "work", crate::usage::now_ms())
+    })
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!("`{id}` was started by a server that is gone."),
+        "a dead epoch of this pid is a gone server, never a self-owned run: {text}"
+    );
+    assert!(
+        jobs::read(id).is_none(),
+        "the collect below reaped the dead epoch's row"
+    );
+}
+
+/// A job owned by ANOTHER live server cannot be stopped from here — its flag
+/// lives in that server's process — so the note names the owning server: pid,
+/// age, account and the run's own session id when the record carries one.
+/// The row is left alone.
+#[test]
+fn cancelling_a_job_owned_by_a_live_foreign_server_names_that_server() {
+    let _home = HomeSandbox::new();
+    let id = "d-779300-0";
+    let _marker = jobs::hold_foreign_server_marker_for_test(999_999);
+    jobs::write_heartbeat_with_session(
+        &jobs::RunningSpec {
+            owner_pid: 999_999,
+            owner_started_at: 1_700_000_000_000,
+            ..running_spec(id, "work", crate::usage::now_ms())
+        },
+        0,
+        "",
+        Some("sess-foreign-1"),
+    )
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert!(
+        note.starts_with(&format!("`{id}` is owned by a live server on `work` (pid")),
+        "the owning server is named with its account: {text}"
+    );
+    assert!(
+        note.contains("session sess-foreign-1"),
+        "the run's own session id rides the clause when the record carries one: {text}"
+    );
+    assert!(
+        note.contains("cancel it from that server's session"),
+        "the fix clause names the only surface that can stop it: {text}"
+    );
+    assert!(
+        jobs::read(id).is_some(),
+        "a live owner's row is not touched by a foreign cancel"
+    );
+}
+
+/// An ownerless running record — one an older server wrote — keeps the hedge:
+/// nothing on disk says whose it was, and the silence window is the only judge.
+#[test]
+fn cancelling_an_ownerless_running_record_keeps_the_hedge() {
+    let _home = HomeSandbox::new();
+    let id = "d-779400-0";
+    jobs::write_running(&running_spec(id, "work", crate::usage::now_ms())).unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!(
+            "no running delegate here for `{id}`: it may already be finishing, or it may have been started by an earlier server process."
+        ),
+        "a record nothing can attribute keeps the hedged sentence: {text}"
+    );
+}
+
+/// The sweep's tombstone — a crashed blocking run's converted record — is the
+/// `record.crashed` arm of the cancel's dead derivation: its owner is gone, so
+/// the note names the gone server and the row renders the owner's crash copy,
+/// never "already finished" (the tombstone carries no result).
+#[test]
+fn cancelling_a_tombstone_names_the_gone_server_and_renders_the_crash_copy() {
+    let _home = HomeSandbox::new();
+    let id = "d-779450-0";
+    jobs::write_heartbeat_with_session(
+        &jobs::RunningSpec {
+            kind: jobs::RecordKind::Liveness,
+            owner_pid: 42_424,
+            ..running_spec(id, "work", crate::usage::now_ms())
+        },
+        0,
+        "",
+        Some("sess-tomb-2"),
+    )
+    .unwrap();
+    jobs::gc_running_corpses(crate::usage::now_ms());
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: Some(vec![id.to_string()]),
+        cancel: Some(true),
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    let (note, _) = text
+        .split_once('\n')
+        .expect("the cancel note leads the reply");
+    assert_eq!(
+        note,
+        format!("`{id}` was started by a server that is gone."),
+        "a tombstone is the gone-server bucket, never a finished job: {text}"
+    );
+    assert!(
+        text.contains("died without finishing and left no result") && text.contains("sess-tomb-2"),
+        "the row below renders the owner's crash copy with the handle: {text}"
+    );
+    assert!(
+        jobs::read(id).is_none(),
+        "the collect removed the tombstone it answered"
     );
 }
 
@@ -5774,7 +6187,19 @@ fn cancelling_an_unsafe_job_id_refuses_it_rather_than_hedging_it() {
     );
 
     // Several ids do not refuse over one unsafe member — it resolves to
-    // `unknown` in its own slot — so the note is what has to leave it alone.
+    // `unknown` in its own slot — so the note is what has to leave it alone. A
+    // done record for the safe id makes a note clause exist, so the pin reads
+    // the NOTE itself rather than the batch's own first row.
+    jobs::write_done(
+        "d-1-0",
+        "work",
+        1,
+        None,
+        None,
+        false,
+        serde_json::json!({"profile": "work", "is_error": false, "result": "ok"}),
+    )
+    .unwrap();
     let mixed = call_monitor_args(MonitorArgs {
         job_ids: Some(vec!["d-1-0".to_string(), "../etc".to_string()]),
         cancel: Some(true),
@@ -5788,12 +6213,8 @@ fn cancelling_an_unsafe_job_id_refuses_it_rather_than_hedging_it() {
     let (note, _) = text
         .split_once('\n')
         .expect("the cancel note leads the reply");
-    // Identify the line as the note BEFORE reading anything off it. With no
-    // note at all the first line is `monitor_batch`'s own `job \`d-1-0\`
-    // unknown`, which satisfies both halves below for reasons that have nothing
-    // to do with the filter under test.
     assert!(
-        note.starts_with("asked ") || note.starts_with("no running delegate here for "),
+        note.starts_with("already finished: "),
         "the line under test is the cancel note, not the batch's own first row: {note}"
     );
     assert!(
