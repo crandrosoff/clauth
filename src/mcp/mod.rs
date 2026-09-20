@@ -1028,6 +1028,21 @@ disturbing this session, use `delegate`."
             prose.push_str(&session_note);
             return Ok(CallToolResult::error(single_block(prose)));
         };
+        // The live-delegate guard, BEFORE any mutation: a switch under live
+        // runs parks them with this server when the session ends. Refused
+        // before anything moved, so the digest reports like the unknown-name
+        // arm does.
+        if let Some(reason) = live_jobs_guard(now_ms()) {
+            let payload = fold_active_live_usage(
+                serde_json::json!({ "ok": false, "reason": reason }),
+                &config,
+                DigestMode::Report(&self.digest),
+            );
+            let mut prose = render::switch_profile_prose(&payload);
+            prose.push_str("\n\n");
+            prose.push_str(&session_note);
+            return Ok(CallToolResult::error(single_block(prose)));
+        }
         let on_divergence = config.state.default_divergence;
 
         // It can block — a `security` subprocess against its deadline, its
@@ -3974,6 +3989,49 @@ fn stamp_session_id(envelope: &mut serde_json::Value, session_id: &str) {
     if envelope.get("session_id").is_none() {
         envelope["session_id"] = serde_json::Value::String(session_id.to_string());
     }
+}
+
+/// The live-delegate guard a profile switch runs BEFORE any mutation: a switch
+/// re-pins the session's account, and the running jobs this server holds die
+/// with it if the session ends — the DS3→DS5 case, where a re-pin parked
+/// delegates under the old server process, unknown to the next session's
+/// `monitor` and unkillable while their children ran their loops to
+/// completion. The refusal names the held ids and the fix, so the caller can
+/// cancel or collect them first.
+///
+/// Scoped to THIS server's own live runs: a dead owner's parked job is already
+/// beyond reach and the refusal would change nothing for it, and a foreign
+/// live server's job stays reachable through that server's own monitor.
+///
+/// `None` when nothing held blocks the switch.
+fn live_jobs_guard(now: u64) -> Option<String> {
+    let held: Vec<String> = jobs::list(now)
+        .into_iter()
+        .filter(|job| job.phase().is_live())
+        .filter(|job| {
+            job.record.owner_pid == std::process::id() && !jobs::owner_is_gone(&job.record)
+        })
+        .map(|job| job.record.job_id)
+        .collect();
+    if held.is_empty() {
+        return None;
+    }
+    let mut named: Vec<String> = held
+        .iter()
+        .take(LISTING_MAX)
+        .map(|id| format!("`{id}`"))
+        .collect();
+    let rest = held.len().saturating_sub(named.len());
+    if rest > 0 {
+        named.push(format!("and {rest} more"));
+    }
+    Some(format!(
+        "{} running delegate(s) are still held by this server: {}. cancel or collect them \
+         first (`monitor` with `job_ids` and `cancel: true`) — a switch re-pins this \
+         session's account and would park them beyond the next session's monitor",
+        held.len(),
+        named.join(", ")
+    ))
 }
 
 /// Refuse a resolved target that `delegate` must not spend on: a profile the
