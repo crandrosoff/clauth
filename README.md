@@ -5,9 +5,9 @@
 <h1 align="center">Claude Code multi-account manager & MCP Plugin</h1>
 
 <p align="center">
-  <img src="https://coverage.uwuclxdy.dev/badges/uwuclxdy/clauth/coverage.svg" alt="coverage" />
-  <img src="https://coverage.uwuclxdy.dev/badges/uwuclxdy/clauth/ratio.svg" alt="code to test ratio" />
-  <img src="https://coverage.uwuclxdy.dev/badges/uwuclxdy/clauth/time.svg" alt="test execution time" />
+  <img src="https://cov.uwuclxdy.dev/badges/uwuclxdy/clauth/coverage.svg" alt="coverage" />
+  <img src="https://cov.uwuclxdy.dev/badges/uwuclxdy/clauth/ratio.svg" alt="code to test ratio" />
+  <img src="https://cov.uwuclxdy.dev/badges/uwuclxdy/clauth/time.svg" alt="test execution time" />
 </p>
 
 <p align="center">
