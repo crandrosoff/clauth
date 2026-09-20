@@ -5609,6 +5609,254 @@ fn capture_of(stream: &str, lines: usize) -> super::StreamCapture {
     capture
 }
 
+/// Row 3's demanded shape: a mid-run 402 is the provider's word at ONE instant
+/// — a transient pool exhaustion and a topped-up balance both read 402 — so
+/// the failure path re-checks the freshest cached balance before naming the
+/// balance gone, and the lane stays resumable. With a funded cache, the
+/// failure must say the balance may be intact, never the bare provider words
+/// as the account's final state.
+#[cfg(unix)]
+#[test]
+fn a_mid_run_402_rechecks_the_balance_before_naming_it_gone() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    crate::testutil::register_names(&["work"]);
+    crate::testutil::write_captured_third_party_cache(
+        "work",
+        crate::testutil::DEEPSEEK_CACHE_BYTES,
+    );
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"402 Insufficient Balance\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-1",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("a non-zero exit classifies as an exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("cached balance reads")
+            && reason.contains("api balance")
+            && reason.contains("31.45 CNY"),
+        "the failure re-checks the balance and reports what it found: {reason}"
+    );
+    assert!(
+        reason.contains("may be intact"),
+        "a funded re-check must not name the balance gone: {reason}"
+    );
+    assert_eq!(
+        envelope["session_id"], "sess-402-1",
+        "the lane stays resumable through the pinned handle: {envelope}"
+    );
+}
+
+/// The other arm: when the re-checked cache CONFIRMS the account cannot fund a
+/// run, the failure names the balance gone — backed by the fresh verdict, not
+/// the provider's bare words.
+#[cfg(unix)]
+#[test]
+fn a_mid_run_402_with_a_confirmed_unfunded_cache_names_the_balance_gone() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    crate::testutil::register_names(&["work"]);
+    crate::testutil::write_captured_third_party_cache(
+        "work",
+        crate::testutil::DEEPSEEK_UNFUNDED_CACHE_BYTES,
+    );
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"402 Insufficient Balance\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-2",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("confirms the account cannot fund a run")
+            && reason.contains("balance too low"),
+        "a confirmed unfunded cache names the balance gone: {reason}"
+    );
+    assert_eq!(
+        envelope["session_id"], "sess-402-2",
+        "even a dead balance leaves the lane resumable: {envelope}"
+    );
+}
+
+/// No cached balance is no verdict: the failure says the re-check found
+/// nothing, so nothing here declares the account dead.
+#[cfg(unix)]
+#[test]
+fn a_mid_run_402_without_a_cached_balance_says_the_recheck_found_nothing() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"402 Insufficient Balance\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-3",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("holds no cached balance to re-check"),
+        "an absent cache is stated, never a guessed balance: {reason}"
+    );
+    assert!(
+        !reason.contains("balance too low") && !reason.contains("intact"),
+        "nothing is declared either way without a figure: {reason}"
+    );
+}
+
+/// The arm is scoped to a 402 refusal: a failure that is not a payment refusal
+/// keeps the existing reason shape, byte for byte past the exit clause.
+#[cfg(unix)]
+#[test]
+fn a_non_402_failure_keeps_the_existing_reason() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"auth failed\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-4",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        !reason.contains("402") && !reason.contains("cached balance"),
+        "a non-payment failure gains no balance clause: {reason}"
+    );
+}
+
+/// A clean exit whose stdout was never an envelope can still carry the
+/// provider's 402 words — the unparseable reason quotes that stdout raw — so
+/// the re-check runs there too, or the provider's words ride the reply as
+/// final.
+#[cfg(unix)]
+#[test]
+fn an_unparseable_402_exit_rechecks_the_balance_too() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    crate::testutil::register_names(&["work"]);
+    crate::testutil::write_captured_third_party_cache(
+        "work",
+        crate::testutil::DEEPSEEK_CACHE_BYTES,
+    );
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &super::StreamCapture::from_raw(b"402 Insufficient Balance\n"),
+        "work",
+        "sess-402-5",
+    );
+    let super::RunOutcome::Unparseable(envelope) = outcome else {
+        panic!("unreadable output classifies as unparseable");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("cached balance reads") && reason.contains("may be intact"),
+        "the unparseable arm re-checks the balance before the raw stdout's words \
+         stand as final: {reason}"
+    );
+    assert_eq!(
+        envelope["session_id"], "sess-402-5",
+        "the lane stays resumable: {envelope}"
+    );
+}
+
+/// The refusal stems: HTTP's own status text and a quota phrasing are 402
+/// refusals; a bare `fund` substring is NOT — "funding canceled" beside an
+/// unrelated 402 is not a balance verdict, and a timestamp carrying `402` is
+/// not a status at all.
+#[cfg(unix)]
+#[test]
+fn the_402_stems_cover_payment_and_quota_but_not_funding_or_timestamps() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    crate::testutil::register_names(&["work"]);
+    crate::testutil::write_captured_third_party_cache(
+        "work",
+        crate::testutil::DEEPSEEK_CACHE_BYTES,
+    );
+
+    let payment = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"402 Payment Required\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-6",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = payment else {
+        panic!("exit");
+    };
+    assert!(
+        envelope["result"]
+            .as_str()
+            .expect("reason")
+            .contains("cached balance reads"),
+        "HTTP's own 402 status text is a refusal: {envelope}"
+    );
+
+    let quota = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"402: quota exceeded\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-402-7",
+    );
+    let super::RunOutcome::Exited { envelope, .. } = quota else {
+        panic!("exit");
+    };
+    assert!(
+        envelope["result"]
+            .as_str()
+            .expect("reason")
+            .contains("cached balance reads"),
+        "a quota-exceeded 402 is a refusal: {envelope}"
+    );
+
+    for unrelated in [
+        "request 402 failed: funding canceled\n".as_bytes(),
+        b"logged at 09:28:57.402Z: balance pending\n",
+    ] {
+        let outcome = super::classify_run(
+            std::process::ExitStatus::from_raw(1 << 8),
+            unrelated,
+            &super::StreamCapture::default(),
+            "work",
+            "sess-402-8",
+        );
+        let super::RunOutcome::Exited { envelope, .. } = outcome else {
+            panic!("exit");
+        };
+        assert!(
+            !envelope["result"]
+                .as_str()
+                .expect("reason")
+                .contains("cached balance"),
+            "a funding word beside an unrelated 402, and a timestamp token, are \
+             not refusals: {envelope}"
+        );
+    }
+}
+
 /// Finding 13, the non-zero-exit half. The account's window is spent whether or
 /// not clauth keeps the output, so a crash after six kilobytes of answer must
 /// not hand back a bare stderr string with the text and the resume handle

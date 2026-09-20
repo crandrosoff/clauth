@@ -3924,19 +3924,27 @@ fn classify_run(
     session_id: &str,
 ) -> RunOutcome {
     let stdout = capture.envelope_src();
+    let stderr = String::from_utf8_lossy(stderr_bytes);
+    // ONE scan for both failure arms: a rate-limit hint and a 402 refusal can
+    // hide in the child's stderr, its stdout, or a rate_limit_event line that
+    // never reached either. The unparseable arm quotes raw stdout in its
+    // reason, so its re-check must see the same sources the exit arm's does,
+    // or a 402 that exits 0 with unreadable output rides the reply as final.
+    let throttle_scan = format!(
+        "{stderr}{stdout}{}",
+        capture.rate_limit_line.as_deref().unwrap_or_default()
+    );
     if !status.success() {
-        let stderr = String::from_utf8_lossy(stderr_bytes);
-        let throttle_scan = format!(
-            "{stderr}{stdout}{}",
-            capture.rate_limit_line.as_deref().unwrap_or_default()
-        );
-        let reason = format!(
+        let mut reason = format!(
             "claude exited with {}: {}",
             status
                 .code()
                 .map_or_else(|| "signal".to_string(), |c| c.to_string()),
             truncate(stderr.trim(), 2000)
         );
+        if let Some(clause) = balance_requalification(profile, &throttle_scan) {
+            reason.push_str(&clause);
+        }
         return RunOutcome::Exited {
             envelope: salvage_envelope(profile, reason, capture, Some(session_id)),
             throttle_scan,
@@ -3950,7 +3958,10 @@ fn classify_run(
             stamp_session_id(&mut envelope, session_id);
             RunOutcome::Envelope(envelope)
         }
-        Err(reason) => {
+        Err(mut reason) => {
+            if let Some(clause) = balance_requalification(profile, &throttle_scan) {
+                reason.push_str(&clause);
+            }
             RunOutcome::Unparseable(salvage_envelope(profile, reason, capture, Some(session_id)))
         }
     }
@@ -5100,6 +5111,74 @@ fn rate_limit_hint(text: &str) -> RateLimit {
     RateLimit::Yes {
         retry_after_s: retry_after,
     }
+}
+
+/// Whether `text` carries a 402 payment refusal — the provider saying the run
+/// could not be funded — with the words that make it one. Token-matched, not
+/// substring-matched: the status must stand as its own token (a timestamp's
+/// `.402Z` is not a status) and the refusal word must be one a provider
+/// actually writes — HTTP's own `payment` (402 Payment Required), a
+/// `balance`/`insufficient`/`afford`/`quota`/`funds` phrasing. The bare
+/// substring `fund` is deliberately out: it matches `funding`/`refund` beside
+/// an unrelated 402.
+fn is_402_refusal(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let mut is_402 = false;
+    let mut refusal_word = false;
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        match token {
+            "402" => is_402 = true,
+            "balance" | "insufficient" | "afford" | "payment" | "quota" | "funds" => {
+                refusal_word = true;
+            }
+            _ => {}
+        }
+        if is_402 && refusal_word {
+            return true;
+        }
+    }
+    false
+}
+
+/// The mid-run 402 arm: a 402 is the provider's word at ONE instant — a
+/// transient pool exhaustion and a topped-up balance both read 402 — so the
+/// failure path re-checks the freshest cached third-party stats before the
+/// reply names the balance gone. Three verdicts: the cache confirms funding
+/// (the balance may be intact), the cache confirms the account cannot fund a
+/// run (the balance is named gone, backed by the verdict), or clauth holds no
+/// figure (stated, never guessed). The MCP layer never fetches, so the cache
+/// is the freshest re-check there is; its age rides the clause either way.
+///
+/// `None` when the scan carries no 402 refusal: a non-payment failure keeps
+/// the existing reason shape.
+fn balance_requalification(profile: &str, scan: &str) -> Option<String> {
+    if !is_402_refusal(scan) {
+        return None;
+    }
+    let name = ProfileName::from(profile);
+    let Some(stats) = load_profile_cache::<ThirdPartyStats>(&name, THIRD_PARTY_CACHE_FILE) else {
+        return Some(
+            ". the provider refused this run (402); clauth holds no cached balance to \
+             re-check, so nothing here declares the account dead"
+                .to_string(),
+        );
+    };
+    let age = crate::profile_json::cache_age_secs(&name, THIRD_PARTY_CACHE_FILE)
+        .map(|secs| format!(" ({})", render::cached_when(secs)))
+        .unwrap_or_default();
+    let headline = render::third_party_headline(&stats);
+    Some(if stats.is_available {
+        format!(
+            ". the provider refused this run (402), but clauth's freshest cached balance \
+             reads {headline}{age} — the balance may be intact; re-check it before \
+             retiring this account"
+        )
+    } else {
+        format!(
+            ". the provider refused this run (402), and clauth's freshest cached balance \
+             confirms the account cannot fund a run: {headline}{age}"
+        )
+    })
 }
 
 /// One-line throughput warning folded into a delegate payload's `live_usage`
