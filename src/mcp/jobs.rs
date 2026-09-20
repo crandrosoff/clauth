@@ -204,8 +204,8 @@ pub(crate) struct JobRecord {
     /// heartbeat writes it, so a `running` record a killed server left behind
     /// carries the exact value a `delegate({session_id})` accepts. `None` before
     /// the first event names one, on a record an older server wrote (the
-    /// `default`), and on a `done` record — a killed run's salvage envelope
-    /// carries the handle inside the envelope instead.
+    /// `default`), and on a `done` record whose envelope carried none (every
+    /// completion arm stamps it — the id clauth pinned at the spawn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session_id: Option<String>,
     /// Dead fields on new records: a delegate has no wall clock or idle ceiling
@@ -495,7 +495,10 @@ pub(crate) fn promote(spec: &RunningSpec) -> Result<()> {
 /// Finalize a job: overwrite its file with the completed envelope, stamped with
 /// the moment it finished — which is what [`DONE_TTL_MS`] retains from. The
 /// running-only fields default away: a finished job has no deadline left to
-/// count down to and no tail worth keeping beside its whole result.
+/// count down to and no tail worth keeping beside its whole result. The run's
+/// session id rides the record off the envelope's own `session_id` key — every
+/// completion arm stamps it (the id clauth pinned at the spawn), so a collected
+/// completion is resumable, and the listing names the handle beside the job id.
 pub(crate) fn write_done(
     job_id: &str,
     profile: &str,
@@ -505,6 +508,10 @@ pub(crate) fn write_done(
     isolated: bool,
     envelope: serde_json::Value,
 ) -> Result<()> {
+    let session_id = envelope
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     write_atomic(
         &JobRecord {
             job_id: job_id.to_string(),
@@ -515,7 +522,7 @@ pub(crate) fn write_done(
             endpoint,
             provider,
             isolated,
-            session_id: None,
+            session_id,
             timeout_secs: 0,
             idle_secs: None,
             last_output_at: 0,
@@ -1060,8 +1067,8 @@ pub(crate) enum JobPhase {
     /// Done TTL reaps it.
     Done,
     /// `running` on disk whose server is gone — silent past
-    /// [`RUNNING_TTL_MS`], or owned by a server whose marker is released — and
-    /// so is the result.
+    /// [`RUNNING_TTL_MS`] (an ownerless record an older server wrote), or owned
+    /// by a server whose marker is released — and so is the result.
     Orphaned,
 }
 

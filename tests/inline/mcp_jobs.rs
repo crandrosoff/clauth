@@ -127,6 +127,47 @@ fn write_read_roundtrip_running_then_done() {
     assert!(read(&id).is_none(), "removed job is gone");
 }
 
+/// Row 2's demanded shape: a done record carries the run's session id off its
+/// own envelope, so a collected completion is resumable — the listing and the
+/// collect both name the handle the resume takes. An envelope without the key
+/// keeps the legacy `None`.
+#[test]
+fn a_done_record_carries_the_envelopes_session_id() {
+    let _home = HomeSandbox::new();
+    let with = new_job_id(1_000);
+    write_done(
+        &with,
+        "work",
+        1_000,
+        None,
+        None,
+        false,
+        serde_json::json!({"is_error": false, "result": "ok", "session_id": "sess-done-1"}),
+    )
+    .unwrap();
+    assert_eq!(
+        read(&with).unwrap().session_id.as_deref(),
+        Some("sess-done-1"),
+        "the done record carries the envelope's session id"
+    );
+
+    let without = new_job_id(2_000);
+    write_done(
+        &without,
+        "work",
+        2_000,
+        None,
+        None,
+        false,
+        serde_json::json!({"is_error": false, "result": "ok"}),
+    )
+    .unwrap();
+    assert!(
+        read(&without).unwrap().session_id.is_none(),
+        "an envelope without the key keeps the legacy None"
+    );
+}
+
 #[test]
 fn a_done_record_is_claimable_once_and_the_claim_evicts_it() {
     let _home = HomeSandbox::new();

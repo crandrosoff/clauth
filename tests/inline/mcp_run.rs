@@ -5554,6 +5554,7 @@ fn a_run_with_no_session_id_says_why_there_is_no_handle() {
         "delegate cancelled after 1s".to_string(),
         Duration::from_secs(1),
         &super::StreamCapture::default(),
+        None,
     );
     assert!(
         envelope.get("session_id").is_none(),
@@ -5630,6 +5631,7 @@ fn a_non_zero_exit_still_hands_back_what_the_run_produced() {
         b"boom: auth failed\n",
         &capture,
         "work",
+        "sess-pinned-ctl",
     );
     let super::RunOutcome::Exited {
         envelope,
@@ -5679,7 +5681,13 @@ fn an_unparseable_envelope_still_hands_back_what_the_run_produced() {
         super::parse_delegate_envelope(capture.envelope_src().trim()).is_err(),
         "the precondition: this run's stdout is not an envelope"
     );
-    let outcome = super::classify_run(std::process::ExitStatus::from_raw(0), b"", &capture, "work");
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &capture,
+        "work",
+        "sess-pinned-ctl",
+    );
     let super::RunOutcome::Unparseable(envelope) = outcome else {
         panic!("a clean exit with unreadable output classifies as unparseable");
     };
@@ -5694,6 +5702,197 @@ fn an_unparseable_envelope_still_hands_back_what_the_run_produced() {
     assert!(
         reason.starts_with("failed to parse claude output"),
         "the existing reason text is kept: {reason}"
+    );
+}
+
+/// Row 2's demanded shape: every completion arm carries the session id clauth
+/// PINNED at the spawn — the child runs under it by `--session-id`/`--resume`,
+/// so it is the run's own id, never a guess — even when no streamed event ever
+/// named one (a pinned-format run, a run dead before its first event, an
+/// envelope the child wrote without the key). A captured id, when one exists,
+/// wins: it is the same run's own.
+#[cfg(unix)]
+#[test]
+fn every_completion_arm_stamps_the_pinned_session_id() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // Envelope arm: a clean exit whose terminal result carries no session_id.
+    let mut bare_result = super::StreamCapture::default();
+    bare_result.push_line(r#"{"type":"result","result":"done"}"#);
+    let super::RunOutcome::Envelope(envelope) = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &bare_result,
+        "work",
+        "sess-pinned-1",
+    ) else {
+        panic!("a clean parsed envelope classifies as one");
+    };
+    assert_eq!(
+        envelope["session_id"], "sess-pinned-1",
+        "the pinned id rides a bare envelope: {envelope}"
+    );
+
+    // Exited arm: a non-zero exit whose capture never saw an id. The pinned id
+    // rides the salvage, and the reason must not claim no handle exists.
+    let super::RunOutcome::Exited { envelope, .. } = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"boom\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-pinned-1",
+    ) else {
+        panic!("a non-zero exit classifies as an exit");
+    };
+    assert_eq!(
+        envelope["session_id"], "sess-pinned-1",
+        "the pinned id rides the exit salvage: {envelope}"
+    );
+    assert!(
+        !envelope["result"]
+            .as_str()
+            .expect("reason")
+            .contains("no session id ever reached clauth"),
+        "the reason never denies a handle the stamp just attached: {envelope}"
+    );
+
+    // Unparseable arm: a clean exit whose output was no envelope, no id.
+    let super::RunOutcome::Unparseable(envelope) = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-pinned-1",
+    ) else {
+        panic!("unreadable output classifies as unparseable");
+    };
+    assert_eq!(
+        envelope["session_id"], "sess-pinned-1",
+        "the pinned id rides the unparseable salvage: {envelope}"
+    );
+
+    // A captured id wins: the stream named the session itself.
+    let capture = capture_of(STREAM, 4);
+    let super::RunOutcome::Exited { envelope, .. } = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"boom\n",
+        &capture,
+        "work",
+        "sess-pinned-1",
+    ) else {
+        panic!("exit");
+    };
+    assert_eq!(
+        envelope["session_id"], "s1",
+        "a captured id is the run's own and is kept: {envelope}"
+    );
+}
+
+/// The listing is where a caller finds a completed job's id, and the resume
+/// sentence is what makes the pair-loop possible: a DONE row's session is no
+/// longer held, so its id is a handle now, exactly like an orphaned row's.
+#[test]
+fn a_done_jobs_listing_renders_the_resume_sentence() {
+    let _home = HomeSandbox::new();
+    let id = "d-779700-0";
+    jobs::write_done(
+        id,
+        "work",
+        1,
+        None,
+        None,
+        false,
+        serde_json::json!({
+            "profile": "work",
+            "is_error": false,
+            "result": "ok",
+            "session_id": "sess-done-1",
+        }),
+    )
+    .unwrap();
+
+    let result = call_monitor_args(MonitorArgs {
+        job_ids: None,
+        cancel: None,
+    });
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    assert!(
+        text.contains(&format!("job `{id}` done"))
+            && text.contains("resume with session id `sess-done-1`"),
+        "a done row names the id a resume takes, so a collected completion is \
+         resumable from the listing alone: {text}"
+    );
+}
+
+/// The verify line's pair-loop: the delivered id is the transcript's own, so a
+/// resume with it resolves the workspace instead of refusing "no transcript
+/// for it". Driven against a fixture transcript in the sandbox's global store,
+/// the same store `resolve_resume_workspace` walks.
+#[test]
+fn a_resume_with_the_delivered_id_resolves_the_transcript() {
+    let _home = HomeSandbox::new();
+    let id = "d-779800-0";
+    jobs::write_done(
+        id,
+        "work",
+        1,
+        None,
+        None,
+        false,
+        serde_json::json!({
+            "profile": "work",
+            "is_error": false,
+            "result": "ok",
+            "session_id": "sess-r2-1",
+        }),
+    )
+    .unwrap();
+    let projects = crate::profile::claude_dir()
+        .expect("claude dir")
+        .join("projects");
+    let slug = projects.join("-w-r2");
+    std::fs::create_dir_all(&slug).expect("projects dir");
+    // The workspace the transcript records must exist on disk — a resume
+    // resolves into it, and a missing dir is its own named refusal.
+    let workspace = _home.home().join("w-r2");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(
+        slug.join("sess-r2-1.jsonl"),
+        format!(
+            "{{\"type\":\"user\",\"cwd\":{},\"message\":{{\"content\":\"hi\"}}}}\n",
+            serde_json::Value::String(workspace.to_string_lossy().into_owned())
+        ),
+    )
+    .expect("transcript fixture");
+
+    // The collect hands the id back inside the envelope...
+    let result = call_monitor(id);
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("reply text");
+    assert!(
+        text.contains("sess-r2-1"),
+        "the collected completion carries the resumable session id: {text}"
+    );
+    // ...and the resume with that exact id resolves the transcript's workspace.
+    let resolved = super::resolve_resume_workspace("sess-r2-1").expect("the transcript resolves");
+    assert_eq!(
+        resolved, workspace,
+        "resume with the delivered id replays the transcript, not a refusal"
+    );
+    // Control: a guessed id keeps the honest refusal, named.
+    let err = super::resolve_resume_workspace("sess-guessed").expect_err("no such transcript");
+    assert!(
+        err.contains("no transcript for it"),
+        "a guessed id keeps the named refusal: {err}"
     );
 }
 
@@ -6099,6 +6298,7 @@ fn a_cancelled_run_finalizes_as_a_done_error_rather_than_stranding() {
         "delegate cancelled after 42s".to_string(),
         Duration::from_secs(42),
         &capture,
+        None,
     );
     assert_eq!(envelope["is_error"], true);
     assert_eq!(envelope["cancelled"], true);
@@ -6252,6 +6452,7 @@ fn a_run_with_no_session_never_claims_a_lost_transcript() {
         "work",
         "claude exited with 1: boom".to_string(),
         &super::StreamCapture::default(),
+        None,
     );
     let reason = envelope["result"].as_str().expect("reason");
     assert!(
@@ -6295,6 +6496,76 @@ fn run_delegate_reads_the_cancel_flag_between_the_acquire_and_the_spawn() {
         window.contains("\n    if handoff.as_ref().is_some_and(|h| h.is_cancelled()) {\n"),
         "the cancel guard between the acquire and the spawn must be the whole \
          condition, unqualified: {window}"
+    );
+}
+
+/// 659's pin, the pre-spawn half: `cancelled_envelope`'s handle forward is
+/// `None` there — no child ever existed, so there is no transcript and nothing
+/// to promise. The BEHAVIORAL twin
+/// (`a_run_cancelled_before_it_spawns_says_the_window_was_not_spent`) proves
+/// the arm returns the right envelope; this source scan pins the forward the
+/// envelope is built from, which a flip to `Some` would break on a site no test
+/// can drive. Same shape as `run_delegate_reads_the_cancel_flag_between_the_
+/// acquire_and_the_spawn`: the call's tail is pinned WHOLE, dense — a swap that
+/// keeps the literal `None` nearby (an extra argument, a reorder) would still
+/// red.
+#[test]
+fn the_prespawn_cancel_promises_no_session_handle() {
+    let src = include_str!("../../src/mcp/mod.rs");
+    let tail = src
+        .rsplit_once("&StreamCapture::default()")
+        .expect("the pre-spawn arm builds an empty capture")
+        .1
+        .split_once("));")
+        .expect("the call closes")
+        .0;
+    let dense: String = tail
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        dense, ",None,",
+        "the pre-spawn cancel forwards no handle, and nothing may sit between \
+         the capture and the None: {dense}"
+    );
+}
+
+/// 659's pin, the supervision half: a cancel caught by the supervision loop
+/// hands the PINNED id — a child exists, its transcript is real, and the id is
+/// the handle. This arm cannot be driven (it sits past the spawn, the one path
+/// this repo never fakes), so the source scan is the whole pin; the forward's
+/// value and its position in the call are pinned together.
+#[test]
+fn the_supervision_cancel_forwards_the_pinned_session_id() {
+    let src = include_str!("../../src/mcp/mod.rs");
+    let arm = src
+        .split_once("Err(WaitEnd::Cancelled) => {")
+        .expect("run_delegate answers a supervision cancel")
+        .1
+        // Bounded at the next statement, never at a brace: the arm's format
+        // string carries `{}s` of its own.
+        .split_once("let now = now_epoch_secs();")
+        .expect("the outcome is classified after the arms")
+        .0;
+    let tail = arm
+        .rsplit_once("&capture,")
+        .expect("the arm hands the capture")
+        .1
+        .split_once("));")
+        .expect("the call closes")
+        .0;
+    let dense: String = tail
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        dense, "Some(&session_id),",
+        "the supervision cancel forwards the pinned id, and nothing may sit \
+         between the capture and the Some: {dense}"
     );
 }
 
@@ -6357,6 +6628,7 @@ fn the_throttle_scan_carries_every_source_a_rate_limit_hides_in() {
         b"stderr-marker",
         &capture,
         "work",
+        "sess-pinned-ctl",
     );
     let super::RunOutcome::Exited { throttle_scan, .. } = outcome else {
         panic!("a non-zero exit classifies as an exit");

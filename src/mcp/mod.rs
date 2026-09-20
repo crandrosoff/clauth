@@ -3357,13 +3357,17 @@ fn read_stdout<R: std::io::Read>(
 /// lift is best-effort and this builder cannot observe it — see
 /// [`crate::start::rescue_teardown`], which defers to a live sibling — so the
 /// reply hands back the handle and never tells a caller its transcript is gone.
-/// Both cases say where they stand: a handle, or a run that ended before any
-/// event named a session. The silent second arm was finding 18 — a description
-/// promising a handle, answered with nothing.
+///
+/// `pinned` is the id clauth spawned the run under (`--session-id`/`--resume`):
+/// the handle is the capture's own id when one exists, else the pinned one —
+/// which is the SAME id, so the fallback is exact, never a guess. The
+/// no-handle clause fires only when both are absent, which is the pre-spawn
+/// cancel: no child, no transcript, nothing to promise.
 fn salvage_envelope(
     profile: &str,
     mut reason: String,
     capture: &StreamCapture,
+    pinned: Option<&str>,
 ) -> serde_json::Value {
     let partial = capture.partial_text();
     if !partial.is_empty() {
@@ -3371,16 +3375,17 @@ fn salvage_envelope(
     }
     // The clause and the field it promises are decided together, so a reply can
     // never offer a handle it did not attach. No id means no handle, whatever
-    // the isolation was: a run that died in 200ms without one has no transcript
-    // clauth ever saw, so it is told that and nothing else.
-    let handle = match &capture.session_id {
+    // the isolation was: a run that died before any event named a session AND
+    // was never pinned has no transcript clauth ever saw, so it is told that
+    // and nothing else.
+    let handle = match capture.session_id.as_deref().or(pinned) {
         None => {
             reason.push_str(". no session id ever reached clauth, so there is no resume handle");
             None
         }
         Some(id) => {
             reason.push_str(". pick the run back up with `session_id: \"<session_id>\"`");
-            Some(id.clone())
+            Some(id.to_string())
         }
     };
     let mut payload = serde_json::json!({
@@ -3411,8 +3416,9 @@ fn cancelled_envelope(
     reason: String,
     elapsed: Duration,
     capture: &StreamCapture,
+    pinned: Option<&str>,
 ) -> serde_json::Value {
-    let mut payload = salvage_envelope(profile, reason, capture);
+    let mut payload = salvage_envelope(profile, reason, capture, pinned);
     payload["cancelled"] = serde_json::json!(true);
     payload["elapsed_secs"] = serde_json::json!(elapsed.as_secs());
     payload
@@ -3611,6 +3617,8 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
             ),
             waited,
             &StreamCapture::default(),
+            // No child ever existed: no transcript, no handle to promise.
+            None,
         ));
     }
 
@@ -3830,11 +3838,15 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
                 format!("delegate cancelled after {}s", ran_for.as_secs()),
                 ran_for,
                 &capture,
+                // The child exists here: the run was cancelled by the
+                // supervision loop, so the pinned id is a real handle to its
+                // transcript.
+                Some(&session_id),
             ));
         }
     };
     let now = now_epoch_secs();
-    match classify_run(status, &stderr_bytes, &capture, opts.profile) {
+    match classify_run(status, &stderr_bytes, &capture, opts.profile, &session_id) {
         RunOutcome::Exited {
             envelope,
             throttle_scan,
@@ -3883,6 +3895,9 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
 /// they imply: a throttle hit and a throughput sample are side effects on shared
 /// state, and [`run_delegate`] keeps them.
 ///
+/// `session_id` is the id clauth pinned at the spawn, so every arm's envelope
+/// carries a resumable handle even when nothing the child streamed named one.
+///
 /// Split out because the live spawn paths have no unit test by standing decision
 /// — this crate never fakes a `claude` on PATH, since a fake binary would assert
 /// nothing about the real envelope contract — so handing this function a real
@@ -3906,6 +3921,7 @@ fn classify_run(
     stderr_bytes: &[u8],
     capture: &StreamCapture,
     profile: &str,
+    session_id: &str,
 ) -> RunOutcome {
     let stdout = capture.envelope_src();
     if !status.success() {
@@ -3922,13 +3938,30 @@ fn classify_run(
             truncate(stderr.trim(), 2000)
         );
         return RunOutcome::Exited {
-            envelope: salvage_envelope(profile, reason, capture),
+            envelope: salvage_envelope(profile, reason, capture, Some(session_id)),
             throttle_scan,
         };
     }
     match parse_delegate_envelope(stdout.trim()) {
-        Ok(envelope) => RunOutcome::Envelope(envelope),
-        Err(reason) => RunOutcome::Unparseable(salvage_envelope(profile, reason, capture)),
+        // The envelope is the delegate's own self-report; the one field clauth
+        // may add is the id it pinned, when the child's envelope did not carry
+        // one — the same id, so the reply is never without a resume handle.
+        Ok(mut envelope) => {
+            stamp_session_id(&mut envelope, session_id);
+            RunOutcome::Envelope(envelope)
+        }
+        Err(reason) => {
+            RunOutcome::Unparseable(salvage_envelope(profile, reason, capture, Some(session_id)))
+        }
+    }
+}
+
+/// Stamp `session_id` onto an envelope that lacks one. The stamped id is the
+/// run's own (pinned at the spawn), so this fills a gap, never overrides a
+/// fact the child reported about itself.
+fn stamp_session_id(envelope: &mut serde_json::Value, session_id: &str) {
+    if envelope.get("session_id").is_none() {
+        envelope["session_id"] = serde_json::Value::String(session_id.to_string());
     }
 }
 
