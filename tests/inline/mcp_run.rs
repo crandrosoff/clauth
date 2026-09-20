@@ -5632,6 +5632,7 @@ fn a_mid_run_402_rechecks_the_balance_before_naming_it_gone() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-1",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = outcome else {
         panic!("a non-zero exit classifies as an exit");
@@ -5673,6 +5674,7 @@ fn a_mid_run_402_with_a_confirmed_unfunded_cache_names_the_balance_gone() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-2",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = outcome else {
         panic!("exit");
@@ -5703,6 +5705,7 @@ fn a_mid_run_402_without_a_cached_balance_says_the_recheck_found_nothing() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-3",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = outcome else {
         panic!("exit");
@@ -5732,6 +5735,7 @@ fn a_non_402_failure_keeps_the_existing_reason() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-4",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = outcome else {
         panic!("exit");
@@ -5764,8 +5768,9 @@ fn an_unparseable_402_exit_rechecks_the_balance_too() {
         &super::StreamCapture::from_raw(b"402 Insufficient Balance\n"),
         "work",
         "sess-402-5",
+        None,
     );
-    let super::RunOutcome::Unparseable(envelope) = outcome else {
+    let super::RunOutcome::Unparseable(envelope, _) = outcome else {
         panic!("unreadable output classifies as unparseable");
     };
     let reason = envelope["result"].as_str().expect("reason");
@@ -5802,6 +5807,7 @@ fn the_402_stems_cover_payment_and_quota_but_not_funding_or_timestamps() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-6",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = payment else {
         panic!("exit");
@@ -5820,6 +5826,7 @@ fn the_402_stems_cover_payment_and_quota_but_not_funding_or_timestamps() {
         &super::StreamCapture::default(),
         "work",
         "sess-402-7",
+        None,
     );
     let super::RunOutcome::Exited { envelope, .. } = quota else {
         panic!("exit");
@@ -5842,6 +5849,7 @@ fn the_402_stems_cover_payment_and_quota_but_not_funding_or_timestamps() {
             &super::StreamCapture::default(),
             "work",
             "sess-402-8",
+            None,
         );
         let super::RunOutcome::Exited { envelope, .. } = outcome else {
             panic!("exit");
@@ -5855,6 +5863,163 @@ fn the_402_stems_cover_payment_and_quota_but_not_funding_or_timestamps() {
              not refusals: {envelope}"
         );
     }
+}
+
+/// The 401 stems: a 401 naming the api key invalid is the provider's terminal
+/// verdict on the KEY. The refusal word must be one a provider actually
+/// writes for a dead key, and the status must stand as its own token, so a
+/// payment 402, a bare "invalid" beside no 401, and a timestamp's `.401Z`
+/// match nothing.
+#[test]
+fn the_401_stems_cover_a_dead_key_but_not_payment_or_timestamps() {
+    for yes in [
+        "401 Authentication Fails, Your api_key is invalid",
+        "401: invalid api key",
+        "401 Unauthorized",
+        "401 denied",
+    ] {
+        assert!(
+            super::is_401_invalid(yes),
+            "a provider's dead-key refusal is one: {yes:?}"
+        );
+    }
+    for no in [
+        "402 Insufficient Balance",
+        "401",
+        "invalid",
+        "logged at 09:28:57.401Z: balance pending",
+        "401 Payment Required",
+    ] {
+        assert!(!super::is_401_invalid(no), "not a dead-key refusal: {no:?}");
+    }
+}
+
+/// Row 2's demanded shape: a 401 that names the api key invalid is the
+/// provider's terminal verdict on the KEY — unlike a 402, nothing re-checks —
+/// so the failure names the key dead and the fix, and the lane stays
+/// resumable through the pinned handle.
+#[cfg(unix)]
+#[test]
+fn a_mid_run_401_invalid_names_the_key_dead_and_the_fix() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"401 Authentication Fails, Your api_key is invalid\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-401-1",
+        Some(42),
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("a non-zero exit classifies as an exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("naming the api key invalid")
+            && reason.contains("dropped this account's cached balance")
+            && reason.contains("clauth login work --api-key"),
+        "the failure names the key dead, the invalidation, and the fix: {reason}"
+    );
+    assert!(
+        !reason.contains("cached balance reads"),
+        "a 401 is a terminal key verdict, never the 402 re-check: {reason}"
+    );
+    assert_eq!(
+        envelope["session_id"], "sess-401-1",
+        "the lane stays resumable through the pinned handle: {envelope}"
+    );
+}
+
+/// The arm is scoped to a profile the third-party fetch leg credentials with a
+/// key at all: an OAuth profile's 401 is a different disease with its own
+/// arms, so no fingerprint means no clause and no invalidation.
+#[cfg(unix)]
+#[test]
+fn a_mid_run_401_without_a_fetch_fingerprint_keeps_the_plain_reason() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"401 Authentication Fails, Your api_key is invalid\n",
+        &super::StreamCapture::default(),
+        "work",
+        "sess-401-2",
+        None,
+    );
+    let super::RunOutcome::Exited { envelope, .. } = outcome else {
+        panic!("exit");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        !reason.contains("naming the api key invalid") && !reason.contains("cached balance"),
+        "without a fetch credential the reason stays byte-for-byte plain: {reason}"
+    );
+}
+
+/// A clean exit whose stdout was never an envelope can still carry the 401
+/// words — the unparseable reason quotes that stdout raw — so the dead-key
+/// verdict rides that arm too.
+#[cfg(unix)]
+#[test]
+fn an_unparseable_401_exit_names_the_key_dead_too() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &super::StreamCapture::from_raw(b"401 invalid api key\n"),
+        "work",
+        "sess-401-3",
+        Some(7),
+    );
+    let super::RunOutcome::Unparseable(envelope, _) = outcome else {
+        panic!("unreadable output classifies as unparseable");
+    };
+    let reason = envelope["result"].as_str().expect("reason");
+    assert!(
+        reason.contains("naming the api key invalid"),
+        "the unparseable arm names the dead key too: {reason}"
+    );
+}
+
+/// The write half: a proven dead key drops the balance marker `profiles`
+/// reads (the third-party cache) and records the fingerprint-bound verdict
+/// the daemon feed and the refusal splitter demote the row with. The verdict
+/// binds to one fingerprint, so a re-login stops it applying on its own.
+#[test]
+fn record_dead_key_drops_the_balance_cache_and_records_the_fingerprint_verdict() {
+    let _home = HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("work");
+    crate::testutil::register_names(&["work"]);
+    crate::testutil::write_captured_third_party_cache(
+        "work",
+        crate::testutil::DEEPSEEK_CACHE_BYTES,
+    );
+    let cache = crate::profile_cache::profile_cache_path(
+        &name,
+        crate::profile_cache::THIRD_PARTY_CACHE_FILE,
+    )
+    .expect("cache path");
+    assert!(cache.exists(), "the precondition: a cached balance exists");
+
+    super::record_dead_key(&name, 42);
+
+    assert!(
+        !cache.exists(),
+        "the balance marker profiles reads is gone: {cache:?}"
+    );
+    assert!(
+        crate::profile_cache::auth_expired_matches(&name, 42),
+        "the verdict matches the fingerprint that produced the 401"
+    );
+    assert!(
+        !crate::profile_cache::auth_expired_matches(&name, 43),
+        "a verdict for any other credential is inert"
+    );
 }
 
 /// Finding 13, the non-zero-exit half. The account's window is spent whether or
@@ -5880,6 +6045,7 @@ fn a_non_zero_exit_still_hands_back_what_the_run_produced() {
         &capture,
         "work",
         "sess-pinned-ctl",
+        None,
     );
     let super::RunOutcome::Exited {
         envelope,
@@ -5935,8 +6101,9 @@ fn an_unparseable_envelope_still_hands_back_what_the_run_produced() {
         &capture,
         "work",
         "sess-pinned-ctl",
+        None,
     );
-    let super::RunOutcome::Unparseable(envelope) = outcome else {
+    let super::RunOutcome::Unparseable(envelope, _) = outcome else {
         panic!("a clean exit with unreadable output classifies as unparseable");
     };
     assert_eq!(envelope["is_error"], true);
@@ -5967,12 +6134,13 @@ fn every_completion_arm_stamps_the_pinned_session_id() {
     // Envelope arm: a clean exit whose terminal result carries no session_id.
     let mut bare_result = super::StreamCapture::default();
     bare_result.push_line(r#"{"type":"result","result":"done"}"#);
-    let super::RunOutcome::Envelope(envelope) = super::classify_run(
+    let super::RunOutcome::Envelope { envelope, .. } = super::classify_run(
         std::process::ExitStatus::from_raw(0),
         b"",
         &bare_result,
         "work",
         "sess-pinned-1",
+        None,
     ) else {
         panic!("a clean parsed envelope classifies as one");
     };
@@ -5989,6 +6157,7 @@ fn every_completion_arm_stamps_the_pinned_session_id() {
         &super::StreamCapture::default(),
         "work",
         "sess-pinned-1",
+        None,
     ) else {
         panic!("a non-zero exit classifies as an exit");
     };
@@ -6005,12 +6174,13 @@ fn every_completion_arm_stamps_the_pinned_session_id() {
     );
 
     // Unparseable arm: a clean exit whose output was no envelope, no id.
-    let super::RunOutcome::Unparseable(envelope) = super::classify_run(
+    let super::RunOutcome::Unparseable(envelope, _) = super::classify_run(
         std::process::ExitStatus::from_raw(0),
         b"",
         &super::StreamCapture::default(),
         "work",
         "sess-pinned-1",
+        None,
     ) else {
         panic!("unreadable output classifies as unparseable");
     };
@@ -6027,12 +6197,57 @@ fn every_completion_arm_stamps_the_pinned_session_id() {
         &capture,
         "work",
         "sess-pinned-1",
+        None,
     ) else {
         panic!("exit");
     };
     assert_eq!(
         envelope["session_id"], "s1",
         "a captured id is the run's own and is kept: {envelope}"
+    );
+}
+
+/// 660's demanded shape: an in-band error envelope — a clean exit whose
+/// terminal result carries `is_error` (the shape the rate-limit recording
+/// documents for a caller-pinned `--output-format json`) — must hand the scan
+/// to the recording site, or a 401 that rides the envelope leaves the healthy
+/// balance listed and the next lane briefed onto the dead key. The envelope
+/// itself stays verbatim: the arm stamps the id and nothing else, so the
+/// dead-key clause rides the failure arms alone.
+#[cfg(unix)]
+#[test]
+fn an_in_band_error_envelope_carries_the_scan_to_the_recording_site() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let _home = HomeSandbox::new();
+    let mut capture = super::StreamCapture::default();
+    capture.push_line(r#"{"type":"result","is_error":true,"result":"401 invalid api key"}"#);
+    let outcome = super::classify_run(
+        std::process::ExitStatus::from_raw(0),
+        b"",
+        &capture,
+        "work",
+        "sess-401-4",
+        Some(42),
+    );
+    let super::RunOutcome::Envelope {
+        envelope,
+        throttle_scan,
+    } = outcome
+    else {
+        panic!("a clean parsed envelope classifies as one");
+    };
+    assert!(
+        throttle_scan.contains("401 invalid api key"),
+        "the in-band envelope's words reach the recording site's scan: {throttle_scan}"
+    );
+    assert_eq!(
+        envelope["session_id"], "sess-401-4",
+        "the pinned id rides it: {envelope}"
+    );
+    assert_eq!(
+        envelope["result"], "401 invalid api key",
+        "the envelope is the child's self-report, verbatim — no clause is injected: {envelope}"
     );
 }
 
@@ -6817,6 +7032,40 @@ fn the_supervision_cancel_forwards_the_pinned_session_id() {
     );
 }
 
+/// 660's pin: the three recording forwards in `run_delegate` are behaviorally
+/// unpinned — deleting one ships green with the marker surviving, the row's
+/// exact defect — so the source scan pins each forward's whole body, dense,
+/// and the count. Same mechanism as the 659 pins: the anchor fails loudly if
+/// it drifts, and a deletion, an extra argument, or a reorder all red the
+/// dense equality or the three-site count.
+#[test]
+fn the_dead_key_recording_forward_survives_each_completion_arm() {
+    let src = include_str!("../../src/mcp/mod.rs");
+    let mut rest = src;
+    let mut sites = 0;
+    while let Some((_, after)) =
+        rest.split_once("dead_key_fingerprint(&throttle_scan, dead_key_fp) {")
+    {
+        let body = after.split_once('}').expect("the gate closes").0;
+        let dense: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            dense, "record_dead_key(&profile_name,fp);",
+            "each gate's whole body is the recording forward, nothing else: {dense}"
+        );
+        sites += 1;
+        rest = after;
+    }
+    assert_eq!(
+        sites, 3,
+        "one recording forward per completion arm — Exited, Unparseable, in-band Envelope"
+    );
+}
+
 /// The delegate's own half of the isolated rescue, pinned the same way and for
 /// the same reason as its `start.rs` twin
 /// (`the_start_teardown_tail_is_the_rescue_leg_gated_on_isolation_alone`, which
@@ -6877,6 +7126,7 @@ fn the_throttle_scan_carries_every_source_a_rate_limit_hides_in() {
         &capture,
         "work",
         "sess-pinned-ctl",
+        None,
     );
     let super::RunOutcome::Exited { throttle_scan, .. } = outcome else {
         panic!("a non-zero exit classifies as an exit");

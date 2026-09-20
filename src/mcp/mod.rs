@@ -39,13 +39,18 @@ use sha2::Digest;
 use crate::logline::logline;
 use crate::outln;
 use crate::profile::{AppConfig, Profile, ProfileName, load_config};
-use crate::profile_cache::{THIRD_PARTY_CACHE_FILE, USAGE_CACHE_FILE, load_profile_cache};
+use crate::profile_cache::{
+    THIRD_PARTY_CACHE_FILE, USAGE_CACHE_FILE, load_profile_cache, remove_profile_cache,
+    write_auth_expired,
+};
 use crate::profile_json::{
     ProfileWindows, profile_windows, profile_windows_for, provider_label, tier_label, usage_windows,
 };
 use crate::providers::ThirdPartyStats;
 use crate::runtime::{Isolation, ProfileRuntime};
-use crate::usage::{UsageInfo, UsageWindow, now_epoch_secs, now_ms};
+use crate::usage::{
+    UsageInfo, UsageWindow, now_epoch_secs, now_ms, profile_credential_fingerprint,
+};
 use digest::{DigestMode, DigestTracker};
 use render::{ProfileSnapshot, RosterRank};
 
@@ -3861,7 +3866,15 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
         }
     };
     let now = now_epoch_secs();
-    match classify_run(status, &stderr_bytes, &capture, opts.profile, &session_id) {
+    let dead_key_fp = profile_credential_fingerprint(target);
+    match classify_run(
+        status,
+        &stderr_bytes,
+        &capture,
+        opts.profile,
+        &session_id,
+        dead_key_fp,
+    ) {
         RunOutcome::Exited {
             envelope,
             throttle_scan,
@@ -3877,10 +3890,24 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
                     now,
                 );
             }
+            // The dead-key write is the recording half of the clause
+            // `classify_run` appended: the run's scan proved the key dead, so
+            // the balance marker it advertised goes with it.
+            if let Some(fp) = dead_key_fingerprint(&throttle_scan, dead_key_fp) {
+                record_dead_key(&profile_name, fp);
+            }
             Ok(envelope)
         }
-        RunOutcome::Unparseable(envelope) => Ok(envelope),
-        RunOutcome::Envelope(envelope) => {
+        RunOutcome::Unparseable(envelope, throttle_scan) => {
+            if let Some(fp) = dead_key_fingerprint(&throttle_scan, dead_key_fp) {
+                record_dead_key(&profile_name, fp);
+            }
+            Ok(envelope)
+        }
+        RunOutcome::Envelope {
+            envelope,
+            throttle_scan,
+        } => {
             // A clean exit can still carry an in-band error envelope (rate limit
             // shows up there with `--output-format json`); branch on `is_error`
             // so a throttle is recorded as one, not as a (bogus) throughput
@@ -3898,6 +3925,12 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
                         now,
                     );
                 }
+                // An in-band 401 rides the same recording the failure arms run
+                // (660): a clean exit with an is_error envelope is still the
+                // provider refusing the key, so the balance marker goes with it.
+                if let Some(fp) = dead_key_fingerprint(&throttle_scan, dead_key_fp) {
+                    record_dead_key(&profile_name, fp);
+                }
             } else {
                 record_throughput_from_envelope(opts.profile, opts.model, &envelope, now);
             }
@@ -3908,7 +3941,9 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
 
 /// What a finished delegate's joined pieces mean, with none of the recording
 /// they imply: a throttle hit and a throughput sample are side effects on shared
-/// state, and [`run_delegate`] keeps them.
+/// state, and [`run_delegate`] keeps them. The dead-key verdict is the same
+/// shape — `dead_key_fp` is data in ([`dead_key_fingerprint`] reads it), and
+/// the cache drop + verdict write ([`record_dead_key`]) run at the call site.
 ///
 /// `session_id` is the id clauth pinned at the spawn, so every arm's envelope
 /// carries a resumable handle even when nothing the child streamed named one.
@@ -3919,8 +3954,12 @@ fn run_delegate(opts: DelegateOpts<'_>) -> std::result::Result<serde_json::Value
 /// `ExitStatus` is the only way to drive the two lossy arms at all.
 enum RunOutcome {
     /// A clean exit whose terminal envelope parsed: the delegate's own
-    /// self-report, verbatim.
-    Envelope(serde_json::Value),
+    /// self-report, verbatim. `throttle_scan` rides it too so the recording
+    /// site sees the same sources an in-band error envelope's words hide in.
+    Envelope {
+        envelope: serde_json::Value,
+        throttle_scan: String,
+    },
     /// A non-zero exit, salvaged. `throttle_scan` is everything a rate-limit
     /// hint could be hiding in.
     Exited {
@@ -3928,7 +3967,9 @@ enum RunOutcome {
         throttle_scan: String,
     },
     /// A clean exit whose output was no envelope clauth could read, salvaged.
-    Unparseable(serde_json::Value),
+    /// The throttle scan rides beside it so the caller-side arms see the same
+    /// sources the reason did.
+    Unparseable(serde_json::Value, String),
 }
 
 fn classify_run(
@@ -3937,6 +3978,7 @@ fn classify_run(
     capture: &StreamCapture,
     profile: &str,
     session_id: &str,
+    dead_key_fp: Option<u64>,
 ) -> RunOutcome {
     let stdout = capture.envelope_src();
     let stderr = String::from_utf8_lossy(stderr_bytes);
@@ -3960,6 +4002,9 @@ fn classify_run(
         if let Some(clause) = balance_requalification(profile, &throttle_scan) {
             reason.push_str(&clause);
         }
+        if dead_key_fingerprint(&throttle_scan, dead_key_fp).is_some() {
+            reason.push_str(&dead_key_clause(profile));
+        }
         return RunOutcome::Exited {
             envelope: salvage_envelope(profile, reason, capture, Some(session_id)),
             throttle_scan,
@@ -3971,13 +4016,22 @@ fn classify_run(
         // one — the same id, so the reply is never without a resume handle.
         Ok(mut envelope) => {
             stamp_session_id(&mut envelope, session_id);
-            RunOutcome::Envelope(envelope)
+            RunOutcome::Envelope {
+                envelope,
+                throttle_scan,
+            }
         }
         Err(mut reason) => {
             if let Some(clause) = balance_requalification(profile, &throttle_scan) {
                 reason.push_str(&clause);
             }
-            RunOutcome::Unparseable(salvage_envelope(profile, reason, capture, Some(session_id)))
+            if dead_key_fingerprint(&throttle_scan, dead_key_fp).is_some() {
+                reason.push_str(&dead_key_clause(profile));
+            }
+            RunOutcome::Unparseable(
+                salvage_envelope(profile, reason, capture, Some(session_id)),
+                throttle_scan,
+            )
         }
     }
 }
@@ -5180,22 +5234,82 @@ fn rate_limit_hint(text: &str) -> RateLimit {
 /// substring `fund` is deliberately out: it matches `funding`/`refund` beside
 /// an unrelated 402.
 fn is_402_refusal(text: &str) -> bool {
+    token_refusal(
+        text,
+        "402",
+        &[
+            "balance",
+            "insufficient",
+            "afford",
+            "payment",
+            "quota",
+            "funds",
+        ],
+    )
+}
+
+/// The one token-scan behind both refusal stems: `status` must stand as its
+/// own token and one of `words` must sit beside it. Shared by the 402 and 401
+/// predicates so the two cannot drift in shape.
+fn token_refusal(text: &str, status: &str, words: &[&str]) -> bool {
     let lower = text.to_lowercase();
-    let mut is_402 = false;
-    let mut refusal_word = false;
+    let mut has_status = false;
+    let mut has_word = false;
     for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
-        match token {
-            "402" => is_402 = true,
-            "balance" | "insufficient" | "afford" | "payment" | "quota" | "funds" => {
-                refusal_word = true;
-            }
-            _ => {}
+        if token == status {
+            has_status = true;
         }
-        if is_402 && refusal_word {
+        if words.contains(&token) {
+            has_word = true;
+        }
+        if has_status && has_word {
             return true;
         }
     }
     false
+}
+
+/// The 401 twin of [`is_402_refusal`]: whether `text` carries a 401 naming the
+/// api key invalid — the provider's terminal verdict on the KEY, the row-2
+/// DS6/DS3 shape (`401 invalid`). Same token discipline, and the word set is
+/// what providers actually write for a dead key; the 402's payment words are
+/// deliberately absent, so the two arms never cross.
+fn is_401_invalid(text: &str) -> bool {
+    token_refusal(
+        text,
+        "401",
+        &["invalid", "unauthorized", "unauthenticated", "denied"],
+    )
+}
+
+/// The fingerprint whose credential `scan` proves dead, when it proves one: a
+/// 401 naming the api key invalid, on a profile the third-party fetch leg
+/// credentials with a key at all. An OAuth profile's 401 is a different
+/// disease with its own arms, so no fingerprint means no dead-key verdict.
+fn dead_key_fingerprint(scan: &str, fp: Option<u64>) -> Option<u64> {
+    fp.filter(|_| is_401_invalid(scan))
+}
+
+/// The reply clause for a proven dead key. The provider's words here ARE the
+/// final verdict — unlike a 402, nothing re-checks — so the clause states the
+/// invalidation that ran and the fix, never a re-check.
+fn dead_key_clause(name: &str) -> String {
+    format!(
+        ". the provider refused this run (401) naming the api key invalid; clauth dropped \
+         this account's cached balance — `profiles` shows no figure for '{name}' until the \
+         key is re-captured (`clauth login {name} --api-key`)"
+    )
+}
+
+/// The write half of the dead-key arm: drop the balance marker `profiles`
+/// reads and record the fingerprint-bound verdict the daemon feed and the
+/// refusal splitter demote the row with. Both are best-effort cache IO, no
+/// lock taken. The marker self-heals: the next successful fetch re-writes the
+/// cache and clears the verdict, and a re-login changes the fingerprint so a
+/// stale verdict stops applying on its own (`profile_cache.rs`'s contract).
+fn record_dead_key(name: &ProfileName, fp: u64) {
+    remove_profile_cache(name, THIRD_PARTY_CACHE_FILE);
+    write_auth_expired(name, fp);
 }
 
 /// The mid-run 402 arm: a 402 is the provider's word at ONE instant — a
