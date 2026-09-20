@@ -2110,19 +2110,25 @@ fn cmd_static_token(name: &str) -> Result<()> {
     }
 }
 
-/// `clauth __api-key <profile>` — the body CC's `apiKeyHelper` invokes per
-/// request for an api-key profile. Loads the key from the profile's
-/// `config.toml` (0o600) and prints it to stdout. The key never reaches argv
-/// (the helper command line carries only the profile name) nor the spawned
-/// CC process's env (the runtime `settings.json` writes `apiKeyHelper`, not
-/// `env.ANTHROPIC_AUTH_TOKEN`). Fails closed with no stdout if the profile
-/// is missing or carries no api_key, so a misconfigured helper surfaces as a
-/// 401, not a silent leak of some other value.
+/// `clauth __api-key <profile>` — the body CC's `apiKeyHelper` invokes for
+/// an api-key profile. Loads the key from the profile's
+/// `config.toml` (0o600) and prints it to stdout. The key is static: this
+/// path never mints or rotates it, every call prints the same stored value
+/// until the profile's key is re-captured or cleared, and a copied value
+/// keeps working across any number of child sessions — the crate's
+/// single-use chain is codex's refresh token, never an api key. The key
+/// never reaches argv (the helper command line carries only the profile
+/// name) nor the spawned CC process's env (the runtime `settings.json`
+/// writes `apiKeyHelper`, not `env.ANTHROPIC_AUTH_TOKEN`). Fails closed
+/// with no stdout if the profile is missing or carries no api_key, so a
+/// misconfigured helper surfaces as a 401, not a silent leak of some other
+/// value.
 fn cmd_api_key(name: &str) -> Result<()> {
     let key = api_key_for_profile(name)?;
     // `api_key_for_profile` returns Ok(Some) only when the key is non-empty;
-    // Ok(None) means the profile has no key to mint, so the helper must fail
-    // closed rather than emit a blank line CC would send as a credential.
+    // Ok(None) means the profile has no stored key to print, so the helper
+    // must fail closed rather than emit a blank line CC would send as a
+    // credential.
     let Some(key) = key else {
         anyhow::bail!("profile '{name}' has no api_key");
     };
@@ -2146,7 +2152,9 @@ fn write_api_key<W: std::io::Write>(writer: &mut W, key: &str) -> Result<()> {
 
 /// Read a profile's stored api_key from `config.toml`. Returns `Ok(None)` for
 /// a profile that exists but has no api_key, `Err` for a missing profile or
-/// unreadable config. Kept separate from [`cmd_api_key`] so the load is
+/// unreadable config. A pure reader: no call rotates or invalidates the key,
+/// so consecutive calls return the same value until the key is re-captured
+/// or cleared. Kept separate from [`cmd_api_key`] so the load is
 /// unit-testable without capturing stdout. An empty key reads as `None`:
 /// a credential that is whitespace-only is not a credential.
 fn api_key_for_profile(name: &str) -> Result<Option<String>> {
@@ -2166,7 +2174,7 @@ fn api_key_for_profile(name: &str) -> Result<Option<String>> {
         .map(str::trim)
         .filter(|s| !s.is_empty());
     // Fail closed on a hand-edited config that poisoned the key with control
-    // chars: emitting it verbatim would inject a header, so refuse to mint.
+    // chars: emitting it verbatim would inject a header, so refuse to print.
     if let Some(k) = key {
         claude::validate_api_key(k)?;
     }

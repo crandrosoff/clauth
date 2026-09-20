@@ -2191,9 +2191,10 @@ fn apply_profile_to_claude_settings_inner(
 /// form, which `build_api_key_helper_command` strips back to the installed path.
 const API_KEY_HELPER_SUBCMD: &str = "__api-key";
 
-/// Build the `apiKeyHelper` command string CC runs per request to mint an auth
-/// value for an api-key profile. The hidden subcommand reads
-/// `Profile::api_key` from `config.toml` (0o600) and prints it to stdout.
+/// Build the `apiKeyHelper` command string CC runs per request to obtain an
+/// auth value for an api-key profile. The hidden subcommand reads
+/// `Profile::api_key` from `config.toml` (0o600) and prints it to stdout —
+/// the key is static, and nothing on this path mints or rotates it.
 ///
 /// CC runs the value through the system shell (`/bin/sh` on macOS/Linux,
 /// `cmd` on Windows — per the Claude Code settings docs), so each token is

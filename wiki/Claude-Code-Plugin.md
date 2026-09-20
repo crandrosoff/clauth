@@ -61,6 +61,10 @@ Where the connect brief names a `clauth start` session's runtime directory, it k
 
 To use another account without disturbing the current session, use `delegate`.
 
+## API-key profiles
+
+An endpoint account's key lives in its profile's `config.toml`; Claude Code gets it through `settings.json`'s `apiKeyHelper`, which runs `clauth __api-key <profile>` and prints the stored key. The command reads, it never mints: every call prints the same static key, so the value survives any number of child sessions and stays valid until `clauth login <name> --api-key` re-captures it or the divergence flow adopts the key the live settings hold. It is not single-use. A child session inherits the parent's `settings.json` and auths through the same helper; exporting the key into a child's env by hand is unnecessary.
+
 ## `delegate`
 
 Runs a headless `claude -p` under another profile and returns what it produced.

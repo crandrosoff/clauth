@@ -2014,12 +2014,14 @@ fn reauth_confirmed_only_on_explicit_yes() {
 
 // ── hidden `clauth __api-key <profile>` (CC's apiKeyHelper body) ──────────────
 //
-// The hidden subcommand is what CC's `apiKeyHelper` runs per request to mint
-// an auth value for an api-key profile (see `src/claude.rs`
+// The hidden subcommand is what CC's `apiKeyHelper` runs to obtain an auth
+// value for an api-key profile (see `src/claude.rs`
 // `build_claude_settings_json`). It reads the key from `config.toml` and
 // prints it to stdout; on a missing profile or a profile with no api_key it
 // fails closed with no stdout. The key never reaches argv (the helper command
-// line carries only the profile name).
+// line carries only the profile name). The value is the profile's stored
+// STATIC key — the helper reads, never mints, so the same bytes come back on
+// every call until a re-login or the divergence adopt re-captures the key.
 
 #[cfg(unix)]
 mod api_key_helper_tests {
@@ -2052,6 +2054,24 @@ mod api_key_helper_tests {
         assert_eq!(key.as_deref(), Some("sk-test-12345"));
     }
 
+    /// Two consecutive loads return the SAME key: the helper is a pure reader
+    /// with no per-call minting or rotation, so the value handed to a child
+    /// session stays valid — the "token survives a child session" half of the
+    /// api-key surface contract. A rotation introduced here reds this test
+    /// while the stored-key pin above still passes.
+    #[test]
+    fn api_key_for_profile_is_static_across_calls() {
+        let _home = HomeSandbox::new();
+        save_profile_with_key("acme", Some("sk-test-12345"));
+        let first = api_key_for_profile("acme").expect("load_profile");
+        let second = api_key_for_profile("acme").expect("reload");
+        assert_eq!(
+            first, second,
+            "the helper must return the stored key verbatim on every call, \
+             never a rotated or single-use value"
+        );
+    }
+
     /// A profile that exists but has no api_key yields `Ok(None)`, which
     /// `cmd_api_key` turns into an Err (no stdout). This is the fail-closed
     /// path for a misconfigured helper.
@@ -2068,7 +2088,7 @@ mod api_key_helper_tests {
 
     /// A missing profile surfaces as `Err`, not `Ok(None)` — so `cmd_api_key`
     /// fails for a helper string pointing at a profile name that no longer
-    /// exists, rather than silently minting nothing.
+    /// exists, rather than silently printing nothing.
     #[test]
     fn api_key_for_profile_err_for_missing_profile() {
         let _home = HomeSandbox::new();

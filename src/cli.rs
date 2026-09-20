@@ -418,10 +418,14 @@ pub(crate) enum Command {
     },
 
     /// CC's `apiKeyHelper` body for an api-key profile: print the profile's
-    /// stored key to stdout so the runtime settings.json never holds it.
+    /// stored key to stdout so the runtime settings.json never holds it. The
+    /// command reads, never mints: every call prints the same static key from
+    /// `config.toml` until a re-login or the divergence adopt re-captures it,
+    /// so a copied value keeps working across any number of child sessions —
+    /// it is not single-use.
     #[command(name = "__api-key", hide = true)]
     ApiKey {
-        /// Profile whose key to mint.
+        /// Profile whose stored key to print.
         profile: String,
     },
 
