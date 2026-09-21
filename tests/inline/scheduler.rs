@@ -1321,6 +1321,49 @@ fn a_panicking_oauth_worker_strands_neither_slot() {
     );
 }
 
+/// A panicked worker produced no outcome, so the status store kept whatever the
+/// previous tick left (Fresh) while the cache aged — the one producer of
+/// `[ stale ]` beside a dot row. Recording Failed here keeps every stale cache
+/// behind a pill.
+#[test]
+fn a_panicking_oauth_worker_records_failed_status() {
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["boom"]);
+    let state = completion_order_state();
+
+    super::fetch_oauth_due_with(&state, vec![token("boom")], REFRESH_INTERVAL_MS, |_| {
+        panic!("simulated worker panic")
+    });
+
+    let status = state.status.lock().expect("status store unpoisoned");
+    assert_eq!(
+        status.get("boom"),
+        Some(&super::FetchStatus::Failed),
+        "a panicked worker records Failed — a stale cache always has a failing fetch behind it"
+    );
+}
+
+/// Third-party twin: the join loop's panic arm records Failed in the provider
+/// status store.
+#[test]
+fn a_panicking_third_party_worker_records_failed_status() {
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::register_names(&["boom"]);
+    let state = third_party_state(|_, _, _| panic!("simulated provider worker panic"));
+
+    fetch_third_party_due(&state, vec![tp_entry("boom")]);
+
+    let status = state
+        .third_party_status
+        .lock()
+        .expect("status store unpoisoned");
+    assert_eq!(
+        status.get("boom"),
+        Some(&super::FetchStatus::Failed),
+        "a panicked provider worker records Failed"
+    );
+}
+
 /// The production completion boundaries clear only their own leg. Each leaves
 /// the sibling fetch visible and publishes its own exact cadence deadline.
 #[test]

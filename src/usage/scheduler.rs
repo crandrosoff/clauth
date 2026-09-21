@@ -2837,7 +2837,14 @@ where
         for (name, h) in handles {
             if h.join().is_err() {
                 clear_activity(&state.activity, &name);
-                clear_fetch_activity(&state.activity, &FetchLeg::OAuth.key(name));
+                clear_fetch_activity(&state.activity, &FetchLeg::OAuth.key(name.clone()));
+                // No outcome exists to apply, so nothing this tick can say the
+                // fetch is healthy: record Failed, or the store keeps the
+                // previous tick's Fresh over a cache that keeps aging — the one
+                // producer of a stale cache behind a non-pill fetch row.
+                if let Ok(mut st) = state.status.lock() {
+                    st.insert(name.to_string(), FetchStatus::Failed);
+                }
             }
         }
     });
@@ -3065,8 +3072,14 @@ fn fetch_third_party_due(state: &SchedulerState, due: Vec<ThirdPartyEntry>) {
                 );
             }
             Err(_) => {
-                // Worker panicked — clear slot so the spinner doesn't freeze.
+                // Worker panicked — clear slot so the spinner doesn't freeze,
+                // and record Failed (the OAuth reap's reason applies here too:
+                // a panicked worker produces no outcome, so a Fresh status kept
+                // over an aging cache would be the one stale-behind-a-dot leak).
                 clear_fetch_activity(&state.activity, &FetchLeg::ThirdParty.key(name.clone()));
+                if let Ok(mut st) = state.third_party_status.lock() {
+                    st.insert(name.to_string(), FetchStatus::Failed);
+                }
             }
         }
     }
