@@ -1281,8 +1281,7 @@ fn is_exhausted_active_from_usage(
 /// over the aggregate 7d `resets_at` and every `weekly_scoped` entry's,
 /// `None` when no weekly window carries a parseable reset (an idle/cold
 /// account). The 5h `resets_at` is deliberately NOT folded in — it slides at
-/// `now + 5h` on idle windows and is not a ranking key (measured,
-/// `docs/domain-knowledge.md`). Scoped windows carry the aggregate's instant
+/// `now + 5h` on idle windows and is not a ranking key (measured). Scoped windows carry the aggregate's instant
 /// today, so the min is future-proofing rather than a second source.
 fn weekly_reset_key(info: &UsageInfo) -> Option<i64> {
     let mut best: Option<i64> = info
