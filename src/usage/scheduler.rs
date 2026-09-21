@@ -4329,7 +4329,7 @@ fn scan_session_switches(
         // The OAuth `StatusStore` alone, where the candidate fill above unions both
         // — and `decision_fresh_any` records why the twins must not disagree. Sound
         // here only because `swap_eligible`'s `is_oauth` arm leaves a
-        // third-party-launched session a SINGLETON chain, which `walk_chain` cannot
+        // third-party-launched session a SINGLETON chain, which the chain walk cannot
         // move off whatever this gate says. Relaxing that arm (same-provider
         // swapping is the obvious next ask) closes such a session's gate
         // permanently with nothing saying so, so relax it and this gate goes
@@ -4410,8 +4410,9 @@ fn scan_recovery(
 
     // Build chain-member snapshot under config lock, then drop before
     // touching store (avoids the config↔store inversion that
-    // `next_auto_switch_target` avoids via ChainSnapshot).
-    let members: Vec<crate::fallback::ChainMember> = {
+    // `next_auto_switch_target` avoids via ChainSnapshot). The walk-order
+    // mode rides out of the same lock hold.
+    let (members, walk_order): (Vec<crate::fallback::ChainMember>, crate::profile::WalkOrder) = {
         let cfg = match config.lock() {
             Ok(c) => c,
             Err(_) => return,
@@ -4424,36 +4425,40 @@ fn scan_recovery(
         if cfg.state.fallback_chain.is_empty() {
             return;
         }
-        cfg.state
-            .fallback_chain
-            .iter()
-            // A disabled or auth-broken member is not a recovery target. Shares
-            // `fallback::walk_excluded` with `next_target`/`fully_clear_target`
-            // so the skip list can't drift; canceled is caught store-side inside
-            // `find_recovered_member` (this walk's `Profile.usage` is stale
-            // headless, so the config-plan `is_canceled` the selection walks use
-            // would read empty here).
-            .filter(|name| !crate::fallback::walk_excluded(&cfg, name))
-            .map(|name| {
-                let profile = cfg.find(name);
-                crate::fallback::ChainMember {
-                    name: name.clone(),
-                    threshold: profile
-                        .map(crate::fallback::threshold_for)
-                        .unwrap_or(crate::fallback::DEFAULT_THRESHOLD),
-                    last_resort: profile.is_some_and(|p| p.last_resort),
-                    preferred: profile.is_some_and(|p| p.preferred),
-                    max_spend: profile.and_then(|p| p.max_auto_spend).unwrap_or(0.0),
-                    weekly_line: profile
-                        .map(|p| crate::fallback::member_weekly_line(p, weekly_pct))
-                        .unwrap_or(weekly_pct),
-                    scoped_line: profile
-                        .map(|p| crate::fallback::member_scoped_line(p, weekly_pct))
-                        .unwrap_or(weekly_pct),
-                    check_scoped: profile.is_none_or(|p| p.check_scoped),
-                }
-            })
-            .collect()
+        let walk_order = cfg.state.walk_order();
+        (
+            cfg.state
+                .fallback_chain
+                .iter()
+                // A disabled or auth-broken member is not a recovery target. Shares
+                // `fallback::walk_excluded` with `next_target`/`fully_clear_target`
+                // so the skip list can't drift; canceled is caught store-side inside
+                // `find_recovered_member` (this walk's `Profile.usage` is stale
+                // headless, so the config-plan `is_canceled` the selection walks use
+                // would read empty here).
+                .filter(|name| !crate::fallback::walk_excluded(&cfg, name))
+                .map(|name| {
+                    let profile = cfg.find(name);
+                    crate::fallback::ChainMember {
+                        name: name.clone(),
+                        threshold: profile
+                            .map(crate::fallback::threshold_for)
+                            .unwrap_or(crate::fallback::DEFAULT_THRESHOLD),
+                        last_resort: profile.is_some_and(|p| p.last_resort),
+                        preferred: profile.is_some_and(|p| p.preferred),
+                        max_spend: profile.and_then(|p| p.max_auto_spend).unwrap_or(0.0),
+                        weekly_line: profile
+                            .map(|p| crate::fallback::member_weekly_line(p, weekly_pct))
+                            .unwrap_or(weekly_pct),
+                        scoped_line: profile
+                            .map(|p| crate::fallback::member_scoped_line(p, weekly_pct))
+                            .unwrap_or(weekly_pct),
+                        check_scoped: profile.is_none_or(|p| p.check_scoped),
+                    }
+                })
+                .collect(),
+            walk_order,
+        )
     };
 
     // Relink only to a member with a confirmed-live read in EITHER store; a
@@ -4468,7 +4473,8 @@ fn scan_recovery(
     // A switch-grade kick-rejected member is not "recovered" — its idle-looking
     // usage is exactly what the messages-limiter rejection freezes it in.
     let kick_rejected = kick_rejected_names(kick_blocks, now_epoch_secs());
-    if let Some(name) = crate::fallback::find_recovered_member(&members, store, &kick_rejected)
+    if let Some(name) =
+        crate::fallback::find_recovered_member(&members, store, &kick_rejected, walk_order)
         && let Ok(mut p) = pending_switch.lock()
     {
         p.insert(name);

@@ -714,6 +714,27 @@ pub(crate) struct ServeSettings {
     pub(crate) session_creation: bool,
 }
 
+/// How the fallback-chain walk orders the candidates WITHIN one accept pass
+/// (`AppState.walk_order`, issue #86). `Chain` (the default) is today's walk
+/// byte for byte: first accept in chain position, starting one slot after the
+/// active and wrapping. `SoonestWeeklyReset` reorders each accept pass by the
+/// soonest-resetting weekly window, so the member whose quota expires soonest
+/// drains first and less expires unspent; the pass ladder (free quota >
+/// serving sink > spend-armed > dead sink > halt) and every exclusion are
+/// untouched — the mode decides only WHERE among the members a pass already
+/// accepts to land. Serialized as a lowercase string with an explicit
+/// hyphenated second value: `walk_order = "soonest-weekly-reset"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum WalkOrder {
+    /// Today's chain-position walk, byte for byte.
+    #[default]
+    Chain,
+    /// Order each accept pass by the soonest-resetting weekly window.
+    #[serde(rename = "soonest-weekly-reset")]
+    SoonestWeeklyReset,
+}
+
 /// Stored at ~/.clauth/profiles.toml — ordering and active marker only.
 /// Credentials and endpoint config live in per-profile subdirectories.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,6 +774,16 @@ pub(crate) struct AppState {
     /// either way — see `fallback::is_exhausted_active`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) burn_aware_switching: bool,
+    /// Which member the fallback-chain walk lands on WITHIN one accept pass
+    /// (issue #86): `chain` (the default) walks by chain position exactly as
+    /// it always has; `soonest-weekly-reset` lands each pass on the accepted
+    /// member whose weekly window resets soonest, so less quota expires
+    /// unspent. `None` = the [`WalkOrder`] default, so an untouched
+    /// profiles.toml carries neither this key nor the setting and walks
+    /// byte-identically to before the key existed. Read through
+    /// [`AppState::walk_order`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) walk_order: Option<WalkOrder>,
     /// Opt-in master switch for spending real money: when on, the auto-switch
     /// chain may pick a member whose subscription windows are spent but whose
     /// account still has pay-as-you-go budget, bounded by that member's
@@ -935,6 +966,12 @@ impl AppState {
         self.reset_display.unwrap_or_default()
     }
 
+    /// The effective walk-order mode (unset = [`WalkOrder::Chain`], the
+    /// stock chain-position walk).
+    pub(crate) fn walk_order(&self) -> WalkOrder {
+        self.walk_order.unwrap_or_default()
+    }
+
     /// The effective wall-clock notation (unset = 24-hour).
     pub(crate) fn clock_format(&self) -> ClockFormat {
         self.clock_format.unwrap_or_default()
@@ -1072,6 +1109,7 @@ impl Default for AppState {
             switch_off_when_spent: false,
             auth_broken: Vec::new(),
             burn_aware_switching: false,
+            walk_order: None,
             spend_budget_switching: false,
             switch_off_when_budget_spent: default_switch_off_when_budget_spent(),
             preemptive_rotation: default_preemptive_rotation(),

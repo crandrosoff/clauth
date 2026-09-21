@@ -165,6 +165,45 @@ fn app_state_reads_burn_aware_switching_true() {
     assert!(state.burn_aware_switching);
 }
 
+// `walk_order` (issue #86) defaults to `chain` and its on-disk spelling is
+// the hyphenated `soonest-weekly-reset` — the serde rename is the load
+// boundary, so a rename typo must red here, not on an operator's first save.
+// Unset is omitted from a stock file (the `reset_display` Option contract),
+// and BOTH values round-trip.
+#[test]
+fn app_state_walk_order_defaults_chain_and_both_values_round_trip() {
+    let state: AppState = toml::from_str("profiles = []\n").expect("parse state");
+    assert_eq!(state.walk_order(), WalkOrder::Chain);
+    assert!(
+        state.walk_order.is_none(),
+        "unset stays unset, so a stock file omits the key"
+    );
+
+    let soonest = AppState {
+        walk_order: Some(WalkOrder::SoonestWeeklyReset),
+        ..AppState::default()
+    };
+    let rendered = toml::to_string_pretty(&soonest).expect("render soonest state");
+    assert!(
+        rendered.contains("walk_order = \"soonest-weekly-reset\""),
+        "must render the hyphenated spelling, got:\n{rendered}"
+    );
+    let reparsed: AppState = toml::from_str(&rendered).expect("reparse soonest state");
+    assert_eq!(reparsed.walk_order(), WalkOrder::SoonestWeeklyReset);
+
+    let chain = AppState {
+        walk_order: Some(WalkOrder::Chain),
+        ..AppState::default()
+    };
+    let rendered_chain = toml::to_string_pretty(&chain).expect("render chain state");
+    assert!(
+        rendered_chain.contains("walk_order = \"chain\""),
+        "an explicit chain round-trips, got:\n{rendered_chain}"
+    );
+    let reparsed_chain: AppState = toml::from_str(&rendered_chain).expect("reparse chain state");
+    assert_eq!(reparsed_chain.walk_order(), WalkOrder::Chain);
+}
+
 // On must round-trip explicitly; off (the default) is omitted entirely from
 // the rendered profiles.toml, matching `show_pace`/`count_cache`'s treatment
 // of their own default-off booleans.

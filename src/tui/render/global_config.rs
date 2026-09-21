@@ -5,7 +5,8 @@
 //! notation it gates), scheduler (`on mismatch`, `refresh`
 //! cadence, `refresh spent` toggle, `context nudge`, `auto-start queue`,
 //! `rotation`), auto-switch (`weekly limit`,
-//! `switch mode` = burn-aware, the burn-aware `burn floor`/`burn horizon`
+//! `switch mode` = burn-aware, `walk order` (issue #86), the burn-aware
+//! `burn floor`/`burn horizon`
 //! tunables it gates (issue #8 follow-up b), then the `quota spent` halt), then
 //! extra usage (`allow extra usage` opt-in + its own `extra usage spent` halt
 //! default — real money).
@@ -22,7 +23,7 @@ use crate::format::format_threshold_tokens;
 use crate::profile::{
     ClockFormat, DEFAULT_BURN_FLOOR_PCT, DEFAULT_BURN_HORIZON_MS, DEFAULT_REFRESH_INTERVAL_MS,
     DEFAULT_WEEKLY_SWITCH_PCT, DivergenceChoice, MAX_CONTEXT_NUDGE_TOKENS, MAX_REFRESH_INTERVAL_MS,
-    MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, ResetDisplay,
+    MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, ResetDisplay, WalkOrder,
 };
 
 use super::super::app::{
@@ -55,6 +56,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         RowState {
             switch_off_when_spent: state.switch_off_when_spent,
             burn_aware: state.burn_aware_switching,
+            walk_order: state.walk_order(),
             spend_budget: state.spend_budget_switching,
             switch_off_when_budget_spent: state.switch_off_when_budget_spent,
             preemptive: state.preemptive_rotation,
@@ -181,6 +183,7 @@ fn band_header(label: &str, focused: bool) -> Line<'static> {
 struct RowState {
     switch_off_when_spent: bool,
     burn_aware: bool,
+    walk_order: WalkOrder,
     spend_budget: bool,
     switch_off_when_budget_spent: bool,
     preemptive: bool,
@@ -269,6 +272,12 @@ fn row_hint(row: GlobalConfigRow, rows: RowState, tunables: RowTunables) -> Opti
             "switch away once the burn rate would hit 100% before the next check"
         } else {
             "switch the active account away once its usage crosses its threshold"
+        }),
+        GlobalConfigRow::WalkOrder => String::from(match rows.walk_order {
+            WalkOrder::Chain => "pick the next member with headroom by chain position",
+            WalkOrder::SoonestWeeklyReset => {
+                "spend the accepted member whose 7d window resets soonest, so less quota expires unspent"
+            }
         }),
         GlobalConfigRow::BurnFloor => format!(
             "never switch away before {}% used, however fast the burn",
@@ -412,6 +421,18 @@ fn detail_row(
             &[
                 ("static", !rows.burn_aware),
                 ("burn-aware", rows.burn_aware),
+            ],
+            selected,
+        ),
+        GlobalConfigRow::WalkOrder => cycle_row(
+            arrow,
+            "walk order",
+            &[
+                ("chain", rows.walk_order == WalkOrder::Chain),
+                (
+                    "soonest weekly reset",
+                    rows.walk_order == WalkOrder::SoonestWeeklyReset,
+                ),
             ],
             selected,
         ),

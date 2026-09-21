@@ -4629,6 +4629,51 @@ use super::{GLOBAL_CONFIG_ROWS, GlobalConfigRow, KeyCode, Tab};
 
 use crate::testutil::{TierSandbox, key};
 
+// ── walk order (issue #86): the Config-tab cycle handler ────────────────────
+
+#[test]
+fn walk_order_space_cycles_and_persists() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = bare_app();
+    app.tab = Tab::Config;
+    app.global_config_cursor = GLOBAL_CONFIG_ROWS
+        .iter()
+        .position(|r| *r == GlobalConfigRow::WalkOrder)
+        .unwrap();
+    assert_eq!(
+        app.config().state.walk_order(),
+        crate::profile::WalkOrder::Chain,
+        "chain by default"
+    );
+
+    super::handle_global_config_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        app.config().state.walk_order(),
+        crate::profile::WalkOrder::SoonestWeeklyReset,
+        "space cycles to soonest weekly reset"
+    );
+
+    // Persisted to profiles.toml, not just the in-memory config — reload it
+    // fresh, the way a relaunch would pick up the value.
+    let reloaded: crate::profile::AppState = toml::from_str(
+        &std::fs::read_to_string(crate::profile::clauth_dir().unwrap().join("profiles.toml"))
+            .expect("read profiles.toml"),
+    )
+    .expect("parse profiles.toml");
+    assert_eq!(
+        reloaded.walk_order(),
+        crate::profile::WalkOrder::SoonestWeeklyReset,
+        "the cycled value persists to disk"
+    );
+
+    super::handle_global_config_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        app.config().state.walk_order(),
+        crate::profile::WalkOrder::Chain,
+        "space cycles back to chain"
+    );
+}
+
 #[test]
 fn theme_set_tier_round_trips() {
     // The pin's own store is the first leg; the guard exists so the last leg

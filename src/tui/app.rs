@@ -49,8 +49,8 @@ use crate::profile::{
     AppConfig, ClockFormat, ConfigHandle, ConsoleSite, DivergenceChoice, HerdrSettings,
     MAX_CONTEXT_NUDGE_TOKENS, MAX_REFRESH_INTERVAL_MS, MAX_WEEKLY_SWITCH_PCT,
     MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, MIN_WEEKLY_SWITCH_PCT, ModelSettings,
-    PopupWidth, Profile, ProfileName, ReloadFingerprint, ResetDisplay, ThemeName, load_config,
-    reload_fingerprint, save_app_state, save_profile,
+    PopupWidth, Profile, ProfileName, ReloadFingerprint, ResetDisplay, ThemeName, WalkOrder,
+    load_config, reload_fingerprint, save_app_state, save_profile,
 };
 use crate::profile_cache::{USAGE_CACHE_FILE, load_profile_cache, profile_cache_mtime_ms};
 use crate::profile_json::{stale_after_ms, usage_cache_file};
@@ -348,6 +348,11 @@ pub(crate) enum GlobalConfigRow {
     /// follow-up b) — off by default, projects the ACTIVE profile's
     /// utilization ahead of the next poll instead of the static threshold.
     BurnAware,
+    /// Walk-order mode (`AppState.walk_order`, issue #86): `chain` (default —
+    /// today's chain-position walk) / `soonest weekly reset`. Space cycles.
+    /// Decides WHERE each accept pass lands; `switch mode` decides WHEN the
+    /// active is left, so the two stay orthogonal.
+    WalkOrder,
     /// Burn-aware early-switch floor (`AppState.burn_switch_floor_pct`) — space
     /// cycles [`BURN_FLOOR_PRESETS`]. Dimmed + inert unless burn-aware is on.
     BurnFloor,
@@ -4881,7 +4886,7 @@ pub(crate) const FALLBACK_ROWS: [FallbackRow; 8] = [
 /// Rows on the program-wide Config tab, in display order. Related knobs sit
 /// together instead of interleaving halt above detection; [`GlobalConfigRow::band`]
 /// names each run, and the renderer turns a band change into an eyebrow header.
-pub(crate) const GLOBAL_CONFIG_ROWS: [GlobalConfigRow; 16] = [
+pub(crate) const GLOBAL_CONFIG_ROWS: [GlobalConfigRow; 17] = [
     GlobalConfigRow::Theme,
     GlobalConfigRow::ResetShape,
     GlobalConfigRow::ClockNotation,
@@ -4893,6 +4898,7 @@ pub(crate) const GLOBAL_CONFIG_ROWS: [GlobalConfigRow; 16] = [
     GlobalConfigRow::PreemptiveRotation,
     GlobalConfigRow::WeeklyThreshold,
     GlobalConfigRow::BurnAware,
+    GlobalConfigRow::WalkOrder,
     GlobalConfigRow::BurnFloor,
     GlobalConfigRow::BurnHorizon,
     GlobalConfigRow::SwitchOffWhenSpent,
@@ -4918,6 +4924,7 @@ impl GlobalConfigRow {
             | GlobalConfigRow::PreemptiveRotation => "scheduler",
             GlobalConfigRow::WeeklyThreshold
             | GlobalConfigRow::BurnAware
+            | GlobalConfigRow::WalkOrder
             | GlobalConfigRow::BurnFloor
             | GlobalConfigRow::BurnHorizon
             | GlobalConfigRow::SwitchOffWhenSpent => "auto-switch",
@@ -4991,6 +4998,7 @@ fn run_global_config_row(app: &mut App, row: GlobalConfigRow) {
         GlobalConfigRow::RefreshInterval => step_refresh_interval(app),
         GlobalConfigRow::ContextNudge => step_context_nudge(app),
         GlobalConfigRow::BurnAware => toggle_burn_aware_switching(app),
+        GlobalConfigRow::WalkOrder => cycle_walk_order(app),
         // Inert while burn-aware is off (rendered dimmed): the floor/cap only
         // shape the projection, which the static path never runs.
         GlobalConfigRow::BurnFloor => {
@@ -5246,6 +5254,25 @@ fn toggle_burn_aware_switching(app: &mut App) {
     {
         let mut cfg = app.config();
         cfg.state.burn_aware_switching = !cfg.state.burn_aware_switching;
+        let _ = save_app_state(&cfg.state);
+    }
+    app.last_reload_fp = reload_fingerprint();
+}
+
+/// Cycle the walk-order mode (issue #86): `chain` ↔ `soonest weekly reset`.
+/// `cycle_reset_display`'s persistence shape exactly: mutate the shared
+/// `AppConfig`, `save_app_state`, bump `last_reload_fp` — no separate
+/// propagation to the scheduler, since every walk reads the mode off the same
+/// shared `config` (`snapshot_chain` copies it into `ChainSnapshot` like
+/// `burn_aware`).
+fn cycle_walk_order(app: &mut App) {
+    let next = match app.config().state.walk_order() {
+        WalkOrder::Chain => WalkOrder::SoonestWeeklyReset,
+        WalkOrder::SoonestWeeklyReset => WalkOrder::Chain,
+    };
+    {
+        let mut cfg = app.config();
+        cfg.state.walk_order = Some(next);
         let _ = save_app_state(&cfg.state);
     }
     app.last_reload_fp = reload_fingerprint();

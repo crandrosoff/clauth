@@ -27,6 +27,7 @@ fn toggles() -> RowState {
     RowState {
         switch_off_when_spent: false,
         burn_aware: false,
+        walk_order: WalkOrder::Chain,
         spend_budget: false,
         switch_off_when_budget_spent: true,
         preemptive: false,
@@ -674,6 +675,54 @@ fn burn_tunables_dim_when_burn_aware_is_off() {
             "{r:?} burn-aware on: live + focused brackets the active preset: {live}"
         );
     }
+}
+
+// ── walk order (issue #86): a 2-option cycle beside switch mode ─────────────
+
+/// `walk order` is a plain 2-option `cycle_row`; its hint states behavior
+/// alone for each value, never restating the row's own value.
+#[test]
+fn walk_order_renders_as_a_cycle_with_both_hints_pinned() {
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
+    let chain = toggles();
+    let line = line_text(&detail_row(
+        GlobalConfigRow::WalkOrder,
+        false,
+        chain,
+        tunables(),
+        None,
+    ));
+    assert!(line.contains("walk order"), "{line}");
+    assert!(line.contains("chain"), "{line}");
+    assert!(
+        line.contains("soonest weekly reset"),
+        "the inactive option stays visible: {line}"
+    );
+    assert_eq!(
+        row_hint(GlobalConfigRow::WalkOrder, chain, tunables()).as_deref(),
+        Some("pick the next member with headroom by chain position"),
+    );
+    let soonest = RowState {
+        walk_order: WalkOrder::SoonestWeeklyReset,
+        ..toggles()
+    };
+    let soonest_line = line_text(&detail_row(
+        GlobalConfigRow::WalkOrder,
+        false,
+        soonest,
+        tunables(),
+        None,
+    ));
+    assert!(
+        soonest_line.contains("soonest weekly reset"),
+        "{soonest_line}"
+    );
+    assert_eq!(
+        row_hint(GlobalConfigRow::WalkOrder, soonest, tunables()).as_deref(),
+        Some(
+            "spend the accepted member whose 7d window resets soonest, so less quota expires unspent"
+        ),
+    );
 }
 
 // ── preemptive rotation is live on every platform ────────────────────────────
