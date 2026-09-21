@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::lockorder::{RankedMutex, rank};
+use crate::logline::logline;
 use crate::profile::{AccountId, ProfileName};
 use crate::profile_cache::{
     ACCOUNT_ID_CACHE_FILE, PROFILE_FETCHED_CACHE_FILE, load_profile_cache, remove_profile_cache,
@@ -1191,6 +1192,20 @@ fn fetch_profile_plan(
     .ok()?;
     let p: RawProfile = serde_json::from_str(&text).ok()?;
     seed_identity_anchor(name, &p);
+    // #80 backfill: a chain minted before the login-time stamp carries no
+    // `rateLimitTier`; stamp the polled raw tier into the stored chain while
+    // the body is in hand, so a pre-#80 profile picks the key up without a
+    // manual re-login. Best-effort: a failed persist is logged and the next
+    // hourly pull retries.
+    if let Some(tier) = raw_rate_limit_tier(&p) {
+        match crate::profile::stamp_rate_limit_tier_if_missing(name, access_token, &tier) {
+            Ok(true) => {
+                logline!("clauth: {name}: backfilled the rate-limit tier into the stored chain");
+            }
+            Ok(false) => {}
+            Err(e) => logline!("clauth: {name}: rate-limit tier backfill failed: {e:#}"),
+        }
+    }
     Some(plan_from_profile(&p))
 }
 
@@ -1303,6 +1318,19 @@ pub(crate) struct LoginProfile {
     pub(crate) account_uuid: Option<AccountId>,
 }
 
+/// The org's raw `rate_limit_tier` off a parsed `/profile` body, trimmed;
+/// blank/whitespace-only reads as absent — shape drift, not a tier. The one
+/// extraction both consumers share: the login stamp (via
+/// [`login_profile_from_raw`]) and the poll backfill.
+fn raw_rate_limit_tier(p: &RawProfile) -> Option<String> {
+    p.organization
+        .as_ref()
+        .and_then(|o| o.rate_limit_tier.as_deref())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
 /// Pull the login values out of an already-parsed `/profile` response. Split
 /// from the HTTP leg so the mapping is testable against literal bodies.
 /// A present-but-blank uuid is shape drift, never an identity (same contract as
@@ -1316,11 +1344,7 @@ fn login_profile_from_raw(p: RawProfile) -> LoginProfile {
         p.account.as_ref().is_some_and(|a| a.has_claude_pro),
         org.and_then(|o| o.rate_limit_tier.as_deref()),
     );
-    let rate_limit_tier = org
-        .and_then(|o| o.rate_limit_tier.as_deref())
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string);
+    let rate_limit_tier = raw_rate_limit_tier(&p);
     LoginProfile {
         rate_limit_tier,
         subscription_type: match tier {

@@ -2903,6 +2903,62 @@ pub(crate) fn preserve_extra_blocks(
     }
 }
 
+/// The #80 backfill: stamp the polled raw rate-limit tier into a stored chain
+/// that predates login-time stamping, so a pre-#80 mint picks the key up
+/// without a manual re-login (decision 1 of the #80 review).
+/// Write-if-missing, and only onto the chain the tier was fetched for: the
+/// access token the `/profile` body answered for must still be the stored one,
+/// or the reading belongs to a superseded pair — the tier is evidence about
+/// the exact token that fetched it, and a re-login or a concurrent rotation
+/// changes that token.
+///
+/// Stands down while a staged rotation sidecar exists: writing the
+/// pre-rotation pair would move `credentials.json` past the sidecar and get
+/// the minted pair discarded by [`recover_pending_credentials`]. The write is
+/// the credentials file alone — a background leg never rewrites `config.toml`
+/// (its comments and unmodelled keys are the operator's to keep) — through the
+/// preserving serializer, so a top-level block the model does not carry (an
+/// MCP-server login) survives, the same write shape [`recover_pending_credentials`]
+/// uses for its own write-through.
+///
+/// `Ok(true)` = stamped now; `Ok(false)` = nothing to write (off-roster, a
+/// staged sidecar, no store, no chain, a moved chain, or an already-stamped
+/// tier); `Err` = could not read or persist.
+pub(crate) fn stamp_rate_limit_tier_if_missing(
+    name: &ProfileName,
+    fetched_access_token: &str,
+    tier: &str,
+) -> Result<bool> {
+    with_state_lock(|_held| {
+        // Fresh record membership, like every other persist leg: the poll's
+        // work list can lag a concurrent delete/rename by a tick.
+        if !is_configured(name)? {
+            return Ok(false);
+        }
+        if profile_credentials_pending_path(name)?.exists() {
+            return Ok(false);
+        }
+        let cred_path = profile_credentials_path(name)?;
+        if !cred_path.exists() {
+            return Ok(false);
+        }
+        let mut creds: ClaudeCredentials = read_json_file(&cred_path)?;
+        let Some(oauth) = creds.claude_ai_oauth.as_mut() else {
+            return Ok(false);
+        };
+        if oauth.access_token != fetched_access_token {
+            return Ok(false);
+        }
+        if oauth.rate_limit_tier().is_some() {
+            return Ok(false);
+        }
+        oauth.set_rate_limit_tier(tier.to_string());
+        let bytes = serialize_credentials_preserving_extra(&creds, &cred_path)?;
+        atomic_write_600(&cred_path, bytes).context("failed to write credentials.json")?;
+        Ok(true)
+    })
+}
+
 pub(crate) fn save_profile(profile: &Profile) -> Result<()> {
     with_state_lock(|_held| {
         mkdir_700(&profile_dir(&profile.name)?)?;
@@ -3059,8 +3115,9 @@ fn recover_pending_credentials(
         }
         // Through the preserving serializer, not the staged bytes: staging holds
         // the rotated login alone, so writing it raw would drop every non-login
-        // block the store carries. The recovery leg is the one write that reaches
-        // the store without going through `save_profile`.
+        // block the store carries. One of the two writes that reach the store
+        // without going through `save_profile` (the tier backfill above is the
+        // other).
         let _ = with_state_lock(|_held| {
             let body = serialize_credentials_preserving_extra(&pending, &cred_path)?;
             atomic_write_600(&cred_path, body).map_err(Into::into)
