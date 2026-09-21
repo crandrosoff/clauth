@@ -1181,6 +1181,188 @@ fn status_lines_stale_cue_coexists_with_cached_fetch_status() {
     assert!(rendered.contains("stale"), "got {rendered:?}");
 }
 
+/// The stale cue prepends the fetch row — one line, never its own rung, with
+/// `stale` left of the fetch pill.
+#[test]
+fn status_lines_stale_prepends_the_fetch_row() {
+    let mut profile = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
+    profile.fetch_status = Some(FetchStatus::Cached);
+    profile.usage_stale = true;
+    let header = HeaderState {
+        activity: ProfileActivity::Idle,
+        next_refresh_ms: Some(now_ms() + 90_000),
+        tick: 0,
+        streaks: StreakCounts::default(),
+        kick_block: None,
+        queue_slot: None,
+        diag: DiagFlags::default(),
+        peak: None,
+    };
+    let lines = status_lines(&profile, &header, 120);
+    let merged = lines
+        .iter()
+        .position(|l| {
+            let stale = l.spans.iter().position(|s| s.content == "stale");
+            let fetch = l.spans.iter().position(|s| s.content.contains("cached"));
+            stale.is_some() && fetch.is_some()
+        })
+        .map(|i| &lines[i]);
+    let Some(merged) = merged else {
+        panic!("stale and the fetch pill must share one row: {lines:?}");
+    };
+    let stale_at = merged
+        .spans
+        .iter()
+        .position(|s| s.content == "stale")
+        .expect("stale on the merged row");
+    let cached_at = merged
+        .spans
+        .iter()
+        .position(|s| s.content.contains("cached"))
+        .expect("cached on the merged row");
+    assert!(
+        stale_at < cached_at,
+        "stale leads the fetch pill: {merged:?}"
+    );
+    // No second stale rung anywhere: exactly one stale span across all rows.
+    let stale_spans = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .filter(|s| s.content == "stale")
+        .count();
+    assert_eq!(stale_spans, 1, "one stale pill, merged: {lines:?}");
+}
+
+/// A keyless third-party profile can never be polled, so the fetch row must
+/// not claim `up to date`: it renders the `[ no key ]` pill instead. Without
+/// figures the body already names the fix, so the pill carries no hint here.
+#[test]
+fn status_lines_keyless_third_party_renders_no_key_pill() {
+    let mut profile = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
+    profile.provider = Some(crate::providers::Provider::DeepSeek);
+    profile.base_url = Some("https://api.deepseek.com".to_string());
+    profile.api_key = None;
+    profile.usage_stale = true;
+    // A historical outcome is not current truth once the key is gone: the
+    // pill outranks it.
+    profile.fetch_status = Some(FetchStatus::Cached);
+    let header = HeaderState {
+        activity: ProfileActivity::Idle,
+        next_refresh_ms: None,
+        tick: 0,
+        streaks: StreakCounts::default(),
+        kick_block: None,
+        queue_slot: None,
+        diag: DiagFlags::default(),
+        peak: None,
+    };
+    let lines = status_lines(&profile, &header, 120);
+    let merged = lines.iter().position(|l| {
+        let stale = l.spans.iter().position(|s| s.content == "stale");
+        let key = l.spans.iter().position(|s| s.content == "no key");
+        stale.is_some() && key.is_some()
+    });
+    let Some(i) = merged else {
+        panic!("stale and the no-key pill must share one row: {lines:?}");
+    };
+    let stale_at = lines[i]
+        .spans
+        .iter()
+        .position(|s| s.content == "stale")
+        .expect("stale on the merged row");
+    let key_at = lines[i]
+        .spans
+        .iter()
+        .position(|s| s.content == "no key")
+        .expect("no key on the merged row");
+    assert!(stale_at < key_at, "stale leads the pill: {:?}", lines[i]);
+    let rendered = status_text(&lines);
+    assert!(!rendered.contains("up to date"), "got {rendered:?}");
+    assert!(
+        !rendered.contains("cached"),
+        "a stale outcome does not outrank the missing key: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("no api key set"),
+        "no figures -> the body names the fix, the status block does not: {rendered:?}"
+    );
+}
+
+/// The pill's gate is both work lists' own membership: a keyless generic
+/// endpoint (base url, no provider) renders it too, while a hybrid that keeps
+/// its OAuth pair never does — the pair polls usage, so that account has no
+/// key to miss. The fix hint rides when figures render.
+#[test]
+fn status_lines_no_key_gate_is_the_work_lists_membership() {
+    let header = HeaderState {
+        activity: ProfileActivity::Idle,
+        next_refresh_ms: None,
+        tick: 0,
+        streaks: StreakCounts::default(),
+        kick_block: None,
+        queue_slot: None,
+        diag: DiagFlags::default(),
+        peak: None,
+    };
+    let mut generic = crate::testutil::blank_profile(&crate::profile::ProfileName::from("g"));
+    generic.base_url = Some("https://example.com".to_string());
+    generic.api_key = None;
+    let rendered = status_text(&status_lines(&generic, &header, 120));
+    assert!(rendered.contains("no key"), "got {rendered:?}");
+    assert!(!rendered.contains("up to date"), "got {rendered:?}");
+
+    let mut hybrid = crate::testutil::blank_profile(&crate::profile::ProfileName::from("h"));
+    hybrid.base_url = Some("https://example.com".to_string());
+    hybrid.credentials = Some(crate::profile::ClaudeCredentials {
+        claude_ai_oauth: Some(crate::profile::OAuthToken {
+            access_token: "at".into(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: None,
+            subscription_type: None,
+            ..crate::profile::OAuthToken::default_extra()
+        }),
+    });
+    let rendered = status_text(&status_lines(&hybrid, &header, 120));
+    assert!(
+        !rendered.contains("no key"),
+        "a pair polls this account: {rendered:?}"
+    );
+
+    generic.third_party_usage = Some(crate::providers::ThirdPartyStats {
+        is_available: true,
+        rows: vec![],
+        bars: vec![],
+        plan: None,
+        endpoint: None,
+        best_effort: false,
+    });
+    let rendered = status_text(&status_lines(&generic, &header, 120));
+    assert!(
+        rendered.contains("no api key set"),
+        "figures -> the status hint names the fix: {rendered:?}"
+    );
+}
+
+/// The `[ no key ]` pill is a third-party state — an OAuth profile never
+/// renders it, keyless or not.
+#[test]
+fn status_lines_oauth_profile_never_renders_no_key() {
+    let profile = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
+    let header = HeaderState {
+        activity: ProfileActivity::Idle,
+        next_refresh_ms: None,
+        tick: 0,
+        streaks: StreakCounts::default(),
+        kick_block: None,
+        queue_slot: None,
+        diag: DiagFlags::default(),
+        peak: None,
+    };
+    let rendered = status_text(&status_lines(&profile, &header, 120));
+    assert!(!rendered.contains("no key"), "got {rendered:?}");
+}
+
 /// The disabled rung leads but does NOT erase the health rungs beneath it: a
 /// dead login is just as true on a disabled account, and hiding it would strand
 /// an operator who re-enables it. Both facts stack on one `├│└` rail.
