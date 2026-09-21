@@ -125,6 +125,7 @@ The account list ends in an action row: `+ new`, which turns this pane into the 
 | `switch mode` | `static`, `burn-aware` | `static` |
 | `burn floor` | earliest projected-switch point: 97 / 98 / 99 / 100% | `98%` |
 | `burn horizon` | how far ahead burn-aware projects | `60s` |
+| `walk order` | `chain`, `soonest weekly reset` | `chain` |
 | `quota spent` | `stay on active`, `switch off all` | `stay on active` |
 | `allow extra usage` | `off`, `pay-as-you-go` | `off` |
 | `extra usage spent` | `stay on active`, `switch off all` | `switch off all` |

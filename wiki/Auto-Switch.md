@@ -61,6 +61,7 @@ Two radio toggles on a member's Fallback card. Marking one clears it on every ot
 
 - **`last resort`** is the parking spot: chosen only once every other member is past its line, and never switched away from. Claude Code then surfaces its own out-of-limit message when that account runs dry too.
 - **`preferred`** is the home account. Once it reads clear and fresh, clauth walks back to it on its own, from wherever the chain left you.
+- **`walk order`** (Config tab) reorders each accept pass by the soonest weekly reset when set to `soonest weekly reset`: the member whose 7d window resets soonest drains first, so less quota expires unspent; ties keep chain position, and a member with no readable reset ranks last. The default `chain` is today's walk exactly. With no `preferred` set, a healthy active walks home to the soonest-reset clear+fresh member and parks there. Every other gate is unchanged: the mode only reorders members that already pass.
 
 ## When everyone is out
 
@@ -108,7 +109,7 @@ The chain runs wherever the decision loop runs: an open TUI, or `clauth daemon` 
 
 ## Choosing where a session starts
 
-The chain decides where a session *moves*. `clauth start --auto` decides where one **starts**: it walks the fallback chain in order and launches on the first member the chain itself would switch to, judged for the models the session is about to run.
+The chain decides where a session *moves*. `clauth start --auto` decides where one **starts**: it walks the fallback chain (the walk-order mode when set, chain order by default) and launches on the first member the chain itself would switch to, judged for the models the session is about to run.
 
 **The walk is the chain's own.** The same exclusions ([below](Auto-Switch#excluded-members)) and the same lines (the 5h threshold, the weekly line, the per-model weeks) decide, in chain order and with no ranking: the chain order is your statement of which account comes first. A member whose usage was read recently is preferred over one whose reading is stale or missing, and a chain with only stale readings still launches.
 
