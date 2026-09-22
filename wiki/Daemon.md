@@ -12,15 +12,15 @@ Scope note: by default the daemon carries **no external surface at all**: it pub
   - `--standby` opts into take-over: it parks and takes over the moment the holder exits, for a supervisor's instance queueing behind a manually run one under launchd `KeepAlive{SuccessfulExit=false}` (which never restarts a clean exit).
   - The standby queue is **one deep**: a second flock (`clauthd-standby.lock`) holds the slot; any further instance exits. `--no-standby` is the default's explicit spelling, kept for callers already passing it.
   - A dead holder's flock auto-releases, so a supervisor with restart-on-crash keeps exactly one scheduler alive without pidfile bookkeeping.
-  - The TUI header's `● daemon` dot reads this lock (presence) plus `status.json` freshness (green = fresh feed, amber = stalling, hidden = no daemon) to show whether one is running.
+  - The TUI header's always-present `[ daemon ]` chip reads this lock (presence) plus `status.json` freshness (green = fresh feed, amber = stalling, dim = no daemon) to show whether one is running.
 - **Asking before spawning**: `clauth daemon --status` prints `running (pid <n>, feed fresh|stale[, standby waiting])` and exits 0 when a daemon is up; with none up, exit 1 and nothing on stdout.
   - It creates nothing, so a menu-bar app or a wrapper script can gate its spawn on the exit code instead of starting a process to find out.
   - A lock file it cannot test at all (no working `flock`, e.g. some NFS/CIFS mounts) is its own failure with the io error attached, never an exit 1 that reads as "none running" and sends a supervisor into a respawn loop.
-  - The header dot answers the same question by hiding instead, which is why the two read the lock through different paths. The default already exits the moment it loses the race, which suits the same callers.
+  - The header chip answers the same question by dimming instead, which is why the two read the lock through different paths. The default already exits the moment it loses the race, which suits the same callers.
   - `--standby` is the one to keep out of a pure supervisor unit: the supervisor is the sole starter and wins the race alone, so a standby only earns its keep when a manual run and a unit coexist.
 - **Replacing for an upgrade**: `clauth daemon --replace` terminates the running daemon and takes over. It reads the holder's pid sidecar and confirms the pid is still a running `clauth daemon` by its argv, so another clauth subcommand sharing the binary name is never signalled.
   - It SIGTERMs the holder and waits for the flock to auto-release on death; on a timeout it escalates to SIGKILL, then claims (on Windows there is no graceful kill for a console process, so both passes are `taskkill /F`). A pid it can't confirm bails rather than signal blind.
-- **Probes take the lock they read**, briefly: both the header dot's `daemon_health` and `--status` try-lock a free file and release it. A starting daemon therefore re-tries a lost race (3 attempts, 100 ms apart) before it accepts that another instance is up.
+- **Probes take the lock they read**, briefly: both the header chip's `daemon_health` and `--status` try-lock a free file and release it. A starting daemon therefore re-tries a lost race (3 attempts, 100 ms apart) before it accepts that another instance is up.
   - A real holder keeps its lock for life, so anything that clears on a retry was a reader.
 - **Watchdog**: a wedged tick can freeze the single-threaded loop. The cross-process state flock a tick may block on is capped at 25 s, so a flock-blocked tick times out and retries rather than hanging.
   - If no tick completes in 30 s at all, the daemon `abort()`s for a clean supervisor restart, freeing the usage lease.
