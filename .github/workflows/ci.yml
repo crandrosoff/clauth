@@ -94,7 +94,7 @@ jobs:
       # startup (the same 2026-09-22 regression as the toolchain action above).
       - name: install nextest
         shell: bash
-        run: curl -LsSf https://get.nexte.st/latest/${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'macos-latest' && 'darwin' || 'linux' }} | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+        run: curl -LsSf https://get.nexte.st/latest/${{ matrix.os == 'windows-latest' && 'windows-tar' || matrix.os == 'macos-latest' && 'mac' || 'linux' }} | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
       - if: runner.os == 'Linux'
         uses: taiki-e/install-action@cargo-llvm-cov
       # `every_completion_script_parses_in_its_own_shell` runs each shipped
