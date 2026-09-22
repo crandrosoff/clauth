@@ -150,17 +150,19 @@ clauth keeps no file for the queue: it derives the last open from `usage_history
 | `theme` | string | auto | `full` or `compatible` |
 | `reset_display` | string | `relative` | `relative`, `clock`, `both` |
 | `clock_format` | string | `24h` | `24h` or `12h` |
+| `home_tab` | string | `overview` | the tab every launch opens on: `overview`, `usage`, `tokens`, `setup`, `fallback`, `config`, `status`, or `plugin`; edited from the Config tab's `home tab` row. the first herdr launch lands on `plugin` with the herdr row open instead |
 | `show_estimates` | bool | `true` | burn estimates on the Usage tab |
 | `show_pace` | bool | `false` | ideal-pace marker on usage bars |
 | `count_cache` | bool | `false` | count cache tokens in the Tokens totals |
 | `auth_broken` | list | `[]` | accounts quarantined after a permanent OAuth rejection; clauth writes this |
-| `[herdr]` | table | `{}` | the herdr-plugin knobs the Plugin tab edits ([herdr plugin](Herdr-Plugin)) |
+| `[herdr]` | table | `{}` | the herdr-plugin knobs the Plugin tab edits, plus the first-launch marker ([herdr plugin](Herdr-Plugin)) |
 | `[herdr] popup_width` | string | `fit` | `fit` (focused-pane width, 540-column cap), `half` (herdr's default), `split-right`, or `split-top` (a real pane right of or above the focused one); a saved `full` loads as `fit` |
 | `[herdr] pane_tag` | bool | `true` | publish the `clauth=$profile` pane-metadata tag; off clears it on every pane |
 | `[herdr] tag_watch_secs` | int | `5` | seconds between the per-pane tag watcher's re-publishes |
 | `[herdr] border_label` | bool | `false` | publish `--display-agent "$profile"` so split-pane borders name the account; off clears the stale label |
 | `[herdr] delegate_dot` | bool | `true` | report `clauth_delegate=working\|idle` pane metadata during delegate runs |
 | `[herdr] delegate_row_text` | bool | `false` | append `$clauth_delegate` to the sidebar row `install` writes |
+| `[herdr] first_landing_done` | bool | `false` | set to `true` once the first herdr launch lands; later launches open `home_tab` |
 | `[serve]` | table | `{}` | the daemon-wide session-creation switch ([Daemon](Daemon)) |
 | `[serve] session_creation` | bool | `false` | whether `POST /api/v1/sessions` is served at all; each calling device also needs its own `sessions` grant (`clauth devices allow-sessions <name>`) |
 

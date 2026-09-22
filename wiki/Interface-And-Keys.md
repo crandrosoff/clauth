@@ -115,6 +115,7 @@ The account list ends in an action row: `+ new`, which turns this pane into the 
 | `theme` | `full`, `compatible` | auto-detected |
 | `reset display` | `relative`, `clock`, `both` | `relative` |
 | `clock` | `24h`, `12h` | `24h` |
+| `home tab` | `overview`, `usage`, `tokens`, `setup`, `fallback`, `config`, `status`, `plugin` | `overview` |
 | `on mismatch` | `ask`, `overwrite`, `new`, `discard` | `ask` |
 | `refresh` | 15 / 30 / 60 / 90 / 120 / 300 s, or a typed value from 10 s to 1 h | `90s` |
 | `refresh spent` | keep polling accounts already at 100% | on |

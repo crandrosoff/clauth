@@ -27,7 +27,7 @@ Two actions and two event hooks, all of them one of the two shell scripts below,
 
 The watcher re-publishes the account every few seconds until the pane closes. An account swap fires no herdr event, so the timer is what keeps the tag from going stale. A codex pane names the profile its `clauth start` session runs under, else the profile its own login is adopted into (`clauth login <name> --codex` leaves `~/.codex/auth.json` a link onto that profile's store); a codex login that is not adopted spends no clauth account, so that pane stays untagged. The scripts write only herdr's own pane metadata plus one pidfile per watched pane in the plugin state directory.
 
-The six knobs live in `~/.clauth/profiles.toml` under `[herdr]` and edit from the dashboard's Plugin tab (herdr row, options). The scripts read them through `clauth herdr config get <key>` and fall back to the shipped defaults when the binary predates the subcommand. The delegate state token (`clauth_delegate`) reports on the pane JSON and, with the `delegate_row_text` knob on, beside the row.
+Seven knobs tune the plugin. Six live in `~/.clauth/profiles.toml` under `[herdr]` and edit from the dashboard's Plugin tab (herdr row, options); `home_tab` is a top-level key picking the tab every launch opens on, from the Config tab's appearance band. The scripts read the six through `clauth herdr config get <key>` and fall back to the shipped defaults when the binary predates the subcommand. The delegate state token (`clauth_delegate`) reports on the pane JSON and, with the `delegate_row_text` knob on, beside the row.
 
 ## Paste these if you installed by hand
 
