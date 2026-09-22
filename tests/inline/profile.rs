@@ -54,6 +54,386 @@ fn last_resort_round_trips_through_config_toml() {
     assert!(parsed.last_resort);
 }
 
+// `preferred_days` must default to empty so every config.toml written before
+// the field existed keeps loading with `preferred` alone in charge.
+#[test]
+fn profile_config_preferred_days_defaults_empty() {
+    let cfg: ProfileConfig = toml::from_str("").expect("parse empty config");
+    assert!(cfg.preferred_days.is_empty());
+}
+
+// Full names, short forms and mixed case name the same day, and a typo costs
+// its own entry instead of the whole profile.
+#[test]
+fn preferred_days_parse_drops_only_what_it_cannot_read() {
+    let raw = vec![
+        "Saturday".to_string(),
+        "sun".to_string(),
+        "funday".to_string(),
+        "SAT".to_string(),
+    ];
+    assert_eq!(
+        parse_preferred_days(&raw),
+        vec![Weekday::Sat, Weekday::Sun],
+        "duplicates collapse and an unparseable entry drops"
+    );
+}
+
+// The rewrite settles on one spelling instead of alternating with whatever the
+// operator typed.
+#[test]
+fn preferred_days_round_trip_through_config_toml() {
+    let mut profile = Profile::new("p".to_string(), None, None);
+    profile.preferred_days = vec![Weekday::Sat, Weekday::Sun];
+    let rendered = render_config_toml(&profile);
+    assert!(
+        rendered.contains("preferred_days = [\"sat\", \"sun\"]"),
+        "rendered config: {rendered}"
+    );
+    let parsed: ProfileConfig = toml::from_str(&rendered).expect("parse rendered toml");
+    assert_eq!(
+        parse_preferred_days(&parsed.preferred_days),
+        vec![Weekday::Sat, Weekday::Sun]
+    );
+}
+
+// Chain membership does not matter to `is_home_on` — it reads the profile
+// list — so the fixture only has to hold the profiles themselves.
+fn config_of(profiles: Vec<Profile>) -> AppConfig {
+    let names: Vec<ProfileName> = profiles.iter().map(|p| p.name.clone()).collect();
+    AppConfig {
+        state: AppState {
+            profiles: names.clone(),
+            fallback_chain: names,
+            ..AppState::default()
+        },
+        profiles,
+    }
+}
+
+// A day nobody names leaves `preferred` in charge, so a config that never
+// grew a list behaves exactly as it did before the key existed.
+#[test]
+fn an_unclaimed_day_leaves_the_flag_in_charge() {
+    let mut flagged = Profile::new("work".to_string(), None, None);
+    flagged.preferred = true;
+    let cfg = config_of(vec![flagged]);
+    assert!(cfg.is_home_on(&ProfileName::from("work"), Weekday::Mon));
+    assert!(cfg.is_home_on(&ProfileName::from("work"), Weekday::Sat));
+}
+
+// A list on an account the walk never visits claims nothing. Letting it count
+// would stand the flag down on a day its own account can never serve, leaving
+// nobody home — the opposite of what the list was written for.
+#[test]
+fn a_non_members_list_reads_inert() {
+    let mut off_chain = Profile::new("personal".to_string(), None, None);
+    off_chain.preferred_days = vec![Weekday::Sat];
+    let mut flagged = Profile::new("work".to_string(), None, None);
+    flagged.preferred = true;
+    let cfg = AppConfig {
+        state: AppState {
+            profiles: vec![ProfileName::from("work"), ProfileName::from("personal")],
+            fallback_chain: vec![ProfileName::from("work")],
+            ..AppState::default()
+        },
+        profiles: vec![flagged, off_chain],
+    };
+
+    assert!(
+        cfg.is_home_on(&ProfileName::from("work"), Weekday::Sat),
+        "an off-chain list does not stand the flag down"
+    );
+    assert!(!cfg.is_home_on(&ProfileName::from("personal"), Weekday::Sat));
+}
+
+// Same for a member the walk skips: disabled here, and auth-broken and
+// unresolvable read identically through `walk_excluded`. Its days go back to
+// the flag rather than to nobody.
+#[test]
+fn a_dead_members_list_hands_its_days_back_to_the_flag() {
+    let mut dead = Profile::new("personal".to_string(), None, None);
+    dead.preferred_days = vec![Weekday::Sat];
+    dead.disabled = true;
+    let mut flagged = Profile::new("work".to_string(), None, None);
+    flagged.preferred = true;
+    let cfg = config_of(vec![flagged, dead]);
+
+    assert!(
+        cfg.is_home_on(&ProfileName::from("work"), Weekday::Sat),
+        "a disabled lister leaves saturday to the flag"
+    );
+    assert!(
+        !cfg.is_home_on(&ProfileName::from("personal"), Weekday::Sat),
+        "and cannot be home itself"
+    );
+}
+
+// A claimed day is claimed against everyone: the weekend account is home on
+// Saturday and the flagged one stands down, which is the split an operator
+// gets from one line in one profile. Resolving this per profile would leave
+// the flag claiming Saturday too, and which of the two won would come down to
+// chain order.
+#[test]
+fn a_listed_day_stands_the_flag_down_elsewhere() {
+    let mut weekend = Profile::new("personal".to_string(), None, None);
+    weekend.preferred_days = vec![Weekday::Sat, Weekday::Sun];
+    let mut flagged = Profile::new("work".to_string(), None, None);
+    flagged.preferred = true;
+    let cfg = config_of(vec![flagged, weekend]);
+
+    let work = ProfileName::from("work");
+    let personal = ProfileName::from("personal");
+
+    assert!(
+        cfg.is_home_on(&personal, Weekday::Sat),
+        "the list claims sat"
+    );
+    assert!(
+        !cfg.is_home_on(&work, Weekday::Sat),
+        "the flag stands down on a claimed day"
+    );
+    assert!(cfg.is_home_on(&work, Weekday::Mon), "monday is unclaimed");
+    assert!(!cfg.is_home_on(&personal, Weekday::Mon));
+}
+
+// The editor's parse takes what a human types: either separator, any case,
+// duplicates collapsed, written order kept.
+#[test]
+fn a_typed_day_list_takes_commas_spaces_and_any_case() {
+    assert_eq!(
+        parse_day_list("sun, Saturday").expect("parses"),
+        vec![Weekday::Sun, Weekday::Sat]
+    );
+    assert_eq!(
+        parse_day_list("SAT sun").expect("parses"),
+        vec![Weekday::Sat, Weekday::Sun]
+    );
+    assert_eq!(
+        parse_day_list("sat, sat").expect("parses"),
+        vec![Weekday::Sat],
+        "a repeat collapses the way the loader's parse does"
+    );
+    assert!(
+        parse_day_list("  ").expect("parses").is_empty(),
+        "an empty field clears the list rather than failing"
+    );
+}
+
+// Where the loader drops a bad entry (a file nobody is watching must still
+// load), the editor names it: the operator is standing at the field.
+#[test]
+fn a_typed_day_list_names_the_entry_it_cannot_read() {
+    assert_eq!(
+        parse_day_list("sat, funday, sun"),
+        Err("funday".to_string())
+    );
+}
+
+// One claimant is the ordinary case the whole feature is for, and zero is
+// every config that never grew a list — neither is worth a word.
+#[test]
+fn one_claimant_or_none_raises_no_collision() {
+    let mut weekend = Profile::new("personal".to_string(), None, None);
+    weekend.preferred_days = vec![Weekday::Sat];
+    let flagged = Profile::new("work".to_string(), None, None);
+    let cfg = config_of(vec![flagged, weekend]);
+
+    assert_eq!(cfg.day_claim_collision(Weekday::Sat), None, "one claimant");
+    assert_eq!(cfg.day_claim_collision(Weekday::Mon), None, "no claimant");
+}
+
+// Two lists naming the same day break nothing — the return pass takes the
+// first of them that reads clear — but the operator wrote two lines expecting
+// one home, so the notice names the day and both claimants.
+#[test]
+fn two_claimants_raise_a_collision_naming_both() {
+    let mut a = Profile::new("work".to_string(), None, None);
+    a.preferred_days = vec![Weekday::Sat];
+    let mut b = Profile::new("personal".to_string(), None, None);
+    b.preferred_days = vec![Weekday::Sat];
+    let cfg = config_of(vec![a, b]);
+
+    let notice = cfg.day_claim_collision(Weekday::Sat).expect("collision");
+    assert!(notice.contains("2 accounts claim sat"), "got {notice}");
+    assert!(notice.contains("'work'"), "got {notice}");
+    assert!(notice.contains("'personal'"), "got {notice}");
+}
+
+// A dead account cannot serve the day, so it is not a second claimant — the
+// notice would send the operator to fix a collision that `is_home_on` never
+// saw. Same `walk_excluded` scan the claim itself runs.
+#[test]
+fn a_dead_listers_claim_does_not_count_as_a_collision() {
+    let mut live = Profile::new("work".to_string(), None, None);
+    live.preferred_days = vec![Weekday::Sat];
+    let mut dead = Profile::new("personal".to_string(), None, None);
+    dead.preferred_days = vec![Weekday::Sat];
+    dead.disabled = true;
+    let cfg = config_of(vec![live, dead]);
+
+    assert_eq!(cfg.day_claim_collision(Weekday::Sat), None);
+}
+
+// The notice is its callers' once-gate key, so it has to be byte-stable while
+// nothing changes and different once the day or the claimants do. Without
+// this the TUI toast repaints every tick.
+#[test]
+fn the_collision_notice_is_stable_per_day_and_moves_with_the_claimants() {
+    let mut a = Profile::new("work".to_string(), None, None);
+    a.preferred_days = vec![Weekday::Sat, Weekday::Sun];
+    let mut b = Profile::new("personal".to_string(), None, None);
+    b.preferred_days = vec![Weekday::Sat, Weekday::Sun];
+    let cfg = config_of(vec![a, b]);
+
+    let sat = cfg.day_claim_collision(Weekday::Sat).expect("collision");
+    assert_eq!(
+        cfg.day_claim_collision(Weekday::Sat).as_deref(),
+        Some(sat.as_str()),
+        "the same day re-derives the same bytes"
+    );
+    assert_ne!(
+        cfg.day_claim_collision(Weekday::Sun),
+        Some(sat.clone()),
+        "the rollover changes it"
+    );
+
+    let mut third = Profile::new("spare".to_string(), None, None);
+    third.preferred_days = vec![Weekday::Sat];
+    let mut widened = cfg;
+    widened.state.profiles.push(ProfileName::from("spare"));
+    widened
+        .state
+        .fallback_chain
+        .push(ProfileName::from("spare"));
+    widened.profiles.push(third);
+    assert_ne!(
+        widened.day_claim_collision(Weekday::Sat),
+        Some(sat),
+        "a config edit changes it"
+    );
+}
+
+// The gap the round-2 review found: `walk_excluded` reads an off-chain account
+// as eligible, so a healthy non-member with a matching list answered home while
+// the lister scan — which walks `fallback_chain` — refused it the same claim.
+// `claimed` has to be true for the branch to be reached, so a chain member has
+// to name the day as well.
+#[test]
+fn an_off_chain_list_is_not_home_on_a_day_the_chain_claims() {
+    let mut member = Profile::new("work".to_string(), None, None);
+    member.preferred_days = vec![Weekday::Sat];
+    let mut off_chain = Profile::new("personal".to_string(), None, None);
+    off_chain.preferred_days = vec![Weekday::Sat];
+
+    let cfg = AppConfig {
+        state: AppState {
+            profiles: vec![ProfileName::from("work"), ProfileName::from("personal")],
+            fallback_chain: vec![ProfileName::from("work")],
+            ..AppState::default()
+        },
+        profiles: vec![member, off_chain],
+    };
+
+    assert!(cfg.is_home_on(&ProfileName::from("work"), Weekday::Sat));
+    assert!(
+        !cfg.is_home_on(&ProfileName::from("personal"), Weekday::Sat),
+        "a healthy account off the chain cannot be home on a day it cannot serve"
+    );
+}
+
+// The flag half had the gap the list half did: an account the walk never
+// visits is home on no day, so its `⌂` was marking a homecoming that cannot
+// happen. Both ways of being unreachable are pinned, since one guard answers
+// for both.
+#[test]
+fn a_flag_on_an_account_the_walk_skips_is_home_on_no_day() {
+    let mut disabled = Profile::new("old".to_string(), None, None);
+    disabled.preferred = true;
+    disabled.disabled = true;
+    let cfg = config_of(vec![Profile::new("work".to_string(), None, None), disabled]);
+    assert!(
+        !cfg.is_home_on(&ProfileName::from("old"), Weekday::Mon),
+        "a disabled account carrying the flag is home on no day"
+    );
+
+    let mut off_chain = Profile::new("spare".to_string(), None, None);
+    off_chain.preferred = true;
+    let cfg = AppConfig {
+        state: AppState {
+            profiles: vec![ProfileName::from("work"), ProfileName::from("spare")],
+            fallback_chain: vec![ProfileName::from("work")],
+            ..AppState::default()
+        },
+        profiles: vec![Profile::new("work".to_string(), None, None), off_chain],
+    };
+    assert!(
+        !cfg.is_home_on(&ProfileName::from("spare"), Weekday::Mon),
+        "and neither is one off the chain"
+    );
+}
+
+// The guard must not cost a healthy account its flag: the day is unclaimed, so
+// `preferred` is exactly what should answer.
+#[test]
+fn a_healthy_members_flag_still_answers_an_unclaimed_day() {
+    let mut flagged = Profile::new("work".to_string(), None, None);
+    flagged.preferred = true;
+    let cfg = config_of(vec![flagged]);
+    assert!(cfg.is_home_on(&ProfileName::from("work"), Weekday::Mon));
+}
+
+// A list that cannot claim is worth saying at tick time, not just at save
+// time: it goes inert later (the account leaves the chain, is disabled, its
+// login breaks) and a hand-edited config.toml never passes the editor.
+#[test]
+fn a_passed_over_lister_names_what_became_of_the_day() {
+    let mut carrier = Profile::new("work".to_string(), None, None);
+    carrier.preferred_days = vec![Weekday::Sat];
+    let mut dead = Profile::new("old".to_string(), None, None);
+    dead.preferred_days = vec![Weekday::Sat];
+    dead.disabled = true;
+    let cfg = config_of(vec![carrier, dead]);
+
+    let notice = cfg.day_claim_passed_over(Weekday::Sat).expect("a notice");
+    assert!(notice.starts_with("sat:"), "got {notice}");
+    assert!(notice.contains("the list on 'old'"), "got {notice}");
+    assert!(notice.contains("the account is disabled"), "got {notice}");
+    assert!(
+        notice.contains("'work' carries it"),
+        "a carried day still has somebody home, and the notice says who: {notice}"
+    );
+}
+
+// With nobody left to carry it the day is unclaimed, so the flag takes over —
+// a different outcome from the carried case and worth wording apart.
+#[test]
+fn a_passed_over_lister_with_no_carrier_names_the_fallback() {
+    let mut dead = Profile::new("old".to_string(), None, None);
+    dead.preferred_days = vec![Weekday::Sat];
+    dead.disabled = true;
+    let cfg = config_of(vec![dead]);
+
+    let notice = cfg.day_claim_passed_over(Weekday::Sat).expect("a notice");
+    assert!(notice.contains("nothing else claims sat"), "got {notice}");
+    assert!(notice.contains("`preferred` decides it"), "got {notice}");
+}
+
+// The ordinary case says nothing: every lister could serve, so no line is
+// doing anything the operator did not write it to do.
+#[test]
+fn listers_that_can_all_serve_raise_no_passed_over_notice() {
+    let mut a = Profile::new("work".to_string(), None, None);
+    a.preferred_days = vec![Weekday::Sat];
+    let mut b = Profile::new("personal".to_string(), None, None);
+    b.preferred_days = vec![Weekday::Sun];
+    let cfg = config_of(vec![a, b]);
+
+    assert_eq!(cfg.day_claim_passed_over(Weekday::Sat), None);
+    assert_eq!(cfg.day_claim_passed_over(Weekday::Sun), None);
+    assert_eq!(cfg.day_claim_passed_over(Weekday::Mon), None);
+}
+
 // `disabled` (the per-account exclusion toggle) must default to `false` so
 // every existing config.toml written before this field existed keeps loading
 // unchanged, matching `last_resort`'s guarantee above.
@@ -1619,6 +1999,7 @@ fn credential_and_cache_files_have_restricted_permissions() {
         weekly_threshold: None,
         last_resort: false,
         preferred: false,
+        preferred_days: Vec::new(),
         rolling_token: false,
         max_auto_spend: None,
         check_weekly: true,

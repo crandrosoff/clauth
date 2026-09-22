@@ -218,6 +218,12 @@ pub(crate) enum ConfigRow {
     /// OAuth-only auto-start toggle. `config_rows` renders it in the second
     /// slot (right below `Name`); declared here so the enum tracks that order.
     AutoStart,
+    /// `Profile::preferred_days` as a typed list (`sat, sun`). Sits with
+    /// `AutoStart` because both change how the chain treats this account,
+    /// rather than what it talks to. ⏎ opens an inline editor;
+    /// `profile::parse_day_list` reads what is typed, and the commit reseeds
+    /// the buffer from the canonical spelling.
+    PreferredDays,
     BaseUrl,
     ApiKey,
     /// Default model (CC `model` setting). Hybrid: space cycles aliases, ⏎ types a custom value.
@@ -282,6 +288,7 @@ impl ConfigRow {
         matches!(
             self,
             ConfigRow::Name
+                | ConfigRow::PreferredDays
                 | ConfigRow::BaseUrl
                 | ConfigRow::ApiKey
                 | ConfigRow::OpusModel
@@ -403,6 +410,9 @@ pub(crate) struct ConfigDraft {
     /// commit per-field on ⏎; new drafts buffer until the `create` row fires.
     pub(crate) editing_name: Option<String>,
     pub(crate) name: InputState,
+    /// The day list as typed (`sat, sun`), seeded from and reseeded to
+    /// `profile::render_preferred_days`' canonical spelling.
+    pub(crate) preferred_days: InputState,
     pub(crate) base_url: InputState,
     pub(crate) api_key: InputState,
     pub(crate) model: InputState,
@@ -452,6 +462,7 @@ impl ConfigDraft {
     pub(crate) fn field(&self, row: ConfigRow) -> Option<&InputState> {
         Some(match row {
             ConfigRow::Name => &self.name,
+            ConfigRow::PreferredDays => &self.preferred_days,
             ConfigRow::BaseUrl => &self.base_url,
             ConfigRow::ApiKey => &self.api_key,
             ConfigRow::Model => &self.model,
@@ -479,6 +490,7 @@ impl ConfigDraft {
     pub(crate) fn field_mut(&mut self, row: ConfigRow) -> Option<&mut InputState> {
         Some(match row {
             ConfigRow::Name => &mut self.name,
+            ConfigRow::PreferredDays => &mut self.preferred_days,
             ConfigRow::BaseUrl => &mut self.base_url,
             ConfigRow::ApiKey => &mut self.api_key,
             ConfigRow::Model => &mut self.model,
@@ -1940,6 +1952,14 @@ pub(crate) struct App {
     /// offset. Never compiled into the binary.
     #[cfg(test)]
     pub(crate) anim_phase_ms: Option<u64>,
+    /// The day-list notices last surfaced, empty while the lists are ordinary.
+    /// Holding the MESSAGES rather than a flag is what makes the gate right on
+    /// both axes `AppConfig::day_claim_collision` documents: each string
+    /// carries the day and the accounts, so it goes stale at midnight and on a
+    /// config edit, and is byte-equal on every tick between. Holding the SET
+    /// rather than one string is what keeps a second notice from repainting
+    /// the first.
+    pub(crate) day_claim_notices: Vec<String>,
     /// Tick counter; advances the activity spinner frame each `on_tick`.
     pub(crate) tick_count: u64,
     pub(crate) quit: bool,
@@ -2346,6 +2366,7 @@ impl App {
             started_at: Instant::now(),
             #[cfg(test)]
             anim_phase_ms: None,
+            day_claim_notices: Vec::new(),
             tick_count: 0,
             quit: false,
             armed_quit: false,
@@ -2640,8 +2661,7 @@ impl App {
                 // an exhaustion walk onto a clear preferred put us there.
                 let returned = self
                     .config()
-                    .find(&ProfileName::from(target.clone()))
-                    .is_some_and(|p| p.preferred);
+                    .is_home_today(&ProfileName::from(target.clone()));
                 let msg = if returned {
                     format!("returned to preferred account '{target}'")
                 } else {
@@ -6975,6 +6995,11 @@ pub(crate) fn config_rows(app: &App) -> Vec<ConfigRow> {
     if !is_api {
         rows.push(ConfigRow::AutoStart);
     }
+    // The day list keeps auto-start company: the two rows on this card that
+    // change how the CHAIN treats the account, above the endpoint/model rows
+    // that describe what it talks to. Existing accounts only — same rule the
+    // env rows follow, and the `+ new` form has no chain seat to claim from yet.
+    rows.push(ConfigRow::PreferredDays);
     rows.push(ConfigRow::BaseUrl);
     if is_api {
         rows.push(ConfigRow::ApiKey);
@@ -7087,6 +7112,7 @@ pub(crate) fn build_draft_new() -> ConfigDraft {
     ConfigDraft {
         editing_name: None,
         name: InputState::new(""),
+        preferred_days: InputState::new(""),
         base_url: InputState::new(""),
         api_key: InputState::new(""),
         model: InputState::new(""),
@@ -7113,6 +7139,7 @@ fn build_draft_existing(app: &App, name: &ProfileName) -> ConfigDraft {
     ConfigDraft {
         editing_name: Some(name.to_string()),
         name: InputState::new(name),
+        preferred_days: InputState::new(&preferred_days_buffer(profile)),
         base_url: InputState::new(profile.and_then(|p| p.base_url.as_deref()).unwrap_or("")),
         api_key: InputState::new(profile.and_then(|p| p.api_key.as_deref()).unwrap_or("")),
         model: InputState::new(m.default.as_deref().unwrap_or("")),
@@ -7957,11 +7984,22 @@ fn cancel_just_added_env(app: &mut App, name: &ProfileName, key: &str) {
     }
 }
 
+/// A profile's day list as the editor shows it: the canonical lowercase
+/// three-letter names, comma-separated. One spelling for the seed, the ⎋
+/// revert and the post-commit reseed, so `Saturday, SUN` settles to `sat, sun`
+/// in the field exactly as it settles on disk.
+fn preferred_days_buffer(profile: Option<&Profile>) -> String {
+    profile
+        .map(|p| crate::profile::render_preferred_days(&p.preferred_days).join(", "))
+        .unwrap_or_default()
+}
+
 /// The persisted value behind a buffered row, used to revert on ⎋ and to reseed
 /// the buffer after a commit. Toggle/action rows have no buffer → empty string.
 fn row_committed_value(profile: Option<&Profile>, name: &ProfileName, row: ConfigRow) -> String {
     match row {
         ConfigRow::Name => name.to_string(),
+        ConfigRow::PreferredDays => preferred_days_buffer(profile),
         ConfigRow::BaseUrl => profile.and_then(|p| p.base_url.clone()).unwrap_or_default(),
         ConfigRow::ApiKey => profile.and_then(|p| p.api_key.clone()).unwrap_or_default(),
         ConfigRow::Model => profile
@@ -8014,6 +8052,7 @@ fn commit_config_field(app: &mut App, field: ConfigRow) {
     }
     match field {
         ConfigRow::Name => commit_rename(app),
+        ConfigRow::PreferredDays => commit_preferred_days(app),
         ConfigRow::BaseUrl | ConfigRow::ApiKey => commit_endpoint(app),
         ConfigRow::Model
         | ConfigRow::OpusModel
@@ -8028,6 +8067,80 @@ fn commit_config_field(app: &mut App, field: ConfigRow) {
                 d.active = None;
             }
         }
+    }
+}
+
+/// ⏎ on the day row: parse the typed list, persist it, then reseed the buffer
+/// from the saved value so the canonical spelling lands in the field.
+///
+/// An entry that does not parse leaves the editor OPEN with the typing intact
+/// — the loader drops a bad entry because a file nobody is watching must still
+/// load, but here the operator is standing at the field and can fix it.
+///
+/// A saved list on an account the chain walk would skip claims nothing
+/// (`AppConfig::is_home_on` lets only members the claim scan reaches claim), so
+/// the save is followed by the reason. Saved rather than refused because the
+/// state is reachable without this row — a list goes inert when the account
+/// later leaves the chain or its login breaks — and a row that quietly does
+/// nothing is worse than one that says why.
+fn commit_preferred_days(app: &mut App) {
+    let Some(name) = app
+        .config_draft
+        .as_ref()
+        .and_then(|d| d.editing_name.clone())
+        .map(ProfileName::from)
+    else {
+        return;
+    };
+    let raw = app
+        .config_draft
+        .as_ref()
+        .and_then(|d| d.field(ConfigRow::PreferredDays))
+        .map(|i| i.trimmed().to_string())
+        .unwrap_or_default();
+    let days = match crate::profile::parse_day_list(&raw) {
+        Ok(days) => days,
+        Err(bad) => {
+            app.toast(
+                ToastKind::Danger,
+                format!("'{bad}' is not a weekday\nuse sat, sun — or saturday, sunday"),
+            );
+            return;
+        }
+    };
+    let claims = !days.is_empty();
+    let result = {
+        let mut cfg = app.config();
+        crate::actions::edit_profile_preferred_days(&mut cfg, &name, days)
+    };
+    match result {
+        Ok(()) => {
+            let (value, blocker) = {
+                let cfg = app.config();
+                (
+                    preferred_days_buffer(cfg.find(&name)),
+                    claims
+                        .then(|| crate::fallback::day_claim_blocker(&cfg, &name))
+                        .flatten(),
+                )
+            };
+            if let Some(d) = app.config_draft.as_mut() {
+                if let Some(input) = d.field_mut(ConfigRow::PreferredDays) {
+                    *input = InputState::new(&value);
+                }
+                d.active = None;
+            }
+            if let Some(reason) = blocker {
+                app.toast(
+                    ToastKind::Warning,
+                    format!(
+                        "saved, but this list claims nothing: {reason}\nthe chain decides those \
+                         days without this account"
+                    ),
+                );
+            }
+        }
+        Err(e) => app.toast(ToastKind::Danger, format!("home days update failed\n{e}")),
     }
 }
 
@@ -8092,6 +8205,7 @@ fn apply_model_field(models: &mut ModelSettings, field: ConfigRow, raw: &str) {
         // `ConfigRow` variant fails the build instead of a silent no-op.
         ConfigRow::Name
         | ConfigRow::AutoStart
+        | ConfigRow::PreferredDays
         | ConfigRow::BaseUrl
         | ConfigRow::ApiKey
         | ConfigRow::ModelOverrideAdd
@@ -10185,7 +10299,7 @@ pub(crate) fn on_tick(app: &mut App) {
         // can also land here when the preferred is the only clear member left —
         // both are genuinely "now on home", so the destination-based label holds
         // without threading the cause through `SwitchAction`.
-        let returning = app.config().find(&name).is_some_and(|p| p.preferred);
+        let returning = app.config().is_home_today(&name);
         let msg = if returning {
             format!("returning to preferred account '{name}'")
         } else {
@@ -10209,8 +10323,36 @@ pub(crate) fn on_tick(app: &mut App) {
     poll_plugin_refresh(app);
     poll_daemon_health(app);
 
+    warn_day_claim_notices(app);
     update_banner(app);
     app.prune_toasts();
+}
+
+/// Say once, per day and per config change, what today's day lists are doing
+/// that the operator did not write them to do. Toast for the operator at the
+/// keyboard, `logline!` for the record a headless run leaves behind.
+///
+/// Gated on the notice text rather than on a bool because the chain pass that
+/// resolves the claim re-runs every tick: an ungated warning would repaint the
+/// same line until midnight, and a bool one would stay silent when the
+/// operator edits a second list in while the first notice is still up.
+/// Dropping a notice out of the set is what lets the same state, removed and
+/// re-introduced, warn again.
+pub(crate) fn warn_day_claim_notices(app: &mut App) {
+    let notices = app.config().day_claim_notices_today();
+    if notices == app.day_claim_notices {
+        return;
+    }
+    let fresh: Vec<String> = notices
+        .iter()
+        .filter(|m| !app.day_claim_notices.contains(m))
+        .cloned()
+        .collect();
+    for msg in fresh {
+        crate::logline::logline!("clauth: {msg}");
+        app.toast(ToastKind::Warning, msg);
+    }
+    app.day_claim_notices = notices;
 }
 
 /// Re-read the codex roster for the Overview's codex section and the header's

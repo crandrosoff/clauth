@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use chrono::{Datelike, Local, Weekday};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -371,6 +372,14 @@ pub(crate) struct Profile {
     /// here" are contradictory verdicts. Default off. See
     /// `fallback::next_auto_switch_target`'s return-to-preferred pass.
     pub(crate) preferred: bool,
+    /// Weekdays on which this account is the home account, read in the
+    /// machine's local zone. Empty — the default — leaves `preferred` in
+    /// charge. A named day is claimed against every account, not just this
+    /// one, and `preferred` keeps the days no list claims: see
+    /// [`AppConfig::is_home_on`], which is where the question is actually
+    /// answered and which only lets serving chain members claim. Lets one account own the weekend without an external
+    /// job rewriting `config.toml` twice a day.
+    pub(crate) preferred_days: Vec<Weekday>,
     /// CLA-ROLL: the daemon re-stamps this profile's `session-token.json` with the
     /// usage chain's current access token on every rotation (full scopes,
     /// `subscriptionType` and `rateLimitTier`, no refresh token — sessions get
@@ -440,6 +449,7 @@ impl Profile {
             weekly_threshold: None,
             last_resort: false,
             preferred: false,
+            preferred_days: Vec::new(),
             rolling_token: false,
             max_auto_spend: None,
             check_weekly: true,
@@ -1240,6 +1250,155 @@ impl AppConfig {
         self.state.active_profile.as_ref() == Some(name)
     }
 
+    /// Whether `name` is the home account on `day`, decided across the whole
+    /// profile list rather than per profile.
+    ///
+    /// A day list claims its days EXCLUSIVELY: on a day some profile names,
+    /// only the profiles naming it are home, and a bare `preferred = true`
+    /// elsewhere stands down for that day. Resolving this per profile instead
+    /// would leave the flag claiming all seven, so the two-account split an
+    /// operator actually wants — weekdays here, weekends there — would need a
+    /// list on both sides, and getting one wrong reads as first-match luck in
+    /// `fallback.rs` rather than as a mistake.
+    ///
+    /// On a day nobody names, `preferred` decides exactly as before.
+    ///
+    /// Only chain members the walk would actually visit are ever home. A
+    /// profile off the chain, or one `walk_excluded` skips (unresolvable,
+    /// auth-broken, disabled), never serves — so its list must not stand the
+    /// flag down and leave the day with nobody home, and its own flag must not
+    /// mark it home on the days no list claims. Reading the chain rather than
+    /// `profiles` follows the spend warning, which is on the chain for the
+    /// same reason.
+    pub(crate) fn is_home_on(&self, name: &ProfileName, day: Weekday) -> bool {
+        // An account the walk would never visit is home on NO day: a list on it
+        // claims nothing, and its flag decides nothing either. One guard at the
+        // entry rather than one per branch — the gap this closes was exactly a
+        // branch that did not repeat the check, and a third branch would repeat
+        // the gap. Redundant on the claimed branch, where `day_listers` has
+        // already applied it; the redundancy is what makes the omission
+        // impossible.
+        if !crate::fallback::serves_the_chain(self, name) {
+            return false;
+        }
+        let mut listers = self.day_listers(day);
+        match listers.next() {
+            // Home on a claimed day IS the claimant set, asked of the scan
+            // rather than re-derived beside it. A second predicate drifts:
+            // `walk_excluded` alone reads an off-chain account as eligible, so
+            // a healthy non-member with a matching list answered home here
+            // while the scan refused it the same claim.
+            Some(first) => first == name || listers.any(|n| n == name),
+            None => self.find(name).is_some_and(|p| p.preferred),
+        }
+    }
+
+    /// Chain members that name `day` and could actually serve it, in chain
+    /// order. Empty when the day is unclaimed, which is what hands it back to
+    /// `preferred`.
+    pub(crate) fn day_listers(&self, day: Weekday) -> impl Iterator<Item = &ProfileName> {
+        self.state
+            .fallback_chain
+            .iter()
+            .filter(move |n| !crate::fallback::walk_excluded(self, n))
+            .filter(move |n| {
+                self.find(n)
+                    .is_some_and(|p| p.preferred_days.contains(&day))
+            })
+    }
+
+    /// The day-list collision notice for `day`: what to log and toast when more
+    /// than one chain member that could serve names the same day. `None` on the
+    /// ordinary zero-or-one claimant.
+    ///
+    /// Nothing is broken by a collision — the return pass takes the first
+    /// claimant that reads clear — but the operator wrote two lines expecting
+    /// one home, so the state is worth saying out loud once.
+    ///
+    /// The message doubles as its callers' once-gate key: it names the day and
+    /// the claimants in chain order, so it changes exactly when the midnight
+    /// rollover or a config edit changes what is being warned about, and stays
+    /// byte-equal across every tick in between.
+    pub(crate) fn day_claim_collision(&self, day: Weekday) -> Option<String> {
+        let names: Vec<String> = self.day_listers(day).map(|n| format!("'{n}'")).collect();
+        if names.len() < 2 {
+            return None;
+        }
+        Some(format!(
+            "{} accounts claim {}: {} — the chain returns to whichever of them reads clear first",
+            names.len(),
+            day.to_string().to_ascii_lowercase(),
+            names.join(", "),
+        ))
+    }
+
+    /// The passed-over-lister notice for `day`: what to say when an account
+    /// names the day but could not serve it, so its line does nothing.
+    /// `None` when every lister could serve, which is the ordinary case.
+    ///
+    /// The editor warns at save time, but a list goes inert LATER too — the
+    /// account leaves the chain, is disabled, or its login breaks — and a
+    /// hand-edited `config.toml` never passes the editor at all. Neither
+    /// reaches the operator without a tick-time notice.
+    ///
+    /// Same gate-key scheme as [`AppConfig::day_claim_collision`]: the day, the
+    /// blocked accounts in profile-list order, and what became of the day are
+    /// all in the message.
+    pub(crate) fn day_claim_passed_over(&self, day: Weekday) -> Option<String> {
+        let blocked: Vec<String> = self
+            .profiles
+            .iter()
+            .filter(|p| p.preferred_days.contains(&day))
+            .filter_map(|p| {
+                crate::fallback::day_claim_blocker(self, &p.name)
+                    .map(|why| format!("'{}' ({why})", p.name))
+            })
+            .collect();
+        if blocked.is_empty() {
+            return None;
+        }
+        let named = day.to_string().to_ascii_lowercase();
+        // What happened to the day, not just that a line is inert: a carried
+        // day still has somebody home and reads as a stray line, while an
+        // uncarried one has quietly fallen back to the flag.
+        let tail = match self.day_listers(day).next() {
+            Some(carrier) => format!("'{carrier}' carries it"),
+            None => format!("nothing else claims {named}, so `preferred` decides it"),
+        };
+        let subject = if blocked.len() == 1 {
+            "the list on"
+        } else {
+            "the lists on"
+        };
+        Some(format!(
+            "{named}: {subject} {} cannot claim it — {tail}",
+            blocked.join(", ")
+        ))
+    }
+
+    /// Today's day-list notices in the machine's local zone, in a fixed order.
+    ///
+    /// Each entry is its own gate key, so a caller holding the previous set
+    /// emits only what is new rather than repainting the rest — a second list
+    /// arriving must not re-toast a collision the operator has already read.
+    pub(crate) fn day_claim_notices_today(&self) -> Vec<String> {
+        let day = Local::now().weekday();
+        [
+            self.day_claim_collision(day),
+            self.day_claim_passed_over(day),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// [`AppConfig::is_home_on`] for today in the machine's local zone. Called
+    /// per chain build rather than at load: the fingerprint that drives a hot
+    /// reload is built from `config.toml` mtimes, and midnight moves no file.
+    pub(crate) fn is_home_today(&self, name: &ProfileName) -> bool {
+        self.is_home_on(name, Local::now().weekday())
+    }
+
     /// True when `name`'s last OAuth refresh was rejected as revoked/invalid
     /// (AUTH-1). Such a profile is skipped by the fallback chain walk.
     pub(crate) fn is_auth_broken(&self, name: &ProfileName) -> bool {
@@ -1462,6 +1621,12 @@ struct ProfileConfig {
     rolling_token: bool,
     #[serde(default)]
     preferred: bool,
+    /// Weekday names behind [`Profile::preferred_days`]. Strings rather than a
+    /// typed enum so a typo costs one entry instead of the whole profile —
+    /// `load_profile` drops what it cannot read, and the canonical rewrite then
+    /// drops it from disk, which is the visible signal it was not understood.
+    #[serde(default)]
+    preferred_days: Vec<String>,
     #[serde(default)]
     max_auto_spend: Option<f64>,
     /// `Option` (not `bool`) so the derived `Default` and an absent key agree:
@@ -2856,6 +3021,7 @@ pub(crate) fn load_profile(name: &ProfileName) -> Result<Profile> {
             .filter(|v| (MIN_WEEKLY_SWITCH_PCT..=MAX_WEEKLY_SWITCH_PCT).contains(v)),
         last_resort: config.last_resort,
         preferred: config.preferred,
+        preferred_days: parse_preferred_days(&config.preferred_days),
         rolling_token: config.rolling_token,
         // Normalize at the LOAD boundary so the on-disk value is never a live
         // trap for a direct reader (the 2026-07-14 weekly-line lesson). `inf`
@@ -2901,6 +3067,7 @@ fn maybe_rewrite_config_toml(config_path: &Path, raw_config: &str, profile: &Pro
                 weekly_threshold: profile.weekly_threshold,
                 last_resort: profile.last_resort,
                 preferred: profile.preferred,
+                preferred_days: render_preferred_days(&profile.preferred_days),
                 rolling_token: profile.rolling_token,
                 max_auto_spend: profile.max_auto_spend,
                 // Default-on booleans render as commented examples when on, so
@@ -3211,6 +3378,55 @@ pub(crate) fn load_config() -> Result<AppConfig> {
     Ok(AppConfig { state, profiles })
 }
 
+/// `preferred_days` entries → weekdays, keeping the written order and dropping
+/// duplicates. Parsing is chrono's, which takes full names and three-letter
+/// forms in any case (`Sat`, `saturday`). An entry that does not parse is
+/// DROPPED rather than failing the load: one typo in a day list must not take
+/// the profile with it, and the canonical rewrite then drops it from disk,
+/// which is the visible signal that it was not understood.
+fn parse_preferred_days(raw: &[String]) -> Vec<Weekday> {
+    let mut out: Vec<Weekday> = Vec::new();
+    for entry in raw {
+        if let Ok(day) = entry.trim().parse::<Weekday>()
+            && !out.contains(&day)
+        {
+            out.push(day);
+        }
+    }
+    out
+}
+
+/// A typed day list → weekdays, for the Setup tab's editor. Commas and
+/// whitespace both separate, so `sat sun` and `sat, sun` land the same, and the
+/// entries themselves go through the loader's chrono parse.
+///
+/// `Err` carries the first entry that did not parse, where [`parse_preferred_days`]
+/// drops it: the loader is reading a file nobody is watching, so one typo must
+/// not take the profile with it — a human who just typed the word is owed the
+/// refusal instead.
+pub(crate) fn parse_day_list(raw: &str) -> Result<Vec<Weekday>, String> {
+    let mut out: Vec<Weekday> = Vec::new();
+    for entry in raw.split([',', ' ', '\t']) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let day = entry.parse::<Weekday>().map_err(|_| entry.to_string())?;
+        if !out.contains(&day) {
+            out.push(day);
+        }
+    }
+    Ok(out)
+}
+
+/// The canonical on-disk spelling: lowercase three-letter names, so a rewrite
+/// of a hand-written `["Saturday", "SUN"]` settles instead of alternating.
+pub(crate) fn render_preferred_days(days: &[Weekday]) -> Vec<String> {
+    days.iter()
+        .map(|d| d.to_string().to_ascii_lowercase())
+        .collect()
+}
+
 /// Renders config.toml with set values uncommented and unset ones as commented examples.
 fn render_config_toml(profile: &Profile) -> String {
     fn toml_str(s: &str) -> String {
@@ -3285,6 +3501,33 @@ fn render_config_toml(profile: &Profile) -> String {
         out.push_str("preferred = true\n");
     } else {
         out.push_str("# preferred = true\n");
+    }
+    out.push('\n');
+
+    out.push_str("# Weekdays this account is the home account, in local time. Empty (the\n");
+    out.push_str("# default) leaves `preferred` above in charge every day. A non-empty list\n");
+    out.push_str("# CLAIMS those days against every account — a bare `preferred` elsewhere\n");
+    out.push_str("# stands down on them — while `preferred` still decides the days no list\n");
+    out.push_str("# claims, here and everywhere. Only chain members that could actually\n");
+    out.push_str("# serve claim: a list on a removed, disabled or auth-broken account is\n");
+    out.push_str("# inert. Full names and three-letter forms both parse, and an entry that\n");
+    out.push_str("# does not is dropped on the next rewrite.\n");
+    if profile.preferred_days.is_empty() {
+        out.push_str("# preferred_days = [\"sat\", \"sun\"]\n");
+    } else {
+        out.push_str("preferred_days = [");
+        for (i, day) in render_preferred_days(&profile.preferred_days)
+            .iter()
+            .enumerate()
+        {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push('"');
+            out.push_str(day);
+            out.push('"');
+        }
+        out.push_str("]\n");
     }
     out.push('\n');
 

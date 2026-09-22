@@ -196,6 +196,7 @@ A codex profile's own `config.toml` carries `harness = "codex"` and one optional
 | `check_scoped` | bool | `true` | count per-model weekly windows against this account |
 | `last_resort` | bool | `false` | the chain's parking spot |
 | `preferred` | bool | `false` | the home account clauth returns to once it is clear |
+| `preferred_days` | string array | `[]` | weekdays this account is home, in local time; claims those days against every account, while `preferred` keeps the days no list claims |
 | `max_auto_spend` | float | `0.0` | dollar ceiling on pay-as-you-go fallback |
 | `bell_threshold` | float | none | 5h % that fires a bell toast |
 | `rolling_token` | bool | `false` | daemon re-stamps the sidecar from the usage chain; set by `clauth rolling-token`, cleared by `clauth static-token` (bare or `--clear`) |
@@ -205,6 +206,19 @@ A codex profile's own `config.toml` carries `harness = "codex"` and one optional
 | `hooks_json` | bool | `false` | codex profiles only: link your `~/.codex/hooks.json` into that profile's shared session homes, so those hooks run inside `clauth start` sessions too. Off, the file is left out of every session home ([Codex](Codex#run)) |
 
 `last_resort` and `preferred` are radio toggles across the chain: marking one clears it everywhere else, and no account can be both.
+
+`preferred_days` has a `home days` row on the Setup tab: type the weekdays separated by commas or spaces and <kbd>⏎</kbd> saves, an empty field clears the list. The Fallback card's `preferred` row names the days once a list is set, and the Overview's `⌂` follows whichever account is home today. Full names and three-letter forms parse in any case (`["sat", "Sunday"]`); a hand-written entry that does not parse is dropped on the next rewrite, while the row refuses it and keeps the field open. The list is re-read per chain build, so the rollover at midnight needs no restart.
+
+A list only claims from an account the chain walk would actually visit, so one on an account that is off the chain, disabled or auth-broken claims nothing — the `home days` row says which of those is in the way, before and after the save. A list can also go inert later, or arrive by hand-editing the file, so clauth says the same at run time: once a day, naming the account, the reason, and whether another list carried the day or it fell back to `preferred`.
+
+**A named day is claimed against every account.** On a day some list names, only the accounts naming it are home; a bare `preferred = true` elsewhere stands down for that day and takes charge again on the days no list claims. So the usual split is one line in one profile:
+
+```toml
+# ~/.clauth/profiles/personal/config.toml — work keeps plain `preferred = true`
+preferred_days = ["sat", "sun"]
+```
+
+Two accounts naming the same day is not rejected: the chain returns to whichever of them reads clear first, so nothing is left with nobody home. clauth still says so once — a toast in the TUI, a line in the log — and says it again at the midnight rollover or after an edit, never once per tick.
 
 ## Storage layout
 

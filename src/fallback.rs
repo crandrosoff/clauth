@@ -878,10 +878,12 @@ pub(crate) struct ChainMember {
     /// decoupled from `threshold` (issue #8 follow-up: a threshold no longer
     /// doubles as a sink marker).
     pub(crate) last_resort: bool,
-    /// Mirrors `Profile::preferred` — the operator's home account. At most one
-    /// chain member carries it (radio toggle). Drives the return-to-preferred
-    /// pass in [`next_auto_switch_target`] and preferred-wins wrap-off recovery
-    /// in [`find_recovered_member`].
+    /// Today's home account, resolved by [`AppConfig::is_home_today`] rather
+    /// than read off `Profile::preferred`. On a day some profile names, every
+    /// chain member naming it carries this; on an unclaimed day the bare flag
+    /// decides and at most one does. Drives the return-to-preferred pass in
+    /// [`next_auto_switch_target`] and preferred-wins wrap-off recovery in
+    /// [`find_recovered_member`], both of which walk ALL carriers.
     pub(crate) preferred: bool,
     /// Mirrors `Profile::max_auto_spend` in dollars, `0` when unset — the
     /// member's own ceiling on unattended pay-as-you-go spending.
@@ -1116,7 +1118,7 @@ fn chain_member(config: &AppConfig, name: &ProfileName, weekly_pct: f64) -> Chai
         name: name.clone(),
         threshold: profile.map(threshold_for).unwrap_or(DEFAULT_THRESHOLD),
         last_resort: profile.is_some_and(|p| p.last_resort),
-        preferred: profile.is_some_and(|p| p.preferred),
+        preferred: config.is_home_today(name),
         max_spend: profile.and_then(|p| p.max_auto_spend).unwrap_or(0.0),
         weekly_line: profile
             .map(|p| member_weekly_line(p, weekly_pct))
@@ -1545,6 +1547,43 @@ pub(crate) fn walk_excluded(config: &AppConfig, name: &ProfileName) -> bool {
     p.is_none() || config.is_auth_broken(name) || p.is_some_and(Profile::is_disabled)
 }
 
+/// Whether the chain walk would ever visit `name`: a member of the chain, and
+/// past [`walk_excluded`].
+///
+/// The ONE eligibility behind `AppConfig::is_home_on` — an account the walk
+/// cannot reach is home on no day, whether a list would claim it or the flag
+/// would — and behind the day-list editor's refusal, which needs the same
+/// judgment in the reason form [`day_claim_blocker`] carries. Defined in terms
+/// of that function rather than beside it, so the two cannot drift.
+pub(crate) fn serves_the_chain(config: &AppConfig, name: &ProfileName) -> bool {
+    day_claim_blocker(config, name).is_none()
+}
+
+/// Why a day list on `name` claims nothing, phrased for the editor's refusal;
+/// `None` when the account could actually serve the days it names. The reason
+/// form of [`serves_the_chain`].
+///
+/// The gates are [`walk_excluded`]'s, plus the chain-membership test that
+/// `AppConfig::is_home_on`'s claim scan runs ahead of it, ordered the way an
+/// operator would fix them: put the account on the chain first, then get it
+/// healthy. Only the first is reported — a list cannot be less inert for
+/// clearing one of two blockers, and naming both reads as two problems.
+pub(crate) fn day_claim_blocker(config: &AppConfig, name: &ProfileName) -> Option<&'static str> {
+    let Some(profile) = config.find(name) else {
+        return Some("no such account");
+    };
+    if !config.state.fallback_chain.iter().any(|n| n == name) {
+        return Some("it is not on the fallback chain");
+    }
+    if profile.is_disabled() {
+        return Some("the account is disabled");
+    }
+    if config.is_auth_broken(name) {
+        return Some("its login is auth-broken");
+    }
+    None
+}
+
 /// [`walk_excluded`] plus canceled, for the UI-thread selection walks
 /// (`next_target`, `fully_clear_target`) that read `Profile.usage` — kept fresh
 /// by `App::apply_usage`. `is_canceled` reads that config-cached plan; the
@@ -1914,13 +1953,23 @@ fn next_auto_switch_target_with_usage(
         // a `last_resort` sink is a refuge ("serve here for free until dead"),
         // not a permanent park — the operator's home account outranks it when
         // home is clear and fresh.
-        if let Some(pref) = snapshot.chain.iter().find(|m| m.preferred)
-            && pref.name != active.name
-            && snapshot.fresh.iter().any(|n| n == &active.name)
-            && let Some(pi) = snapshot.chain.iter().position(|m| m.name == pref.name)
-            && !skip(pi)
-            && clear(&snapshot.chain[pi])
-            && snapshot.fresh.iter().any(|n| n == &pref.name)
+        // Every home member is a candidate, not just the first. A day list can
+        // name more than one account, and on a claimed day they all carry the
+        // marker; taking `find`'s first and then failing the gates below would
+        // bail the whole return pass while a later lister sits clear.
+        if snapshot.fresh.iter().any(|n| n == &active.name)
+            && let Some(pref) = snapshot
+                .chain
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.preferred)
+                .find(|(pi, m)| {
+                    m.name != active.name
+                        && !skip(*pi)
+                        && clear(m)
+                        && snapshot.fresh.iter().any(|n| n == &m.name)
+                })
+                .map(|(_, m)| m)
         {
             return Some(SwitchAction::To(pref.name.to_string()));
         }
@@ -2161,8 +2210,12 @@ pub(crate) fn find_recovered_member(
     // read; `recovered(_, false)` matches "recovered on the aggregate" — home
     // beats staying off even while a per-model window still gates it. Walk
     // order never outranks it: the mode orders only the passes past it.
-    if let Some(pref) = chain.iter().find(|m| m.preferred)
-        && recovered(pref, false) == Some(true)
+    // Same as the return pass: all home members are candidates, so a first
+    // lister that has not recovered does not hide a later one that has.
+    if let Some(pref) = chain
+        .iter()
+        .filter(|m| m.preferred)
+        .find(|m| recovered(m, false) == Some(true))
     {
         return Some(pref.name.to_string());
     }

@@ -63,6 +63,8 @@ Two radio toggles on a member's Fallback card. Marking one clears it on every ot
 - **`preferred`** is the home account. Once it reads clear and fresh, clauth walks back to it on its own, from wherever the chain left you.
 - **`walk order`** (Config tab) reorders each accept pass by the soonest weekly reset when set to `soonest weekly reset`: the member whose 7d window resets soonest drains first, so less quota expires unspent; ties keep chain position, and a member with no readable reset ranks last. The default `chain` is today's walk exactly. With no `preferred` set, a healthy active walks home to the soonest-reset clear+fresh member and parks there. Every other gate is unchanged: the mode only reorders members that already pass.
 
+Which account is home can also depend on the day. A `preferred_days` list in a profile's `config.toml` ([Configuration](Configuration#configtoml)) names the weekdays that account is home, in local time, and those days are claimed against every account: a plain `preferred` elsewhere stands down on them and holds the rest. Only chain members that could actually serve are home at all: a list on an account that is off the chain, disabled, or auth-broken is inert, so it never leaves a day with nobody home, and a plain `preferred` on such an account is inert too rather than marking a homecoming the walk cannot make. One line on the weekend account is the whole weekday / weekend split, and the rollover needs no restart. The list reaches the claude chain only — the codex chain has no home account, so `preferred_days` does nothing there.
+
 ## When everyone is out
 
 With no `last resort` member, the chain-global `quota spent` setting decides:

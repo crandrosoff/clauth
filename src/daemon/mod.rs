@@ -875,6 +875,12 @@ struct Daemon {
     /// Count of ACTUAL failure-log emissions (post-dedup) — the observable proof a
     /// stuck switch isn't logging 1/tick. Read by tests.
     switch_failure_logs: u64,
+    /// The day-list notices last logged, empty while the lists are ordinary.
+    /// Same dedup shape as `switch_backoff` above and for the same reason: the
+    /// condition is re-derived every tick, so each message is its own key — it
+    /// changes at the midnight rollover and on a config edit, and is
+    /// byte-equal in between (`AppConfig::day_claim_notices_today`).
+    day_claim_notices: Vec<String>,
     status_path: PathBuf,
 }
 
@@ -912,6 +918,7 @@ impl Daemon {
             heartbeat: Arc::new(AtomicU64::new(0)),
             switch_backoff: None,
             switch_failure_logs: 0,
+            day_claim_notices: Vec::new(),
             status_path,
         }
     }

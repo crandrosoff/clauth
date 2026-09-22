@@ -868,8 +868,9 @@ fn config_rows_account_actions_tail_matches_runtime_order() {
     let rows = config_rows(&app);
     // Full runtime sequence for this fixture (OAuth account, no base url, no
     // overrides, no custom env, holding OAuth credentials): auto-start in the
-    // second slot, the alias overrides collapsed behind `ModelOverrideAdd`, no
-    // env rows, then the login/delete-creds/disabled/delete action tail. A
+    // second slot with the day row beside it, the alias overrides collapsed
+    // behind `ModelOverrideAdd`, no env rows, then the
+    // login/delete-creds/disabled/delete action tail. A
     // future reorder of `config_rows`' row-construction (the `rows.push(...)`
     // builder) reds here; a match-arm reorder elsewhere is unobservable at
     // runtime and isn't what this test guards.
@@ -878,6 +879,7 @@ fn config_rows_account_actions_tail_matches_runtime_order() {
         [
             ConfigRow::Name,
             ConfigRow::AutoStart,
+            ConfigRow::PreferredDays,
             ConfigRow::BaseUrl,
             ConfigRow::Model,
             ConfigRow::ModelOverrideAdd,
@@ -9078,6 +9080,7 @@ fn mini_profile(name: &str, api_key: Option<&str>) -> Profile {
         weekly_threshold: None,
         last_resort: false,
         preferred: false,
+        preferred_days: Vec::new(),
         rolling_token: false,
         max_auto_spend: None,
         check_weekly: true,
@@ -11897,4 +11900,262 @@ fn the_codex_only_view_disarms_the_claude_selection_keys() {
     };
     re_armed(&mut app, HarnessFilter::All, ["b", "a"]);
     re_armed(&mut app, HarnessFilter::Claude, ["a", "b"]);
+}
+
+// ── the Setup tab's day row ─────────────────────────────────────────────────
+
+fn app_with_chain(profiles: Vec<crate::profile::Profile>) -> App {
+    use crate::profile::{AppConfig, AppState};
+    let names: Vec<crate::profile::ProfileName> = profiles.iter().map(|p| p.name.clone()).collect();
+    App::new(AppConfig {
+        state: AppState {
+            profiles: names.clone(),
+            fallback_chain: names,
+            ..AppState::default()
+        },
+        profiles,
+    })
+}
+
+/// The row is an existing account's, next to `auto-start`. The `+ new` form
+/// stays out: the account has no chain seat yet, so a list typed there would
+/// claim nothing and say so on a form that cannot fix it.
+#[test]
+fn the_day_row_sits_with_auto_start_and_skips_the_new_form() {
+    use super::{ConfigRow, config_rows};
+    use crate::profile::Profile;
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
+    app.config_draft = None;
+
+    app.profile_cursor = 0;
+    let rows = config_rows(&app);
+    let day = rows
+        .iter()
+        .position(|r| *r == ConfigRow::PreferredDays)
+        .expect("an existing account has the day row");
+    let auto_start = rows
+        .iter()
+        .position(|r| *r == ConfigRow::AutoStart)
+        .expect("an oauth account has auto-start");
+    assert_eq!(
+        day,
+        auto_start + 1,
+        "the two chain-behaviour rows sit together"
+    );
+
+    app.profile_cursor = 1; // the `+ new` action row
+    assert!(
+        !config_rows(&app).contains(&ConfigRow::PreferredDays),
+        "the create form has no day row"
+    );
+}
+
+/// ⏎ parses what was typed, saves it, and reseeds the field with the canonical
+/// spelling — the same settling a rewrite of a hand-written list does, so the
+/// field and the file never disagree about `Saturday` vs `sat`.
+#[test]
+fn committing_a_day_list_saves_and_reseeds_the_canonical_spelling() {
+    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
+    use crate::profile::{Profile, ProfileName};
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
+    app.profile_cursor = 0;
+    let mut draft = build_draft_existing(&app, &ProfileName::from("work"));
+    draft.preferred_days = InputState::new("Saturday, SUN");
+    draft.active = Some(ConfigRow::PreferredDays);
+    app.config_draft = Some(draft);
+
+    commit_config_field(&mut app, ConfigRow::PreferredDays);
+
+    assert_eq!(
+        app.config()
+            .find(&ProfileName::from("work"))
+            .map(|p| p.preferred_days.clone()),
+        Some(vec![chrono::Weekday::Sat, chrono::Weekday::Sun]),
+        "the typed list lands on the profile"
+    );
+    let draft = app
+        .config_draft
+        .as_ref()
+        .expect("draft survives the commit");
+    assert_eq!(draft.preferred_days.value, "sat, sun");
+    assert_eq!(draft.active, None, "the editor closes on a good commit");
+}
+
+/// A word that is not a weekday names itself and leaves the editor open with
+/// the typing intact: the loader drops a bad entry because a file nobody is
+/// watching must still load, but the operator is standing at this field.
+#[test]
+fn a_day_list_typo_names_the_word_and_keeps_the_editor_open() {
+    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
+    use crate::profile::{Profile, ProfileName};
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
+    app.profile_cursor = 0;
+    let mut draft = build_draft_existing(&app, &ProfileName::from("work"));
+    draft.preferred_days = InputState::new("sat, funday");
+    draft.active = Some(ConfigRow::PreferredDays);
+    app.config_draft = Some(draft);
+
+    commit_config_field(&mut app, ConfigRow::PreferredDays);
+
+    assert!(
+        app.config()
+            .find(&ProfileName::from("work"))
+            .is_some_and(|p| p.preferred_days.is_empty()),
+        "nothing is saved from a list that does not parse"
+    );
+    let draft = app.config_draft.as_ref().expect("draft survives");
+    assert_eq!(
+        draft.active,
+        Some(ConfigRow::PreferredDays),
+        "editor stays open"
+    );
+    assert_eq!(draft.preferred_days.value, "sat, funday", "typing survives");
+    assert!(
+        app.toasts.iter().any(|t| t.body.contains("'funday'")),
+        "the refusal names the word, got {:?}",
+        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
+    );
+}
+
+/// A list on an account the walk skips is saved and then explained. Refusing
+/// the save would hide a state `is_home_on` already handles; saving it in
+/// silence would leave a row that reads set and does nothing.
+#[test]
+fn a_day_list_on_a_dead_account_saves_with_the_reason_it_claims_nothing() {
+    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
+    use crate::profile::{Profile, ProfileName};
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut dead = Profile::new("old".to_string(), None, None);
+    dead.disabled = true;
+    let mut app = app_with_chain(vec![dead]);
+    app.profile_cursor = 0;
+    let mut draft = build_draft_existing(&app, &ProfileName::from("old"));
+    draft.preferred_days = InputState::new("sat");
+    app.config_draft = Some(draft);
+
+    commit_config_field(&mut app, ConfigRow::PreferredDays);
+
+    assert_eq!(
+        app.config()
+            .find(&ProfileName::from("old"))
+            .map(|p| p.preferred_days.clone()),
+        Some(vec![chrono::Weekday::Sat]),
+        "the list is saved"
+    );
+    assert!(
+        app.toasts
+            .iter()
+            .any(|t| t.body.contains("claims nothing") && t.body.contains("disabled")),
+        "the warning names the blocker, got {:?}",
+        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
+    );
+}
+
+// ── the day-list collision warning ───────────────────────────
+
+/// Every weekday, so a fixture reads the same whatever day the suite runs on.
+fn all_weekdays() -> Vec<chrono::Weekday> {
+    use chrono::Weekday::*;
+    vec![Mon, Tue, Wed, Thu, Fri, Sat, Sun]
+}
+
+/// Two notices are two gate keys, not one: a passed-over lister arriving while
+/// a collision is still up must raise its own toast and leave the collision's
+/// alone. Holding one string would either repaint both or swallow the second.
+#[test]
+fn a_second_day_notice_does_not_repaint_the_first() {
+    use super::warn_day_claim_notices;
+    use crate::profile::{Profile, ProfileName};
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut a = Profile::new("work".to_string(), None, None);
+    a.preferred_days = all_weekdays();
+    let mut b = Profile::new("personal".to_string(), None, None);
+    b.preferred_days = all_weekdays();
+    let mut app = app_with_chain(vec![a, b]);
+
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 1, "the collision says itself once");
+    let collision = app.toasts[0].body.clone();
+
+    // A third account, off the chain, names the same days: its list is passed
+    // over while the two above still collide.
+    {
+        let mut cfg = app.config();
+        let mut spare = Profile::new("spare".to_string(), None, None);
+        spare.preferred_days = all_weekdays();
+        cfg.state.profiles.push(ProfileName::from("spare"));
+        cfg.profiles.push(spare);
+    }
+    warn_day_claim_notices(&mut app);
+    assert_eq!(
+        app.toasts.len(),
+        2,
+        "the new notice is raised, got {:?}",
+        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        app.toasts[0].body, collision,
+        "and the collision is not re-raised"
+    );
+    assert!(
+        app.toasts[1].body.contains("'spare'"),
+        "the second names the passed-over account: {}",
+        app.toasts[1].body
+    );
+
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 2, "the next tick repaints neither");
+}
+
+/// The chain pass re-derives the claim every tick, so the warning has to be
+/// edge-triggered: once when the collision appears, silent while it stands,
+/// again once the claimants change.
+#[test]
+fn the_day_collision_warning_fires_on_the_edge_only() {
+    use super::warn_day_claim_notices;
+    use crate::profile::{Profile, ProfileName};
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let mut a = Profile::new("work".to_string(), None, None);
+    a.preferred_days = all_weekdays();
+    let mut b = Profile::new("personal".to_string(), None, None);
+    b.preferred_days = all_weekdays();
+    let mut app = app_with_chain(vec![a, b]);
+
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 1, "the collision says itself once");
+    assert!(
+        app.toasts[0].body.contains("2 accounts claim"),
+        "got {:?}",
+        app.toasts[0].body
+    );
+
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 1, "the next tick repaints nothing");
+
+    {
+        let mut cfg = app.config();
+        if let Some(p) = cfg.find_mut(&ProfileName::from("personal")) {
+            p.preferred_days.clear();
+        }
+    }
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 1, "clearing the collision says nothing");
+
+    {
+        let mut cfg = app.config();
+        if let Some(p) = cfg.find_mut(&ProfileName::from("personal")) {
+            p.preferred_days = all_weekdays();
+        }
+    }
+    warn_day_claim_notices(&mut app);
+    assert_eq!(app.toasts.len(), 2, "a collision re-introduced warns again");
 }
