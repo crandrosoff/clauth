@@ -59,6 +59,12 @@ session_row() {
 # host that could not repoint (a separate copy), spends no clauth account.
 adopted_codex_profile() {
     _home="${CODEX_HOME:-$HOME/.codex}"
+    # A dash-leading path reads as readlink options on GNU and as a filename
+    # on BSD; refuse it rather than resolve either (readlink has no portable
+    # `--`).
+    case "$_home" in
+        -*) return 0 ;;
+    esac
     _link=$(readlink "$_home/auth.json" 2>/dev/null) || return 0
     case "$_link" in
         /*) ;;

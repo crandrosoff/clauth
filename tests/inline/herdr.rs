@@ -2950,14 +2950,8 @@ fn a_codex_pane_running_a_clauth_session_names_its_profile() {
 fn a_bare_codex_pane_answers_the_adopted_login_never_the_claude_account() {
     let info = r#"{"process_info":{"foreground_process_group_id":1001,"foreground_processes":[{"pid":1001,"ppid":1,"command":"codex"}]}}"#;
     let ps = "case \"$*\" in\n  *'-o ppid='*) case \"$*\" in *' 1001') echo 1;; esac;;\n  *'-o args='*) echo other;;\nesac\nexit 0\n";
-    let (lines, _) = report_profile_resolve_run_as(
-        r#"{"agent":"codex"}"#,
-        Some("work"),
-        info,
-        ps,
-        &[],
-        None,
-    );
+    let (lines, _) =
+        report_profile_resolve_run_as(r#"{"agent":"codex"}"#, Some("work"), info, ps, &[], None);
     assert!(
         token_line(&lines).contains("--token clauth=work"),
         "the adopted profile is published, not the claude account: {}",
@@ -3058,6 +3052,110 @@ fn the_watcher_rereport_keeps_the_codex_harness() {
         token_line(&lines).contains("--token clauth=work"),
         "the re-report keeps the codex harness and names the adopted profile: {}",
         lines[0]
+    );
+}
+
+/// The spawn site hands the harness into the watcher it spawns. The test
+/// above drives `watch-profile.sh` with the arg spelled out, so a dropped arg
+/// at the spawn site (`report-profile.sh`) reverts every codex watcher to the
+/// claude fallback with the suite green — the exact mislabel the codex pane
+/// exists to prevent. Drives the real `report-profile.sh` → spawned
+/// `watch-profile.sh` chain and reads the watcher's re-report out of the herdr
+/// shim's log.
+#[cfg(unix)]
+#[test]
+fn the_spawned_codex_watcher_keeps_the_harness() {
+    let home = crate::testutil::HomeSandbox::new();
+    let store = home.home().join(".clauth/profiles/work");
+    std::fs::create_dir_all(&store).expect("profile store");
+    std::fs::write(store.join("auth.json"), "{}").expect("chain written");
+    std::fs::create_dir_all(home.home().join(".clauth/live_sessions")).expect("sessions dir");
+    let codex = home.home().join(".codex");
+    std::fs::create_dir_all(&codex).expect("codex home");
+    std::os::unix::fs::symlink(store.join("auth.json"), codex.join("auth.json"))
+        .expect("adopted link");
+    let info = r#"{"process_info":{"foreground_process_group_id":1001,"foreground_processes":[{"pid":1001,"ppid":1,"command":"codex"}]}}"#;
+    // process-info answers twice: the resolve walk's own probe, then the
+    // watcher's first liveness probe (which gates its one re-report); after
+    // that it fails and the watcher's retry budget ends it.
+    write_shim(
+        home.home(),
+        "herdr",
+        &format!(
+            "if [ \"$1\" = pane ] && [ \"$2\" = report-metadata ]; then echo \"$*\" >> \"$(dirname \"$0\")/report.log\"; exit 0; fi\nif [ \"$1\" = pane ] && [ \"$2\" = process-info ]; then n=$(cat \"$(dirname \"$0\")/answered\" 2>/dev/null || echo 0); if [ \"$n\" -ge 2 ]; then exit 1; fi; echo $((n+1)) > \"$(dirname \"$0\")/answered\"; printf '%s\\n' '{info}'; exit 0; fi\nexit 0\n"
+        ),
+    );
+    write_shim(
+        home.home(),
+        "ps",
+        "case \"$*\" in\n  *'-o ppid='*) echo 1;;\n  *'-o args='*) echo other;;\nesac\nexit 0\n",
+    );
+    write_shim(
+        home.home(),
+        "clauth",
+        "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo on ;;\n  herdr:border_label) echo off ;;\n  herdr:tag_watch_secs) echo 1 ;;\nesac\nexit 0\n",
+    );
+    let state = home.home().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    let out = std::process::Command::new("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/herdr-plugin/report-profile.sh"
+        ))
+        .env("HERDR_BIN_PATH", home.home().join("herdr"))
+        .env("HERDR_PLUGIN_ID", "clauth")
+        .env("HERDR_PANE_ID", "p1")
+        .env("HERDR_PLUGIN_EVENT_JSON", r#"{"agent":"codex"}"#)
+        .env("HERDR_PLUGIN_CONTEXT_JSON", "")
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("HOME", home.home())
+        .env_remove("CODEX_HOME")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.home().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .expect("report-profile.sh runs");
+    assert!(
+        out.status.success(),
+        "the report exits 0: stderr {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The watcher re-reports after its first liveness probe (the shim's 1 s
+    // tag_watch_secs paces the retries); require the re-report to keep the
+    // codex harness — with the spawn arg dropped the watcher defaults to
+    // claude and its re-report reads `clauth which` → `fit`.
+    let report = home.home().join("report.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut lines = Vec::new();
+    while std::time::Instant::now() < deadline {
+        lines = std::fs::read_to_string(&report)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if lines.len() >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        lines.len() >= 2,
+        "the spawned watcher re-reports within the deadline: {lines:?}"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|l| l.contains("--token clauth=work")),
+        "the spawned watcher keeps the codex harness: {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains("clauth=fit")),
+        "the claude account never reaches a codex pane: {lines:?}"
     );
 }
 
