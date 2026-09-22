@@ -147,6 +147,22 @@ const _: () = assert!(
      the verify call rides past it)"
 );
 
+// The in-flight-delete record's age bound
+// (`runtime::namespaced_keychain_ledger::IN_FLIGHT_STALE_AFTER`, defined as
+// `lock::SUBPROCESS_BUDGET`) is the guarded delete's worst-case wall
+// duration for rows WITHOUT a live child: the salvage read and the delete,
+// one `SECURITY_TIMEOUT` each under the one budget both collectors arm. A
+// row whose stamped child is alive refuses writes past this bound — the
+// deadline that would kill a stuck child is parent-local, and a crashed
+// sweeper's orphaned child outlives it. The tie is a compile error here —
+// the one platform both numbers exist on — so a retune of either timeout
+// without the other cannot ship.
+const _: () = assert!(
+    SECURITY_TIMEOUT.as_millis() * 2 == crate::lock::SUBPROCESS_BUDGET.as_millis(),
+    "the in-flight-delete staleness bound must stay two SECURITY_TIMEOUTs wide \
+     (the salvage read + the delete, one shared budget)"
+);
+
 /// The deadline for the next `security` invocation: [`SECURITY_TIMEOUT`], clamped
 /// to whatever the state-lock hold this call sits inside has left to spend
 /// (`lock::clamp_to_hold_budget`). Outside a hold — `oauth.rs` mirrors a rotation
@@ -179,9 +195,25 @@ fn security_deadline() -> Duration {
 /// on their own once the killed child is reaped, so a dead child's pipes never
 /// hold the loop.
 fn run_with_deadline(
+    cmd: Command,
+    timeout: Duration,
+    stdin_payload: Option<&str>,
+) -> Result<Output> {
+    run_with_deadline_witnessing(cmd, timeout, stdin_payload, |_| Ok(()))
+}
+
+/// [`run_with_deadline`] with a hook fired IMMEDIATELY after the spawn,
+/// before anything waits on the child: the guarded delete's legs stamp the
+/// child's pid into the in-flight record here, so a crashed sweeper's
+/// orphaned child — which outlives any deadline the dead parent would have
+/// enforced — keeps refusing seeds for as long as it lives. A hook that
+/// fails kills the child and fails the call: an unstampable child must not
+/// run an unguarded delete.
+fn run_with_deadline_witnessing(
     mut cmd: Command,
     timeout: Duration,
     stdin_payload: Option<&str>,
+    on_spawn: impl FnOnce(u32) -> Result<()>,
 ) -> Result<Output> {
     // A hold whose budget is spent clamps to zero. Refuse BEFORE the spawn: the
     // payload is written below before `deadline` even exists, so the write path
@@ -216,6 +248,11 @@ fn run_with_deadline(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn {SECURITY_BIN}"))?;
+    if let Err(e) = on_spawn(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
     if let Some(payload) = stdin_payload {
         use std::io::Write;
         // Write the payload, then close the pipe (drop of `stdin`) so the child
@@ -449,9 +486,20 @@ enum Keep {
 /// parsed object: the write's read-back verification byte-compares against what
 /// was sent, and the quarantine path preserves what a parse rejected.
 fn read_raw_at(service: &str, account: &str) -> Result<Option<String>> {
+    read_raw_at_witnessing(service, account, |_| Ok(()))
+}
+
+/// [`read_raw_at`] with the spawn hook — the guarded delete's read leg
+/// stamps its child's pid into the in-flight record the moment the child
+/// exists.
+fn read_raw_at_witnessing(
+    service: &str,
+    account: &str,
+    on_spawn: impl FnOnce(u32) -> Result<()>,
+) -> Result<Option<String>> {
     let mut cmd = Command::new(SECURITY_BIN);
     cmd.args(["find-generic-password", "-s", service, "-a", account, "-w"]);
-    let output = run_with_deadline(cmd, security_deadline(), None)
+    let output = run_with_deadline_witnessing(cmd, security_deadline(), None, on_spawn)
         .with_context(|| format!("failed to run {SECURITY_BIN} find-generic-password"))?;
     if output.status.success() {
         let raw = String::from_utf8(output.stdout).context("Keychain password is not UTF-8")?;
@@ -1017,9 +1065,20 @@ fn put_blob_at(service: &str, account: &str, blob: &Value) -> Result<()> {
 /// Delete the item at `(service, account)` via `security delete-generic-password`.
 /// Idempotent — a missing item (exit 44) is `Ok`.
 fn delete_at(service: &str, account: &str) -> Result<()> {
+    delete_at_witnessing(service, account, |_| Ok(()))
+}
+
+/// [`delete_at`] with the spawn hook — the guarded delete's delete leg
+/// stamps its child's pid into the in-flight record the moment the child
+/// exists.
+fn delete_at_witnessing(
+    service: &str,
+    account: &str,
+    on_spawn: impl FnOnce(u32) -> Result<()>,
+) -> Result<()> {
     let mut cmd = Command::new(SECURITY_BIN);
     cmd.args(["delete-generic-password", "-s", service, "-a", account]);
-    let output = run_with_deadline(cmd, security_deadline(), None)
+    let output = run_with_deadline_witnessing(cmd, security_deadline(), None, on_spawn)
         .with_context(|| format!("failed to run {SECURITY_BIN} delete-generic-password"))?;
     if output.status.success() || output.status.code() == Some(EXIT_ITEM_NOT_FOUND) {
         Ok(())
@@ -1034,16 +1093,25 @@ fn delete_at(service: &str, account: &str) -> Result<()> {
 /// the caller's event line — a refused or prompted read (a foreign item's ACL,
 /// a locked keychain) is named, never fabricated as success. The ordering is
 /// pinned cross-platform in [`crate::claude::salvage_delete_namespaced_item_with`];
-/// this is the macOS wiring only.
+/// this is the macOS wiring only. The witness parameter is the type proof that
+/// the delete's in-flight record was stamped under the state flock BEFORE this
+/// sink runs — a record-first order, not a call-site convention. Each
+/// subprocess leg stamps its spawned child's pid into the record at spawn
+/// ([`run_with_deadline_witnessing`]), so a crashed sweeper's orphaned child
+/// keeps refusing seeds for as long as it lives.
 pub(crate) fn salvage_delete_namespaced_item(
-    service: &str,
+    in_flight: &crate::runtime::namespaced_keychain_ledger::InFlightDelete,
 ) -> Result<crate::claude::SalvageOutcome> {
     crate::claude::salvage_delete_namespaced_item_with(
-        service,
+        in_flight.service(),
         &account()?,
-        read_raw_at,
+        |service, account| {
+            read_raw_at_witnessing(service, account, |pid| in_flight.record_child(pid))
+        },
         quarantine_item_bytes,
-        delete_at,
+        |service, account| {
+            delete_at_witnessing(service, account, |pid| in_flight.record_child(pid))
+        },
     )
 }
 
@@ -1063,21 +1131,24 @@ pub(crate) fn salvage_delete_namespaced_item(
 /// Runs on every `clauth mcp` boot (accepted with the ruling). Skipped whole
 /// under the Plugin tab's boot probe ([`crate::mcp::MCP_PROBE_ENV`]), whose 3 s
 /// kill budget pays no `security` subprocess — the same gate `gc_stale_runtimes`
-/// reads for the tree sweep. Outside any state lock, under one
-/// [`crate::lock::SharedSubprocessBudget`] so a stuck keychain cannot multiply
-/// its per-call ceiling across the dump and the deletes. Loud-not-fatal
-/// throughout: a failed dump or delete logs and leaves the item for a later
-/// census. The dump's stdout — the whole keychain listing, item data included
-/// on some macOS versions — never reaches a log line: only the pure parser
-/// sees it, and it keeps service names alone; the text is dropped before the
-/// delete loop, so only parsed names outlive the parse.
+/// reads for the tree sweep. The delete subprocesses stay outside any state
+/// lock, under one [`crate::lock::SharedSubprocessBudget`] so a stuck keychain
+/// cannot multiply its per-call ceiling across the dump and the deletes.
+/// Loud-not-fatal throughout: a failed dump or delete logs and leaves the item
+/// for a later census. The dump's stdout — the whole keychain listing, item
+/// data included on some macOS versions — never reaches a log line: only the
+/// pure parser sees it, and it keeps service names alone; the text is dropped
+/// before the delete loop, so only parsed names outlive the parse.
 ///
 /// `live` is derived AFTER the dump — the dump is the long pole, so a session
 /// seeded while it ran must land in the spare set — and fail-closed: an
 /// underivable set (an unreadable root or profile) deletes nothing rather than
-/// treating the world as orphaned. Each delete re-derives the set immediately
-/// beforehand, the census's analogue of `gc_one_pair`'s dir re-check, so a
-/// session seeded since the dump is spared too.
+/// treating the world as orphaned. Each delete re-runs the flock-held gate
+/// [`crate::runtime::census_delete_gate`]: the live set re-derived and the
+/// in-flight record stamped in ONE state-lock hold — the census's analogue of
+/// `gc_one_pair`'s re-check hold — so a session seeded since the dump is
+/// spared by the walk, and a seed landing after the hold is refused by the
+/// record.
 pub(crate) fn census_namespaced_items() {
     if std::env::var_os(crate::mcp::MCP_PROBE_ENV).is_some() {
         return;
@@ -1117,35 +1188,42 @@ pub(crate) fn census_namespaced_items() {
     // before the delete loop's subprocesses.
     drop(dump);
     for service in orphans {
-        // Re-derive immediately before the delete, like `gc_one_pair`'s dir
-        // re-check: a session seeded since the dump must be spared.
-        let live = match crate::runtime::live_namespaced_keychain_services() {
-            Ok(live) => live,
+        // One state-lock hold re-derives the live set AND stamps the
+        // in-flight record for a service still orphaned — a seed serialized
+        // after this hold is refused by the record, and one serialized before
+        // it was spared by the walk (its acquire already rebuilt the dir),
+        // the census's analogue of `gc_one_pair`'s re-check+stamp hold.
+        let in_flight = match crate::runtime::census_delete_gate(&service) {
+            Ok(None) => continue,
+            Ok(Some(in_flight)) => in_flight,
             Err(e) => {
                 census_log!(
-                    "clauth: the Keychain census cannot re-derive the live set ({e:#}); stopping \
-                     the census, the remaining items stay for a later one"
+                    "clauth: the Keychain census cannot gate the delete of {service} ({e:#}); \
+                     stopping the census, the remaining items stay for a later one"
                 );
                 return;
             }
         };
-        if live.contains(&service) {
-            continue;
-        }
-        match salvage_delete_namespaced_item(&service) {
+        match salvage_delete_namespaced_item(&in_flight) {
             Ok(salvage) => {
                 let retirement = crate::runtime::namespaced_keychain_ledger::retire(&service);
+                let cleared = in_flight.clear();
                 census_log!(
                     "clauth: collected the orphaned per-session Keychain item {service} (no existing \
-                     config dir explains it); {}; {}",
+                     config dir explains it); {}; {}; {}",
                     crate::claude::salvage_tail(&salvage),
-                    crate::claude::retirement_tail(&retirement)
+                    crate::claude::retirement_tail(&retirement),
+                    crate::claude::in_flight_tail(&cleared)
                 );
             }
-            Err(e) => census_log!(
-                "clauth: collecting the orphaned per-session Keychain item {service} failed: \
-                 {e:#}. It stays inert in the Keychain until a later census removes it"
-            ),
+            Err(e) => {
+                let cleared = in_flight.clear();
+                census_log!(
+                    "clauth: collecting the orphaned per-session Keychain item {service} failed: \
+                     {e:#}. It stays inert in the Keychain until a later census removes it; {}",
+                    crate::claude::in_flight_tail(&cleared)
+                );
+            }
         }
     }
 }

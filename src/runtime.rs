@@ -1199,6 +1199,35 @@ pub(crate) fn live_namespaced_keychain_services() -> Result<BTreeSet<String>> {
     Ok(live)
 }
 
+/// The census's per-delete gate: ONE state-lock hold re-derives the live set
+/// ([`live_namespaced_keychain_services`]) and stamps the in-flight record
+/// when the service is still orphaned. A seed serialized after the hold is
+/// refused by the record; one serialized before it was spared by the walk —
+/// its acquire already rebuilt the dir — which is what closes the residual
+/// window a re-derivation running before the mint and a delete landing after
+/// the seed would otherwise leave open. `None` spares the item (live since
+/// the dump); `Some` is the witness the delete sink requires. macOS-only
+/// caller, pinned on every platform.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS Keychain census; the flock-held gate is pinned on every platform"
+    )
+)]
+pub(crate) fn census_delete_gate(
+    service: &str,
+) -> Result<Option<namespaced_keychain_ledger::InFlightDelete>> {
+    with_state_lock(|_held| {
+        if live_namespaced_keychain_services()?.contains(service) {
+            return Ok(None);
+        }
+        Ok(Some(namespaced_keychain_ledger::record_in_flight_locked(
+            service,
+        )?))
+    })
+}
+
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -1294,6 +1323,11 @@ pub(crate) mod namespaced_keychain_ledger {
         persist: impl FnOnce(&Owners) -> Result<()>,
     ) -> Result<()> {
         with_state_lock(|_held| {
+            // The in-flight consult precedes the ownership row's persist, in
+            // the same hold: a sweep whose re-check passed stamps its record
+            // before its delete runs, and this refusal is what keeps that
+            // delete from catching the item this call is about to authorize.
+            refuse_while_in_flight_locked(service)?;
             let mut owners = load()?;
             if let Some(owner) = owners
                 .owners
@@ -1324,6 +1358,335 @@ pub(crate) mod namespaced_keychain_ledger {
             Ok(())
         })
     }
+
+    /// How old a PIDLESS or pid-dead in-flight stamp must be before the
+    /// seed's consult sweeps it as crash-stale. The pid rule outranks age: a
+    /// row whose stamped `security` child is alive refuses the write however
+    /// old the row is — the deadline that would kill a stuck child is
+    /// parent-local (`keychain::run_with_deadline` kills its own child), so
+    /// a crashed sweeper's orphaned child outlives the bound and age alone
+    /// must never admit a seed the late delete could destroy. For rows
+    /// without a live child (none was ever stamped, or it exited) the bound
+    /// is the guarded delete's own worst-case wall duration: two `security`
+    /// invocations — the salvage read, then the delete — each capped at
+    /// `keychain::SECURITY_TIMEOUT` and sharing the one
+    /// [`crate::lock::SUBPROCESS_BUDGET`] both collectors arm. The tie is a
+    /// compile-time assert beside `SECURITY_TIMEOUT`, on the one platform the
+    /// number exists.
+    pub(crate) const IN_FLIGHT_STALE_AFTER: Duration = crate::lock::SUBPROCESS_BUDGET;
+
+    const IN_FLIGHT_PATH: &str = "keychain-deletes-in-flight.json";
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct InFlightDeleteRow {
+        pub(crate) service: String,
+        /// Wall-clock stamp, seconds since the UNIX epoch. A future stamp
+        /// reads as fresh — the fail-closed arm — until the clock passes it.
+        pub(crate) stamp_secs: u64,
+        /// The spawned `security` children's pids, stamped at spawn once each
+        /// child exists — the service stamp precedes the spawn, so a row
+        /// starts with none and gains each pid before its leg waits on the
+        /// child. One row per service; concurrent collectors on the same
+        /// orphaned service share it, and a collector's clear removes only
+        /// its own pids.
+        #[serde(default)]
+        pub(crate) pids: Vec<u32>,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    pub(crate) struct InFlightDeletes {
+        pub(crate) deletes: Vec<InFlightDeleteRow>,
+    }
+
+    pub(crate) fn in_flight_path() -> Result<PathBuf> {
+        Ok(clauth_dir()?.join(IN_FLIGHT_PATH))
+    }
+
+    /// Seconds since the UNIX epoch; 0 on a pre-epoch clock, which reads every
+    /// record as fresh — the fail-closed arm (a broken clock refuses writes
+    /// rather than reopening the window).
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+
+    /// Whether a pid names a running process — `kill(pid, 0)` semantics on
+    /// unix: the probe succeeds when the process exists, and `EPERM` (a
+    /// process this user may not signal) still proves existence. False on
+    /// non-unix, where no guarded delete ever runs and every row falls back
+    /// to the age bound.
+    #[allow(unsafe_code)]
+    pub(crate) fn pid_alive(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            // SAFETY: `pid` is a plain integer the OS interprets as a process
+            // id; signal 0 probes existence and sends nothing (the same shape
+            // `start::forward_signal` uses).
+            let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            false
+        }
+    }
+
+    /// Remove rows whose guarded delete can no longer be running: a row with
+    /// a live stamped child stays however old it is — a crashed sweeper's
+    /// orphaned `security` child outlives the age bound, since the deadline
+    /// that would kill it died with the parent — and a row with no live
+    /// child falls back to [`IN_FLIGHT_STALE_AFTER`]. Says whether the file
+    /// needs a save.
+    fn sweep_stale(deletes: &mut InFlightDeletes) -> bool {
+        let now = now_secs();
+        let before = deletes.deletes.len();
+        deletes.deletes.retain(|row| {
+            row.pids.iter().any(|pid| pid_alive(*pid))
+                || row
+                    .stamp_secs
+                    .saturating_add(IN_FLIGHT_STALE_AFTER.as_secs())
+                    > now
+        });
+        deletes.deletes.len() != before
+    }
+
+    /// Load the in-flight record under the same external-boundary rule the
+    /// ownership ledger loads under: clauth-minted rows are always
+    /// shape-valid, so anything else is a hand edit or corruption and fails
+    /// the WHOLE record closed — an unreadable record must never read as "no
+    /// delete in flight".
+    pub(crate) fn load_in_flight() -> Result<InFlightDeletes> {
+        let path = in_flight_path()?;
+        let deletes = match std::fs::read_to_string(&path) {
+            Ok(body) => serde_json::from_str::<InFlightDeletes>(&body)
+                .with_context(|| format!("failed to parse {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InFlightDeletes::default());
+            }
+            Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+        };
+        for row in &deletes.deletes {
+            if !crate::claude::is_namespaced_keychain_service(&row.service) {
+                anyhow::bail!(
+                    "the in-flight-delete record names a service the naming rule could not \
+                     produce (`{}`) — refusing to read it as absent",
+                    row.service
+                );
+            }
+        }
+        Ok(deletes)
+    }
+
+    fn save_in_flight(deletes: &InFlightDeletes) -> Result<()> {
+        let path = in_flight_path()?;
+        if let Some(parent) = path.parent() {
+            crate::profile::mkdir_700(parent)
+                .context("failed to create the in-flight-delete record directory")?;
+            crate::profile::enforce_clauth_perms(parent);
+        }
+        let bytes = serde_json::to_vec_pretty(deletes)
+            .context("failed to serialize the in-flight-delete record")?;
+        atomic_write_600(&path, bytes).context("failed to persist the in-flight-delete record")
+    }
+
+    /// Stamp (or re-stamp) the in-flight record for one service, sweeping
+    /// crash-stale rows with it. The caller holds the state flock — the stamp
+    /// and the liveness re-check share one hold, so a seed serialized after it
+    /// refuses and one serialized before it was spared by the re-check's own
+    /// inputs. Mints the [`InFlightDelete`] witness only after the row
+    /// persisted. The row carries no pid yet: the child does not exist until
+    /// the delete spawns, and each subprocess leg stamps its child's pid at
+    /// spawn ([`record_in_flight_pid`]).
+    pub(crate) fn record_in_flight_locked(service: &str) -> Result<InFlightDelete> {
+        let mut deletes = load_in_flight()?;
+        sweep_stale(&mut deletes);
+        match deletes
+            .deletes
+            .iter_mut()
+            .find(|row| row.service == service)
+        {
+            Some(row) => row.stamp_secs = now_secs(),
+            None => deletes.deletes.push(InFlightDeleteRow {
+                service: service.to_string(),
+                stamp_secs: now_secs(),
+                pids: Vec::new(),
+            }),
+        }
+        save_in_flight(&deletes)?;
+        Ok(InFlightDelete {
+            service: service.to_string(),
+            pids: std::cell::RefCell::new(Vec::new()),
+        })
+    }
+
+    /// Stamp the delete child's pid into the row the moment the child exists
+    /// — right after the spawn, before the leg waits on it. The seed's
+    /// consult refuses a row with a live child however old the row is. The
+    /// not-found arm FAILS CLOSED: the row can be gone when the hook's own
+    /// flock wait delayed it past the age bound and a consult swept it, and
+    /// a child that cannot be stamped must not run its delete unguarded —
+    /// the witnessing runner kills the child on this error, so the delete
+    /// never fires against a seed the swept row already admitted.
+    pub(crate) fn record_in_flight_pid(service: &str, pid: u32) -> Result<()> {
+        with_state_lock(|_held| {
+            let mut deletes = load_in_flight()?;
+            let Some(row) = deletes
+                .deletes
+                .iter_mut()
+                .find(|row| row.service == service)
+            else {
+                anyhow::bail!(
+                    "cannot stamp the spawned child (pid {pid}) into the in-flight record for \
+                     {service}: no row exists — a delete child must never run unguarded"
+                );
+            };
+            // PID-identity premise: the pid-scoped clear keys on pid equality,
+            // so a pid recycled from one collector's dead child to the other's
+            // live one inside the overlap window would clear live tracking.
+            // Accepted: pid allocation is monotonic over that seconds-long
+            // window; no pid-based guard can close it.
+            if !row.pids.contains(&pid) {
+                row.pids.push(pid);
+            }
+            save_in_flight(&deletes)?;
+            Ok(())
+        })
+    }
+
+    /// The write-side consult: refuse the write while the guarded delete for
+    /// the same service can still fire — its outcome (landed or failed) is
+    /// not yet recorded, so the write could be destroyed by it. A row with a
+    /// live child refuses however old it is; rows with no live child are
+    /// swept and persisted by the age bound here, so the refusal is bounded
+    /// — except a recycled pid now held by a long-lived process, which keeps
+    /// refusing for that process's lifetime (the safe direction: the row
+    /// dies when the process does or a clear reaches it). Runs inside the
+    /// same flock hold as the ownership row's persist, so it serializes
+    /// against every stamp.
+    pub(crate) fn refuse_while_in_flight_locked(service: &str) -> Result<()> {
+        let mut deletes = load_in_flight()?;
+        if sweep_stale(&mut deletes) {
+            save_in_flight(&deletes)?;
+        }
+        if let Some(row) = deletes.deletes.iter().find(|row| row.service == service) {
+            return Err(DeleteInFlight {
+                service: service.to_string(),
+                stamp_secs: row.stamp_secs,
+                pids: row.pids.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Clear exactly the witness's own children from the row, then the row
+    /// itself once no pid remains: a concurrent collector's clear removes
+    /// only ITS legs' pids, so one collector's finished delete can never
+    /// erase another's live tracking. Takes its own flock hold, off the
+    /// subprocess path.
+    pub(crate) fn clear_in_flight(service: &str, pids: &[u32]) -> Result<()> {
+        with_state_lock(|_held| {
+            let mut deletes = load_in_flight()?;
+            let before = deletes.deletes.len();
+            let mut changed = false;
+            deletes.deletes.retain_mut(|row| {
+                if row.service != service {
+                    return true;
+                }
+                let had = row.pids.len();
+                row.pids.retain(|pid| !pids.contains(pid));
+                changed |= row.pids.len() != had;
+                !row.pids.is_empty()
+            });
+            if changed || deletes.deletes.len() != before {
+                save_in_flight(&deletes)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Proof that a namespaced Keychain delete was durably recorded as
+    /// in-flight: minted only by [`record_in_flight_locked`] AFTER the row
+    /// persisted under the state flock, and the fields are private to this
+    /// module (the [`crate::lock::StateLockHeld`] pattern). The macOS delete
+    /// sink takes this witness as its only proof, so no `/usr/bin/security`
+    /// delete for a per-session item can run without a durable in-flight
+    /// record behind it — the record-first order is a type, not a call-site
+    /// convention, exactly like [`OwnedKeychainWrite`]. The witness also
+    /// records the pids its OWN legs spawned, which is what scopes its
+    /// clear: a concurrent collector's delete clears only its own tracking.
+    #[derive(Debug)]
+    pub(crate) struct InFlightDelete {
+        service: String,
+        pids: std::cell::RefCell<Vec<u32>>,
+    }
+
+    impl InFlightDelete {
+        pub(crate) fn service(&self) -> &str {
+            &self.service
+        }
+
+        /// Record a spawned child's pid on the witness and durably in the
+        /// row: the durable half keeps the consult refusing while the child
+        /// lives, and the witness's own list is what [`InFlightDelete::clear`]
+        /// later removes.
+        pub(crate) fn record_child(&self, pid: u32) -> Result<()> {
+            record_in_flight_pid(&self.service, pid)?;
+            self.pids.borrow_mut().push(pid);
+            Ok(())
+        }
+
+        /// Clear the record once the delete's outcome is known (landed or
+        /// failed), removing exactly this witness's own children; a crashed
+        /// delete's record is swept once every stamped child is dead and the
+        /// age bound passes, instead.
+        pub(crate) fn clear(self) -> Result<()> {
+            clear_in_flight(&self.service, &self.pids.borrow())
+        }
+    }
+
+    /// A namespaced Keychain write was refused because a sweep's delete for
+    /// the same service is still in flight. Transient by construction — the
+    /// delete clears the record when it finishes, and a crashed delete's
+    /// record is swept once every stamped child is dead and
+    /// [`IN_FLIGHT_STALE_AFTER`] passes — so the seed maps this to its
+    /// watchdog-tick retry. The one unbounded case is a recycled pid now
+    /// held by a long-lived process, whose alive reading keeps refusing for
+    /// that process's lifetime — the safe direction, never a silent skip.
+    #[derive(Debug)]
+    pub(crate) struct DeleteInFlight {
+        pub(crate) service: String,
+        pub(crate) stamp_secs: u64,
+        pub(crate) pids: Vec<u32>,
+    }
+
+    impl std::fmt::Display for DeleteInFlight {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if let Some(pid) = self.pids.iter().find(|pid| pid_alive(**pid)) {
+                write!(
+                    f,
+                    "a sweep's delete for the same per-session Keychain item is still in flight \
+                     (`{}`; its `security` child, pid {pid}, is still alive); the write would race \
+                     it — it lands once the delete records its outcome or its record is swept as \
+                     stale",
+                    self.service,
+                )
+            } else {
+                write!(
+                    f,
+                    "a sweep's delete for the same per-session Keychain item is still in flight \
+                     (`{}`, stamped {} s ago); the write would race it — it lands once the delete \
+                     records its outcome or its record is swept as stale",
+                    self.service,
+                    now_secs().saturating_sub(self.stamp_secs),
+                )
+            }
+        }
+    }
+
+    impl std::error::Error for DeleteInFlight {}
 
     pub(crate) fn authorize_write(
         runtime: &Path,
@@ -1496,8 +1859,9 @@ fn gc_one_pair_synced(
     // still exists — the derivation canonicalizes it, so it cannot run once
     // the tree is removed. Collected after the closures below, where a
     // `security` subprocess is legal; `orphaned_keychain_item` documents why
-    // its inputs are re-sampled under a second closure immediately before
-    // the delete.
+    // its inputs are re-sampled — and the delete's in-flight record stamped,
+    // in the same hold (`gc_keychain_recheck`) — under a second closure
+    // immediately before the delete.
     #[cfg(target_os = "macos")]
     let item_service = tree_keychain_service(runtime);
 
@@ -1543,21 +1907,17 @@ fn gc_one_pair_synced(
     // macOS: collect the tree's Keychain item, before the rescue — the
     // collection is a salvage read then a delete (two subprocesses), the rescue
     // is a tree-sized copy, and a crash during the copy must not strand an item
-    // whose dir is already gone. The pair is re-checked under a fresh
-    // state-lock hold taken immediately before the delete: between the
-    // collection above and this point a concurrently starting session can
-    // re-mint this same path, and the delete must key on the world it runs in.
-    // Lock taken, inputs sampled, lock dropped, THEN the collection — the
-    // subprocesses still never span the flock.
+    // whose dir is already gone. The pair is re-checked and the delete's
+    // in-flight record stamped in ONE fresh state-lock hold taken immediately
+    // before the delete: between the collection above and this point a
+    // concurrently starting session can re-mint this same path, and the delete
+    // must key on the world it runs in. Lock taken, inputs sampled, record
+    // stamped, lock dropped, THEN the collection — the subprocesses still
+    // never span the flock, and a seed serialized after the hold is refused
+    // by the record it finds.
     #[cfg(target_os = "macos")]
-    if let Some(service) = with_state_lock(|_held| {
-        Ok::<_, anyhow::Error>(orphaned_keychain_item(
-            item_service.as_deref(),
-            prune_stale_sessions(sessions),
-            runtime.symlink_metadata().is_ok(),
-        ))
-    })? {
-        collect_orphaned_keychain_item(service);
+    if let Some(in_flight) = gc_keychain_recheck(item_service.as_deref(), sessions, runtime)? {
+        collect_orphaned_keychain_item(in_flight);
     }
 
     if renamed {
@@ -1598,13 +1958,12 @@ fn gc_one_pair_synced(
 /// subprocess and must never span the flock, so the lock is taken, the inputs
 /// read, and dropped, and only then does the delete run — serialized against
 /// an acquire's own lock section, which claims the marker and rebuilds the
-/// tree as one step. The residual window is the narrowed tail only: a queued
-/// acquire completing its lock section and seeding the item anywhere between
-/// this re-check passing and the delete completing — whether the delete is
-/// already in flight or the sweep has merely not reached the spawn yet.
-/// Accepted here; the airtight shape — a durable in-flight-delete record the
-/// seed consults before writing — is a separate backlog item, not this
-/// narrowing's to grow into.
+/// tree as one step. What closes the tail that drop leaves — a queued acquire
+/// completing its lock section and seeding the item between this re-check
+/// passing and the delete landing — is the in-flight-delete record stamped in
+/// the SAME hold that samples these inputs ([`gc_keychain_recheck`]): a seed
+/// serialized after the hold is refused by the record, one serialized before
+/// it was spared by the inputs themselves (its live marker or rebuilt dir).
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -1618,6 +1977,52 @@ fn orphaned_keychain_item(
     dir_exists: bool,
 ) -> Option<&str> {
     service.filter(|_| live_markers == Some(0) && !dir_exists)
+}
+
+/// The macOS GC's item-collection re-check, flock-wrapped: the keep/delete
+/// decision and the in-flight record's stamp share ONE state-lock hold. A
+/// seed serialized after this hold is refused by the record; one serialized
+/// before it was spared by the decision's own inputs (a live marker or a
+/// rebuilt dir) — the pair closes #82's residual window, where a queued
+/// acquire could seed the item after the re-check passed and before the
+/// delete landed. Returns the witness the delete sink requires, or `None`
+/// when spared.
+///
+/// A stamp that cannot be persisted skips the delete rather than running it
+/// unguarded: the item is inert without its dir, a later census collects it,
+/// and the skip is loud on the event line.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only production caller is the macOS stale-runtime GC's Keychain collection; the flock-held shape is pinned on every platform"
+    )
+)]
+fn gc_keychain_recheck(
+    item_service: Option<&str>,
+    sessions: &Path,
+    runtime: &Path,
+) -> Result<Option<namespaced_keychain_ledger::InFlightDelete>> {
+    with_state_lock(|_held| {
+        let Some(service) = orphaned_keychain_item(
+            item_service,
+            prune_stale_sessions(sessions),
+            runtime.symlink_metadata().is_ok(),
+        ) else {
+            return Ok(None);
+        };
+        match namespaced_keychain_ledger::record_in_flight_locked(service) {
+            Ok(in_flight) => Ok(Some(in_flight)),
+            Err(e) => {
+                logline!(
+                    "clauth: cannot stamp the in-flight-delete record for {service} ({e:#}); its \
+                     item is not collected — a delete whose in-flight record cannot be persisted \
+                     must not run"
+                );
+                Ok(None)
+            }
+        }
+    })
 }
 
 /// macOS: the namespaced Keychain service for a runtime dir the GC is walking,
@@ -1647,24 +2052,34 @@ fn tree_keychain_service(runtime: &Path) -> Option<String> {
 /// state-flock closure (a `security` subprocess must never span it), inside
 /// the shared subprocess budget [`gc_stale_runtimes`] arms, and is
 /// loud-not-fatal: the item is inert without its dir, so a failed collection
-/// leaves stale clutter rather than breaking anything.
+/// leaves stale clutter rather than breaking anything. The delete sink takes
+/// the in-flight witness the re-check's hold minted, and the record it proves
+/// clears once the delete's outcome is known — landed or failed; only a crash
+/// leaves it standing, for the staleness sweep.
 #[cfg(target_os = "macos")]
-fn collect_orphaned_keychain_item(service: &str) {
-    match crate::keychain::salvage_delete_namespaced_item(service) {
+fn collect_orphaned_keychain_item(in_flight: namespaced_keychain_ledger::InFlightDelete) {
+    let service = in_flight.service().to_string();
+    match crate::keychain::salvage_delete_namespaced_item(&in_flight) {
         Ok(salvage) => {
-            let retirement = namespaced_keychain_ledger::retire(service);
+            let retirement = namespaced_keychain_ledger::retire(&service);
+            let cleared = in_flight.clear();
             logline!(
                 "clauth: collected the orphaned per-session Keychain item {service} (its runtime tree \
-                 is gone); {}; {}",
+                 is gone); {}; {}; {}",
                 crate::claude::salvage_tail(&salvage),
-                crate::claude::retirement_tail(&retirement)
+                crate::claude::retirement_tail(&retirement),
+                crate::claude::in_flight_tail(&cleared)
             );
         }
-        Err(e) => logline!(
-            "clauth: collecting the orphaned per-session Keychain item {service} failed: {e:#}. It \
-             holds a login only the removed tree's dir resolved, so it stays inert in the Keychain \
-             until a later sweep or census removes it"
-        ),
+        Err(e) => {
+            let cleared = in_flight.clear();
+            logline!(
+                "clauth: collecting the orphaned per-session Keychain item {service} failed: {e:#}. It \
+                 holds a login only the removed tree's dir resolved, so it stays inert in the Keychain \
+                 until a later sweep or census removes it; {}",
+                crate::claude::in_flight_tail(&cleared)
+            );
+        }
     }
 }
 
@@ -5005,10 +5420,31 @@ fn seed_degrade_disposition(class: crate::claude::SecurityExitClass) -> SeedDegr
     }
 }
 
+/// Whether a failed seed leg was refused over a sweep's still-in-flight
+/// delete: the consult's typed refusal, mapped to the retry arm of
+/// [`SeedDegradeDisposition`] — the record clears when the delete lands or
+/// fails, and a crashed delete's record is swept once its stamped child is
+/// dead and the age bound passes, so the watchdog-tick retry converges. PURE
+/// so the mapping is pinned on every platform; the classified half of the
+/// disposition is macOS-only.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the only consumers are the macOS seed and its watchdog-tick retry; the mapping is pinned on every platform"
+    )
+)]
+fn delete_in_flight_disposition(e: &anyhow::Error) -> Option<SeedDegradeDisposition> {
+    e.downcast_ref::<namespaced_keychain_ledger::DeleteInFlight>()
+        .is_some()
+        .then_some(SeedDegradeDisposition::RetryOnTick)
+}
+
 /// Returns the seed's retry target — the install source the seed wrote
-/// against — while a classified locked-keychain failure left the session's
-/// item unwritten, for the watchdog's credential tick to re-run the seed
-/// against ([`retry_seeded_keychain_item`]); `None` on every other outcome,
+/// against — while a classified locked-keychain failure or a refusal over a
+/// sweep's still-in-flight delete left the session's item unwritten, for the
+/// watchdog's credential tick to re-run the seed against
+/// ([`retry_seeded_keychain_item`]); `None` on every other outcome,
 /// the pre-fix degrade included.
 #[cfg(target_os = "macos")]
 fn seed_session_keychain_item(
@@ -5091,9 +5527,10 @@ fn seed_session_keychain_item(
 
 /// Log one of the seed's loud-not-fatal leg failures and decide whether it
 /// arms the watchdog-tick retry, returning the seed's target store for that
-/// retry to guard on. The classified transient appends the retry clause to the
-/// event line; every other failure renders the pre-fix line byte-for-byte.
-/// macOS-only like its caller.
+/// retry to guard on. The classified transient and a refusal over a sweep's
+/// still-in-flight delete append the retry clause to the event line, each
+/// with its own clears wording; every other failure renders the pre-fix line
+/// byte-for-byte. macOS-only like its caller.
 #[cfg(target_os = "macos")]
 fn seed_degraded(
     session: &SessionId,
@@ -5103,13 +5540,19 @@ fn seed_degraded(
     consequence: &str,
     e: &anyhow::Error,
 ) -> Option<PathBuf> {
-    if seed_degrade_disposition(crate::keychain::classified_exit(e))
-        == SeedDegradeDisposition::RetryOnTick
-    {
+    let in_flight = delete_in_flight_disposition(e);
+    let disposition =
+        in_flight.unwrap_or_else(|| seed_degrade_disposition(crate::keychain::classified_exit(e)));
+    if disposition == SeedDegradeDisposition::RetryOnTick {
+        let clears = if in_flight.is_some() {
+            "so it lands once the sweep's delete completes and its in-flight record clears"
+        } else {
+            "so it lands once the keychain unlocks"
+        };
         logline!(
             "clauth: session {} started on {} but {} failed: {e:#}. {}; the watchdog retries the \
-             seed on this session's credential ticks while its store stays the seed's target, so \
-             it lands once the keychain unlocks",
+             seed on this session's credential ticks while its store stays the seed's target, \
+             {clears}",
             session.as_str(),
             name,
             what,
@@ -5178,12 +5621,13 @@ fn retry_seeded_keychain_item(swap: &SessionSwap, seed_retry: &std::sync::Mutex<
             logline!("clauth: re-seeded the per-session Keychain item after the keychain unlocked")
         }
         Some(e) => {
-            if seed_degrade_disposition(crate::keychain::classified_exit(&e))
-                == SeedDegradeDisposition::RetryOnTick
-            {
-                // Still locked: stay armed for the next tick. The seed's own
-                // line already named the retry, so a still-locked attempt adds
-                // nothing — one line at degrade time, none per tick.
+            let disposition = delete_in_flight_disposition(&e)
+                .unwrap_or_else(|| seed_degrade_disposition(crate::keychain::classified_exit(&e)));
+            if disposition == SeedDegradeDisposition::RetryOnTick {
+                // Still locked, or the sweep's delete still in flight: stay
+                // armed for the next tick. The seed's own line already named
+                // the retry, so a retrying attempt adds nothing — one line at
+                // degrade time, none per tick.
                 *retry = Some(target);
             } else {
                 logline!(

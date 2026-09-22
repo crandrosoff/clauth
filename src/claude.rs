@@ -1512,6 +1512,26 @@ pub(crate) fn retirement_tail(retirement: &Result<()>) -> String {
     }
 }
 
+/// How an event line names the in-flight record's clearing after a collected
+/// delete, shared by both destructive collectors so their wording cannot
+/// drift apart.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "the real legs are the macOS Keychain collectors; the operator-facing wording is pinned on every platform"
+    )
+)]
+pub(crate) fn in_flight_tail(cleared: &Result<()>) -> String {
+    match cleared {
+        Ok(()) => "its in-flight record was cleared".to_string(),
+        Err(e) => format!(
+            "clearing its in-flight record failed ({e:#}); the staleness sweep removes it, \
+             refusing same-service writes until it does"
+        ),
+    }
+}
+
 /// What a `security(1)` exit status means, as far as this codebase has
 /// measured. The OSStatus rides the exit status as its low byte
 /// (`osstatus & 0xFF`: −25300 → 44, measured on the read leg; −25308 → 36;

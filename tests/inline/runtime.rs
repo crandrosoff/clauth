@@ -10211,8 +10211,15 @@ fn the_stale_runtime_collector_takes_the_salvage_path() {
         .expect("the collector body ends where the shared-dirs walk begins")
         .0;
     assert!(
-        collector.contains("crate::keychain::salvage_delete_namespaced_item(service)"),
-        "the walk-derived collector salvages readable bytes before its delete: {collector}"
+        collector.contains("crate::keychain::salvage_delete_namespaced_item(&in_flight)"),
+        "the walk-derived collector salvages readable bytes before its delete, through the \
+         in-flight witness: {collector}"
+    );
+    assert_eq!(
+        collector.matches("in_flight.clear()").count(),
+        2,
+        "the record clears on both outcomes — the delete landed, or it failed and nothing \
+         is in flight anymore"
     );
     assert!(
         !collector.contains("delete_at("),
@@ -10298,6 +10305,688 @@ fn a_ledger_row_outlives_its_profile_and_stays_authoritative() {
         BTreeSet::from(["Claude Code-credentials-deadbeef".to_string()]),
         "a row whose profile was deleted stays authoritative — profile-deletion orphans \
          are exactly the census's stranding-input class"
+    );
+}
+
+/// The residual tail #82 closed, write side: a fresh in-flight-delete record
+/// — a sweep's re-check passed and its delete sits between its stamp and its
+/// outcome — refuses a same-service namespaced write at the ownership-first
+/// seam every producer routes through, so the delete cannot catch a queued
+/// acquire's freshly seeded item. The record is posed as the raw file the fix's
+/// loader must honor, so the pin doubles as the on-disk schema contract.
+#[test]
+fn a_namespaced_write_is_refused_while_a_sweeps_delete_is_in_flight() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/inflight/runtime-800-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("inflight");
+    let session = SessionId::for_test("800-1");
+    let service = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &record_path,
+        serde_json::json!({"deletes": [{"service": service.clone(), "stamp_secs": stamp}]})
+            .to_string(),
+    )
+    .expect("record in flight");
+
+    let err = namespaced_keychain_ledger::authorize_write_with(
+        &runtime,
+        &profile,
+        &session,
+        namespaced_keychain_ledger::save,
+    )
+    .expect_err("a write racing a sweep's in-flight delete must be refused, never proceed");
+    assert!(
+        err.downcast_ref::<namespaced_keychain_ledger::DeleteInFlight>()
+            .is_some(),
+        "the refusal is the consult's typed error, which the seed's retry disposition keys on: \
+         {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains(&service),
+        "the refusal names the service the delete targets: {err:#}"
+    );
+    assert!(
+        namespaced_keychain_ledger::owned_services()
+            .expect("owned services")
+            .is_empty(),
+        "a refused write strands no ownership row"
+    );
+}
+
+/// A crashed delete's record cannot refuse writes forever: the seed's consult
+/// sweeps a row older than the delete's own worst-case duration — the salvage
+/// read and the delete, two `security` subprocesses under one shared 20 s
+/// budget — so a record stamped at the bound admits the write, and the sweep
+/// removes it durably.
+#[test]
+fn a_stale_in_flight_record_is_swept_and_admits_the_write() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/stale/runtime-801-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("stale");
+    let session = SessionId::for_test("801-1");
+    let service = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let stale_stamp = now - namespaced_keychain_ledger::IN_FLIGHT_STALE_AFTER.as_secs();
+    let other = "Claude Code-credentials-c56fc9bd";
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &record_path,
+        serde_json::json!({"deletes": [
+            {"service": service.clone(), "stamp_secs": stale_stamp},
+            {"service": other, "stamp_secs": now}
+        ]})
+        .to_string(),
+    )
+    .expect("record in flight");
+
+    namespaced_keychain_ledger::authorize_write_with(
+        &runtime,
+        &profile,
+        &session,
+        namespaced_keychain_ledger::save,
+    )
+    .expect("a record past the delete's worst case admits the write");
+
+    let deletes = namespaced_keychain_ledger::load_in_flight()
+        .expect("read record")
+        .deletes;
+    assert_eq!(
+        deletes,
+        vec![namespaced_keychain_ledger::InFlightDeleteRow {
+            service: other.to_string(),
+            stamp_secs: now,
+            pids: Vec::new(),
+        }],
+        "the consult swept exactly the crashed delete's row — a fresh sibling row survives"
+    );
+}
+
+/// A crashed sweeper's orphaned child outlives the age bound — the deadline
+/// that would kill it is parent-local, and with the parent gone a
+/// prompt-stuck `security` child can answer minutes later — so a row whose
+/// stamped child is ALIVE must refuse the write however old the row is, or
+/// the late delete destroys a freshly seeded item: #82 in the crash case.
+/// The alive pid is the test binary's own.
+#[test]
+fn an_alive_delete_child_keeps_refusing_past_the_age_bound() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/pidalive/runtime-815-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("pidalive");
+    let session = SessionId::for_test("815-1");
+    let service = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &record_path,
+        serde_json::json!({"deletes": [{
+            "service": service.clone(),
+            "stamp_secs": now - namespaced_keychain_ledger::IN_FLIGHT_STALE_AFTER.as_secs() - 60,
+            "pids": [std::process::id()]
+        }]})
+        .to_string(),
+    )
+    .expect("record in flight");
+
+    let err = namespaced_keychain_ledger::authorize_write_with(
+        &runtime,
+        &profile,
+        &session,
+        namespaced_keychain_ledger::save,
+    )
+    .expect_err(
+        "a row whose stamped delete child is still alive refuses the write however old \
+                 it is — the child outlives the age bound",
+    );
+    assert!(
+        err.downcast_ref::<namespaced_keychain_ledger::DeleteInFlight>()
+            .is_some(),
+        "the refusal is the consult's typed error: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains(&service),
+        "the refusal names the service the delete targets: {err:#}"
+    );
+}
+
+/// A pid-dead row falls back to the age bound: the child is gone, so the
+/// guarded delete cannot still be running past its worst-case duration, and
+/// the bound sweeps the row. The dead pid is a just-reaped child's (pid
+/// allocation is monotonic until it wraps at `pid_max`, so the freed pid is
+/// not reissued inside this test's lifetime).
+#[test]
+fn a_pid_dead_row_falls_back_to_the_age_bound() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/pidded/runtime-816-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let profile = crate::profile::ProfileName::from("pidded");
+    let session = SessionId::for_test("816-1");
+    let service = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &record_path,
+        serde_json::json!({"deletes": [{
+            "service": service.clone(),
+            "stamp_secs": now - namespaced_keychain_ledger::IN_FLIGHT_STALE_AFTER.as_secs() - 60,
+            "pids": [dead_pid]
+        }]})
+        .to_string(),
+    )
+    .expect("record in flight");
+
+    namespaced_keychain_ledger::authorize_write_with(
+        &runtime,
+        &profile,
+        &session,
+        namespaced_keychain_ledger::save,
+    )
+    .expect("a pid-dead record past the bound admits the write");
+    assert!(
+        namespaced_keychain_ledger::load_in_flight()
+            .expect("read record")
+            .deletes
+            .is_empty(),
+        "the consult swept the pid-dead row"
+    );
+}
+
+/// The probe the pid rule rests on: `kill(pid, 0)` semantics read the
+/// test's own process alive and a just-reaped child dead (pid allocation is
+/// monotonic until it wraps at `pid_max`, so the freed pid is not reissued
+/// inside this test's lifetime).
+#[test]
+fn pid_liveness_reads_self_alive_and_a_reaped_child_dead() {
+    assert!(
+        namespaced_keychain_ledger::pid_alive(std::process::id()),
+        "the probe sees the test's own process alive"
+    );
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let pid = child.id();
+    child.wait().expect("reap");
+    assert!(
+        !namespaced_keychain_ledger::pid_alive(pid),
+        "the probe reads the reaped child dead"
+    );
+}
+
+/// A spawned delete child must never run unguarded: the pid stamp's
+/// not-found arm fails closed — the witnessing runner kills the child on the
+/// hook's error, so a row the consult already swept (the hook's own flock
+/// wait delayed past the age bound) cannot leave the child to finish its
+/// delete against an admitted seed.
+#[test]
+fn an_unstampable_child_is_killed_not_run_unguarded() {
+    let _home = HomeSandbox::new();
+    let err = namespaced_keychain_ledger::record_in_flight_pid(
+        "Claude Code-credentials-c56fc9bd",
+        std::process::id(),
+    )
+    .expect_err("a child whose row is gone must fail the stamp closed, never run unguarded");
+    assert!(
+        format!("{err:#}").contains("unguarded"),
+        "the refusal names the guard: {err:#}"
+    );
+
+    // The macOS half: the witnessing runner kills the child when the hook
+    // fails, through the same kill path its deadline uses.
+    let keychain_src = include_str!("../../src/keychain.rs");
+    let runner = keychain_src
+        .split_once("fn run_with_deadline_witnessing(")
+        .expect("the witnessing runner is defined")
+        .1
+        .split_once("let deadline = Instant::now() + timeout;")
+        .expect("the runner body ends where the deadline loop begins")
+        .0;
+    assert!(
+        runner.contains("if let Err(e) = on_spawn(child.id())"),
+        "the hook's failure is checked immediately after the spawn: {runner}"
+    );
+    assert!(
+        runner.contains("let _ = child.kill();"),
+        "the hook's failure kills the child: {runner}"
+    );
+}
+
+/// Two concurrent collectors on the same orphaned service share one row: one
+/// collector's clear must remove only ITS legs' pids, so the other's live
+/// child keeps refusing writes until its own clear lands. Posed through the
+/// raw file — the schema contract — plus the two witnesses the collectors
+/// hold.
+#[test]
+fn one_collectors_clear_cannot_erase_anothers_live_tracking() {
+    let _home = HomeSandbox::new();
+    let service = "Claude Code-credentials-c56fc9bd";
+    let mut child = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn the second collector's child");
+    let live_pid = child.id();
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &record_path,
+        serde_json::json!({"deletes": [{
+            "service": service,
+            "stamp_secs": now,
+            "pids": [std::process::id(), live_pid]
+        }]})
+        .to_string(),
+    )
+    .expect("record in flight");
+
+    let first = namespaced_keychain_ledger::record_in_flight_locked(service).expect("first stamp");
+    let second =
+        namespaced_keychain_ledger::record_in_flight_locked(service).expect("second stamp");
+    first
+        .record_child(std::process::id())
+        .expect("stamp the first collector's child");
+    second
+        .record_child(live_pid)
+        .expect("stamp the second collector's child");
+    first.clear().expect("the first collector's delete landed");
+
+    let err = namespaced_keychain_ledger::record_with(
+        service,
+        &crate::profile::ProfileName::from("twin"),
+        &SessionId::for_test("817-1"),
+        namespaced_keychain_ledger::save,
+    )
+    .expect_err(
+        "one collector's clear must not erase another's live tracking — the surviving \
+                 row keeps refusing",
+    );
+    assert!(
+        err.downcast_ref::<namespaced_keychain_ledger::DeleteInFlight>()
+            .is_some(),
+        "the refusal is the consult's typed error: {err:#}"
+    );
+
+    second
+        .clear()
+        .expect("the second collector's delete landed");
+    namespaced_keychain_ledger::record_with(
+        service,
+        &crate::profile::ProfileName::from("twin"),
+        &SessionId::for_test("817-1"),
+        namespaced_keychain_ledger::save,
+    )
+    .expect("the last clear admits the write");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The guarded delete stamps EACH spawned child's pid into the in-flight
+/// record at spawn time — the pid rule is what refuses a crashed sweeper's
+/// orphaned child past the age bound, so both subprocess legs must stamp,
+/// and the stamped value must be the child's own pid, never a constant. The
+/// wiring is macOS-only code no Linux run compiles; the pin is a source
+/// scan, the same mechanism the ownership-witness pins use.
+#[test]
+fn the_guarded_delete_stamps_each_childs_pid_at_spawn() {
+    let keychain_src = include_str!("../../src/keychain.rs");
+    let sink = keychain_src
+        .split_once("pub(crate) fn salvage_delete_namespaced_item(")
+        .expect("the guarded delete sink is defined")
+        .1
+        .split_once("/// The census half")
+        .expect("the sink ends where the census doc begins")
+        .0;
+    assert_eq!(
+        sink.matches("|pid| in_flight.record_child(pid)").count(),
+        2,
+        "both subprocess legs stamp their child's pid through the witness: {sink}"
+    );
+    assert!(
+        !sink.contains("std::process::id()"),
+        "the stamp never substitutes a constant for the child's pid: {sink}"
+    );
+}
+
+/// The flock wrapper around the production re-check: the decision and the
+/// in-flight stamp share ONE `with_state_lock` hold, so a seed serialized
+/// after the hold refuses (the record) and one serialized before it was
+/// spared by the decision's own inputs. Removing the wrapper reopens #82's
+/// residual tail — a seed writing between the decision and the delete
+/// outruns the record. The re-check is macOS-wired, so the pin is a source
+/// scan, the same mechanism the ownership-witness pin uses.
+#[test]
+fn the_gc_keychain_recheck_stamps_under_the_state_flock() {
+    let runtime_src = include_str!("../../src/runtime.rs");
+    let body = runtime_src
+        .split_once("fn gc_keychain_recheck(")
+        .expect("the flock-wrapped re-check is defined")
+        .1
+        .split_once("fn tree_keychain_service")
+        .expect("the re-check ends where the service derivation begins")
+        .0;
+    assert!(
+        body.contains("with_state_lock(|_held|"),
+        "the decision and the in-flight stamp share one state-flock hold: {body}"
+    );
+    assert!(
+        body.contains("record_in_flight_locked("),
+        "the stamp persists before the delete can run: {body}"
+    );
+}
+
+/// The census's per-delete gate: ONE state-flock hold re-derives the live set
+/// and stamps the in-flight record, the census's analogue of the GC's
+/// re-check hold — a re-derivation outside any lock leaves the same residual
+/// window the record exists to close. The loop is macOS-wired; the pin is a
+/// source scan.
+#[test]
+fn the_census_delete_runs_through_the_in_flight_gate() {
+    let keychain_src = include_str!("../../src/keychain.rs");
+    let census = keychain_src
+        .split_once("pub(crate) fn census_namespaced_items()")
+        .expect("the census is defined")
+        .1
+        .split_once("fn dump_keychain()")
+        .expect("the census ends where the dump helper begins")
+        .0;
+    assert!(
+        census.contains("crate::runtime::census_delete_gate("),
+        "every census delete runs through the flock-held gate: {census}"
+    );
+    assert_eq!(
+        census.matches("in_flight.clear()").count(),
+        2,
+        "the record clears on both outcomes — the delete landed, or it failed and \
+         nothing is in flight anymore"
+    );
+    assert!(
+        !census.contains("salvage_delete_namespaced_item(&service)"),
+        "the delete sink takes the witness, never a bare service: {census}"
+    );
+}
+
+/// The delete sink's signature requires the in-flight witness, so no
+/// `/usr/bin/security` delete for a per-session item can run without a
+/// durable record behind it — the record-first order is a type, not a
+/// call-site convention, exactly like `OwnedKeychainWrite`. macOS-wired; the
+/// pin is a source scan.
+#[test]
+fn the_keychain_delete_sink_requires_the_in_flight_witness() {
+    let keychain_src = include_str!("../../src/keychain.rs");
+    let signature = keychain_src
+        .split_once("pub(crate) fn salvage_delete_namespaced_item(")
+        .expect("the salvage delete sink is defined")
+        .1
+        .split_once('{')
+        .expect("the sink body opens")
+        .0;
+    assert!(
+        signature.contains("InFlightDelete"),
+        "the salvage delete accepts only the in-flight witness, never a raw service string: \
+         {signature}"
+    );
+}
+
+/// The re-check's hold, behaviorally: while a peer holds the state flock, the
+/// production re-check seam cannot complete, and the in-flight stamp lands
+/// inside that hold — no record exists while the seam is blocked, so no
+/// delete subprocess can start before the record is durable. Removing the
+/// `with_state_lock` wrapper reds this test, which the pure-decision seam
+/// test cannot. The competing thread spawns INSIDE the hold — the
+/// `tests/inline/lock.rs` wedge shape — so a slow spawn cannot let the
+/// re-check complete first and false-red a green tree.
+#[test]
+fn the_gc_recheck_blocks_while_a_peer_holds_the_state_flock() {
+    let home = HomeSandbox::new();
+    let sessions = home.home().join(".clauth/profiles/blocked/sessions-810-1");
+    let runtime = home.home().join(".clauth/profiles/blocked/runtime-810-1");
+    let service = "Claude Code-credentials-c56fc9bd";
+    let record_path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = crate::lock::with_state_lock(|_held| {
+        let handle = std::thread::spawn(move || {
+            tx.send(gc_keychain_recheck(Some(service), &sessions, &runtime))
+                .expect("send decision");
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the re-check must wait on the state flock while a peer holds it"
+        );
+        assert!(
+            !record_path.exists(),
+            "the stamp lands inside the flock hold — no record exists while the re-check is \
+             blocked"
+        );
+        Ok::<_, anyhow::Error>(handle)
+    })
+    .expect("hold the flock");
+    let in_flight = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the re-check completes once the flock frees")
+        .expect("re-check outcome")
+        .expect("the posed world collects");
+    assert_eq!(
+        in_flight.service(),
+        service,
+        "the witness names the service the record stamps"
+    );
+    assert!(
+        record_path.exists(),
+        "the stamp is durable before any delete subprocess could run"
+    );
+    handle.join().expect("join the re-check thread");
+}
+
+/// The GC re-check's fail-closed arm: a stamp that cannot persist skips the
+/// delete rather than running it unguarded — the skip returns no witness, so
+/// no delete sink can run.
+#[test]
+fn the_gc_recheck_skips_the_delete_when_the_stamp_cannot_persist() {
+    let home = HomeSandbox::new();
+    let sessions = home.home().join(".clauth/profiles/skip/sessions-814-1");
+    let runtime = home.home().join(".clauth/profiles/skip/runtime-814-1");
+    let path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(&path, r#"{"deletes": [}"#).expect("corrupt record");
+    let decision = gc_keychain_recheck(
+        Some("Claude Code-credentials-c56fc9bd"),
+        &sessions,
+        &runtime,
+    )
+    .expect("the re-check does not error, it skips");
+    assert!(
+        decision.is_none(),
+        "an unrecordable in-flight delete must not run"
+    );
+}
+
+/// The census gate's spare arm: a service a live runtime dir derives is
+/// spared WITHOUT a record — the walk outranks, and no spurious refusal is
+/// minted for a delete that will not run.
+#[test]
+fn the_census_gate_spares_a_live_service_without_stamping() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/gated/runtime-811-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let service = crate::claude::namespaced_keychain_service(
+        &runtime.canonicalize().expect("canonical runtime"),
+    );
+    assert!(
+        census_delete_gate(&service).expect("gate").is_none(),
+        "a dir-derived service is live: the gate spares it"
+    );
+    let path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    assert!(!path.exists(), "the spare never stamps a record");
+}
+
+/// The census gate's collect arm, and the record's lifecycle in one drive:
+/// the orphaned service is stamped in the same hold as the walk, the record
+/// refuses a same-service write, and the witness's clear restores it.
+#[test]
+fn the_census_gate_stamps_an_orphaned_service_before_its_delete() {
+    let home = HomeSandbox::new();
+    fs::create_dir_all(home.home().join(".clauth/profiles/gated")).expect("profiles dir");
+    let service = "Claude Code-credentials-c56fc9bd";
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+
+    let in_flight = census_delete_gate(service)
+        .expect("gate")
+        .expect("no dir explains the service: still orphaned");
+    assert_eq!(
+        in_flight.service(),
+        service,
+        "the witness names the gated service"
+    );
+
+    let rows = namespaced_keychain_ledger::load_in_flight()
+        .expect("read record")
+        .deletes;
+    assert_eq!(rows.len(), 1, "the stamp is durable: {rows:?}");
+    assert_eq!(rows[0].service, service, "the row names the gated service");
+    assert!(
+        rows[0].stamp_secs <= now + 5 && rows[0].stamp_secs + 5 >= now,
+        "the row stamps the moment of the gate, not some past or future wall time: {:?}",
+        rows[0].stamp_secs
+    );
+
+    let err = namespaced_keychain_ledger::record_with(
+        service,
+        &crate::profile::ProfileName::from("gated"),
+        &SessionId::for_test("812-1"),
+        namespaced_keychain_ledger::save,
+    )
+    .expect_err("the gate's record refuses a same-service write");
+    assert!(
+        err.downcast_ref::<namespaced_keychain_ledger::DeleteInFlight>()
+            .is_some(),
+        "the refusal is the consult's typed error: {err:#}"
+    );
+
+    in_flight.clear().expect("clear after the delete's outcome");
+    assert!(
+        namespaced_keychain_ledger::load_in_flight()
+            .expect("read record")
+            .deletes
+            .is_empty(),
+        "the clear removed the row durably"
+    );
+    namespaced_keychain_ledger::record_with(
+        service,
+        &crate::profile::ProfileName::from("gated"),
+        &SessionId::for_test("812-1"),
+        namespaced_keychain_ledger::save,
+    )
+    .expect("a cleared record admits the write");
+}
+
+/// An unreadable in-flight record refuses the write rather than reading as
+/// "no delete in flight" — the same fail-closed fold the ownership ledger
+/// loads under.
+#[test]
+fn a_corrupt_in_flight_record_refuses_the_write_fail_closed() {
+    let home = HomeSandbox::new();
+    let runtime = home.home().join(".clauth/profiles/corrupt/runtime-813-1");
+    fs::create_dir_all(&runtime).expect("runtime dir");
+    let path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("keychain-deletes-in-flight.json");
+    fs::create_dir_all(path.parent().expect("record parent")).expect("clauth dir");
+    fs::write(
+        &path,
+        r#"{"deletes":[{"service":"not-a-namespaced-service","stamp_secs":1}]}"#,
+    )
+    .expect("corrupt record");
+    let err = namespaced_keychain_ledger::authorize_write_with(
+        &runtime,
+        &crate::profile::ProfileName::from("corrupt"),
+        &SessionId::for_test("813-1"),
+        namespaced_keychain_ledger::save,
+    )
+    .expect_err(
+        "a record the naming rule could not produce refuses the write, never reads as absent",
+    );
+    assert!(format!("{err:#}").contains("not-a-namespaced-service"));
+}
+
+/// The seed's retry mapping: a refusal over an in-flight delete arms the
+/// watchdog-tick retry, the same arm the classified locked-keychain transient
+/// takes — the record clears when the delete lands or fails, and a crashed
+/// delete's is swept after the delete's worst-case duration, so the retry
+/// converges instead of wedging.
+#[test]
+fn the_seed_retries_a_write_refused_over_an_in_flight_delete() {
+    let err: anyhow::Error = namespaced_keychain_ledger::DeleteInFlight {
+        service: "Claude Code-credentials-c56fc9bd".to_string(),
+        stamp_secs: 0,
+        pids: Vec::new(),
+    }
+    .into();
+    assert_eq!(
+        delete_in_flight_disposition(&err),
+        Some(SeedDegradeDisposition::RetryOnTick),
+        "the in-flight refusal maps to the retry arm the seed and its watchdog-tick retry share"
+    );
+    assert_eq!(
+        delete_in_flight_disposition(&anyhow::anyhow!("a plain failure")),
+        None,
+        "every other failure keeps the classified disposition"
     );
 }
 
