@@ -916,6 +916,7 @@ fn session_profile_none_for_non_runtime_path() {
 /// session reads, so the switch-affectedness advisory has to say so (issue
 /// #90). Serialized + restored: `session_auth` reads the process env, and no
 /// other test drives it, but the lock keeps any future reader honest.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_default_config_dir_session_reads_as_global() {
     use std::sync::OnceLock;
@@ -938,6 +939,32 @@ fn a_default_config_dir_session_reads_as_global() {
         verdict,
         SessionAuth::Global,
         "a session on the default dir reads the global credentials"
+    );
+}
+
+/// The macOS twin of the test above: the Global arm is gated off there (the
+/// Keychain item detaches on the first refresh), so the same env state reads
+/// custom.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_default_config_dir_session_stays_custom_on_macos() {
+    let home = crate::testutil::HomeSandbox::new();
+    std::fs::create_dir_all(home.home().join(".claude")).expect("default dir");
+    let saved = std::env::var_os("CLAUDE_CONFIG_DIR");
+    // SAFETY: test-only, macos-only, restored below.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", home.home().join(".claude")) };
+    let verdict = session_auth();
+    // SAFETY: same as above — restore the prior value.
+    unsafe {
+        match &saved {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    };
+    assert_eq!(
+        verdict,
+        SessionAuth::IsolatedCustom,
+        "macOS keeps the default-dir session custom: its Keychain item detaches"
     );
 }
 
