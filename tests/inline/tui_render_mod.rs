@@ -1537,6 +1537,50 @@ fn a_wrapped_hint_scrolls_into_view_with_its_row() {
     );
 }
 
+/// The `home tab` row is the Config tab's widest (eight chips, 87 cells
+/// focused), so at a narrow pane the chip run breaks BETWEEN chips onto
+/// continuation lines indented to the value column — the contract's
+/// multi-select wrapping clause, extended to the cycle row. The selected value
+/// must stay visible wherever it sits in the run.
+#[test]
+fn the_home_tab_row_wraps_between_chips_at_a_narrow_pane() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::profile::HomeTab;
+    use crate::tui::app::{GLOBAL_CONFIG_ROWS, GlobalConfigRow, Tab};
+
+    let mut app = App::new(AppConfig {
+        state: AppState {
+            home_tab: Some(HomeTab::Plugin),
+            ..AppState::default()
+        },
+        profiles: Vec::new(),
+    });
+    app.tab = Tab::Config;
+    app.global_config_cursor = GLOBAL_CONFIG_ROWS
+        .iter()
+        .position(|r| *r == GlobalConfigRow::HomeTab)
+        .expect("home tab row");
+
+    // 60 cols: the first line holds the key cell plus four chips, the rest of
+    // the run — including the selected `[plugin]` — continues below.
+    let screen = dump(&app, 60, 24);
+    assert!(
+        screen.contains("home tab"),
+        "the home tab row renders:\n{screen}"
+    );
+    assert!(
+        screen.contains("[plugin]"),
+        "the selected value must stay visible at a narrow pane:\n{screen}"
+    );
+    assert!(
+        screen.lines().any(|l| {
+            let t = l.trim_matches(['│', '┊', '┃', ' ']);
+            t.starts_with("fallback")
+        }),
+        "the chip run must continue between chips on a line indented to the value column:\n{screen}"
+    );
+}
+
 /// The block-vs-row scroll rule, pinned off the pure function instead of live
 /// hint copy: the screen test above only discriminates while some real hint
 /// happens to wrap past the viewport, so rewording one silently retires it.

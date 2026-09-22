@@ -10997,13 +10997,15 @@ fn delegate_row_text_confirm_turns_the_knob_back_off() {
     );
 }
 
-// ── herdr mode landing ───────────────────────────────────────────────────────
+// ── landing ──────────────────────────────────────────────────────────────────
 
-/// `with_herdr_mode(true)` lands on the Plugin tab with the herdr selector
-/// row under the cursor, checks already recomputed so the first paint is not
-/// empty. Construction probes herdr right away — `HERDR_ENV=1` proves herdr
-/// is present — so on a real run the row is there at first paint; the probe
-/// is skipped under test (it would read the real registry), and the
+/// `with_herdr_mode(true)` on the FIRST herdr launch lands on the Plugin tab
+/// with the herdr selector row under the cursor and its detail pane descended
+/// (the `↵` shape), checks already recomputed so the first paint is not empty,
+/// and marks the landing done in `[herdr] first_landing_done` — once, forever.
+/// Construction probes herdr right away — `HERDR_ENV=1` proves herdr is
+/// present — so on a real run the row is there at first paint; the probe is
+/// skipped under test (it would read the real registry), and the
 /// injected-probe half below pins the landed cursor. The `claude --version`
 /// probe stays `r`-gated: construction must not block the first paint on a
 /// spawn.
@@ -11014,9 +11016,14 @@ fn herdr_mode_lands_on_the_plugin_tab_with_the_herdr_row_selected() {
 
     assert_eq!(app.tab, super::Tab::Plugin, "herdr mode opens on Plugin");
     assert!(app.herdr_mode);
-    assert!(
-        matches!(app.plugin.focus, super::PluginFocus::List),
-        "the landing must not steal focus into the detail pane"
+    assert_eq!(
+        app.plugin.focus,
+        super::PluginFocus::Detail,
+        "the first herdr landing descends into the selected row's detail pane"
+    );
+    assert_eq!(
+        app.plugin.herdr_options_cursor, 0,
+        "the landed options cursor starts on the first row"
     );
     assert!(
         matches!(app.plugin.herdr, Some(None)),
@@ -11063,6 +11070,11 @@ fn herdr_mode_lands_on_the_plugin_tab_with_the_herdr_row_selected() {
         Some("herdr"),
         "the landing row is the herdr check once it renders"
     );
+    assert_eq!(
+        app.plugin.focus,
+        super::PluginFocus::Detail,
+        "the recompute keeps the landing descended into the detail pane"
+    );
 
     // `r` is still the only thing that probes the version.
     super::recompute_plugin_checks(&mut app, true);
@@ -11070,19 +11082,166 @@ fn herdr_mode_lands_on_the_plugin_tab_with_the_herdr_row_selected() {
         app.plugin.cc_version.is_some(),
         "`r` runs the version probe"
     );
+
+    // The landing is a one-time door: the marker it persists makes the next
+    // launch open the home tab (pinned in the sibling test).
+    let saved = std::fs::read_to_string(
+        crate::profile::clauth_dir()
+            .expect("clauth dir")
+            .join("profiles.toml"),
+    )
+    .unwrap_or_default();
+    assert!(
+        saved.contains("first_landing_done = true"),
+        "the first landing persists its marker: {saved}"
+    );
+    assert_eq!(
+        app.last_reload_fp,
+        crate::profile::reload_fingerprint(),
+        "the first landing adopts its own marker write, so the first tick \
+         does not re-read the config as an external change"
+    );
 }
 
-/// The mode-less constructor is untouched: Overview, first row, no flag.
+/// A launch outside herdr mode opens the `home tab` (default `overview`) and
+/// never touches the herdr landing marker.
 #[test]
 fn a_plain_app_lands_on_overview_with_the_first_row_selected() {
     let _home = crate::testutil::HomeSandbox::new();
-    let app = bare_app();
-    assert_eq!(app.tab, super::Tab::Overview);
+    let app = bare_app().with_herdr_mode(false);
+    assert_eq!(
+        app.tab,
+        super::Tab::Overview,
+        "a plain app opens the home tab (overview by default)"
+    );
     assert!(!app.herdr_mode);
     assert_eq!(app.plugin.cursor, 0);
     assert!(
         app.plugin.checks.is_empty(),
-        "no construction recompute outside herdr mode"
+        "no construction recompute outside the first herdr landing"
+    );
+    let saved = std::fs::read_to_string(
+        crate::profile::clauth_dir()
+            .expect("clauth dir")
+            .join("profiles.toml"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !saved.contains("first_landing_done"),
+        "a plain launch never writes the herdr landing marker: {saved}"
+    );
+}
+
+/// Two herdr launches, like two real runs: the first lands on Plugin with the
+/// herdr detail open and persists `first_landing_done`; the second — a fresh
+/// app loading the saved state — opens the `home tab` instead and skips the
+/// eager probe the first landing paid for.
+#[test]
+fn the_herdr_landing_fires_once_then_later_launches_open_the_home_tab() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let first = bare_app().with_herdr_mode(true);
+    assert_eq!(
+        first.tab,
+        super::Tab::Plugin,
+        "the first herdr launch lands on Plugin"
+    );
+    let saved = std::fs::read_to_string(
+        crate::profile::clauth_dir()
+            .expect("clauth dir")
+            .join("profiles.toml"),
+    )
+    .unwrap_or_default();
+    assert!(
+        saved.contains("first_landing_done = true"),
+        "the first landing writes its marker: {saved}"
+    );
+
+    let config = crate::profile::load_config().expect("reload");
+    let second = App::new(config).with_herdr_mode(true);
+    assert_eq!(
+        second.tab,
+        super::Tab::Overview,
+        "the second herdr launch opens the home tab (overview by default)"
+    );
+    assert!(
+        second.plugin.checks.is_empty(),
+        "a later herdr launch skips the eager probe the first landing paid for"
+    );
+}
+
+/// A plain launch honors the configured home tab: a top-level `home_tab = "plugin"`
+/// in profiles.toml opens the Plugin tab, with no herdr-mode flag and no eager probe.
+#[test]
+fn a_plain_launch_with_home_tab_set_lands_on_that_tab() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("profiles.toml"),
+        "active_profile = \"acct\"\nprofiles = [\"acct\"]\n\
+         home_tab = \"plugin\"\n",
+    )
+    .expect("write");
+    let config = crate::profile::load_config().expect("load");
+    let app = App::new(config).with_herdr_mode(false);
+    assert_eq!(
+        app.tab,
+        super::Tab::Plugin,
+        "the configured home tab decides a plain launch"
+    );
+    assert!(!app.herdr_mode);
+    assert!(
+        app.plugin.checks.is_empty(),
+        "a plain launch runs no eager probe, whatever the home tab"
+    );
+    let saved = std::fs::read_to_string(
+        crate::profile::clauth_dir()
+            .expect("clauth dir")
+            .join("profiles.toml"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !saved.contains("first_landing_done"),
+        "a plain launch never writes the herdr landing marker: {saved}"
+    );
+}
+
+/// Space on the appearance band's `home tab` row cycles `overview` → `usage`
+/// in tab order and persists, so the next launch opens the new tab.
+#[test]
+fn home_tab_cycles_from_the_config_appearance_row() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = bare_app();
+    let home_row = super::GLOBAL_CONFIG_ROWS.iter().copied().find(|row| {
+        row.band() == "appearance"
+            && !matches!(
+                row,
+                super::GlobalConfigRow::Theme
+                    | super::GlobalConfigRow::ResetShape
+                    | super::GlobalConfigRow::ClockNotation
+            )
+    });
+    assert!(
+        home_row.is_some(),
+        "the appearance band holds the home tab row"
+    );
+    super::run_global_config_row(&mut app, home_row.expect("found"));
+    let saved = std::fs::read_to_string(
+        crate::profile::clauth_dir()
+            .expect("clauth dir")
+            .join("profiles.toml"),
+    )
+    .expect("read");
+    assert!(
+        saved.contains("home_tab = \"usage\""),
+        "the cycle persists overview -> usage: {saved}"
+    );
+    let config = crate::profile::load_config().expect("reload");
+    let relaunch = App::new(config).with_herdr_mode(false);
+    assert_eq!(
+        relaunch.tab,
+        super::Tab::Usage,
+        "the next launch opens the cycled home tab"
     );
 }
 

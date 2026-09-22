@@ -36,6 +36,7 @@ fn toggles() -> RowState {
         any_auto_start: true,
         reset_display: ResetDisplay::Relative,
         clock_format: ClockFormat::H24,
+        home_tab: HomeTab::Overview,
     }
 }
 
@@ -116,6 +117,33 @@ fn longest_key_aligns_with_shortest() {
         value_col("extra usage spent", &widest),
         "`extra usage spent` (== KEY_W chars) must not push its value column right"
     );
+}
+
+/// The appearance band's fourth row: `home tab` lists the eight tab names as
+/// bare chips and opens its value at the shared column, like every other row.
+#[test]
+fn home_tab_renders_in_the_appearance_band_at_the_shared_value_column() {
+    let mut found = false;
+    for r in GLOBAL_CONFIG_ROWS {
+        if r.band() != "appearance" {
+            continue;
+        }
+        let line = line_text(&detail_row(r, false, toggles(), tunables(), None));
+        if line.contains("home tab") {
+            found = true;
+            for name in [
+                "overview", "usage", "tokens", "setup", "fallback", "config", "status", "plugin",
+            ] {
+                assert!(line.contains(name), "the home tab row lists {name}: {line}");
+            }
+            assert_eq!(
+                value_col("home tab", &line),
+                2 + KEY_W + KEY_GUTTER,
+                "the home tab value opens at the shared column: {line}"
+            );
+        }
+    }
+    assert!(found, "the appearance band holds the home tab row");
 }
 
 /// Bare labels: an inactive first option and an active first option open at the

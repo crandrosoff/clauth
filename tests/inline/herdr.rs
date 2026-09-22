@@ -9,7 +9,7 @@ use super::*;
 use clap::{CommandFactory, Parser as _};
 
 use crate::cli::{Cli, Command, HerdrCommand, HerdrConfigCommand};
-use crate::profile::{HerdrSettings, PopupWidth};
+use crate::profile::{HerdrSettings, HomeTab, PopupWidth};
 
 /// Every plan this produces has to append onto the file it was planned against
 /// and still parse, or the write turns a working herdr config into a broken one.
@@ -2316,6 +2316,7 @@ fn herdr_settings_round_trip_through_the_app_load_path() {
         "border_label = true\n",
         "delegate_dot = false\n",
         "delegate_row_text = true\n",
+        "first_landing_done = true\n",
     ));
     let config = crate::profile::load_config().expect("load");
     let want = HerdrSettings {
@@ -2325,6 +2326,7 @@ fn herdr_settings_round_trip_through_the_app_load_path() {
         border_label: true,
         delegate_dot: false,
         delegate_row_text: true,
+        first_landing_done: true,
     };
     assert_eq!(config.state.herdr, want);
     crate::profile::save_app_state(&config.state).expect("save");
@@ -2448,6 +2450,78 @@ fn popup_width_round_trips_all_four_spellings_through_the_real_load_path() {
             "the reloaded get path still answers {spelling}"
         );
     }
+}
+
+#[test]
+fn home_tab_round_trips_through_the_app_load_path() {
+    let _home = crate::testutil::HomeSandbox::new();
+
+    // A bogus spelling must refuse to load: `home_tab` is a typed enum, so a
+    // typo cannot silently read as the overview default.
+    write_profiles_toml("active_profile = \"acct\"\nprofiles = [\"acct\"]\nhome_tab = \"bogus\"\n");
+    assert!(
+        crate::profile::load_config().is_err(),
+        "a bogus home_tab must refuse to load"
+    );
+
+    // Absent key: the overview default, and a default renders no key.
+    write_profiles_toml("active_profile = \"acct\"\nprofiles = [\"acct\"]\n");
+    let config = crate::profile::load_config().expect("load");
+    assert_eq!(
+        config.state.home_tab(),
+        HomeTab::Overview,
+        "an absent home_tab is the overview default"
+    );
+    let rendered = toml::to_string_pretty(&config.state).expect("render");
+    assert!(
+        !rendered.contains("home_tab"),
+        "a default home_tab renders no key: {rendered}"
+    );
+
+    // A written top-level home_tab loads, renders top-level (never inside
+    // `[herdr]`), and survives a save + reload.
+    write_profiles_toml(
+        "active_profile = \"acct\"\nprofiles = [\"acct\"]\nhome_tab = \"plugin\"\n",
+    );
+    let config = crate::profile::load_config().expect("load");
+    assert_eq!(
+        config.state.home_tab(),
+        HomeTab::Plugin,
+        "the written home_tab loads"
+    );
+    let rendered = toml::to_string_pretty(&config.state).expect("render");
+    assert!(
+        rendered.contains("home_tab = \"plugin\""),
+        "an off-default home_tab renders as a top-level key: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[herdr]"),
+        "the home_tab key is top-level, never inside [herdr]: {rendered}"
+    );
+    crate::profile::save_app_state(&config.state).expect("save");
+    let again = crate::profile::load_config().expect("reload");
+    assert_eq!(
+        again.state.home_tab(),
+        HomeTab::Plugin,
+        "the home_tab survives a save + reload"
+    );
+
+    // Beside its siblings: with both keys off-default, the top-level keys
+    // render in field order, home_tab after reset_display.
+    let state = crate::profile::AppState {
+        reset_display: Some(crate::profile::ResetDisplay::Clock),
+        home_tab: Some(HomeTab::Config),
+        ..crate::profile::AppState::default()
+    };
+    let rendered = toml::to_string_pretty(&state).expect("render");
+    let reset_at = rendered
+        .find("reset_display")
+        .expect("reset_display renders");
+    let home_at = rendered.find("home_tab").expect("home_tab renders");
+    assert!(
+        home_at > reset_at,
+        "home_tab renders beside its siblings, after reset_display: {rendered}"
+    );
 }
 
 #[test]

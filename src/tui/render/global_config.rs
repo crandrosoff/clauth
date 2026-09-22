@@ -1,8 +1,8 @@
 //! Program-wide Config tab — a single panel of global settings, distinct from
 //! the per-account Setup tab. Rows back real persisted state in `AppState` and
 //! run in the concern bands `GlobalConfigRow::band` names, each opened by an
-//! eyebrow header: appearance (`theme`, `reset display`, and the `clock`
-//! notation it gates), scheduler (`on mismatch`, `refresh`
+//! eyebrow header: appearance (`theme`, `reset display`, the `clock`
+//! notation it gates, and `home tab`), scheduler (`on mismatch`, `refresh`
 //! cadence, `refresh spent` toggle, `context nudge`, `auto-start queue`,
 //! `rotation`), auto-switch (`weekly limit`,
 //! `switch mode` = burn-aware, `walk order` (issue #86), the burn-aware
@@ -22,8 +22,9 @@ use ratatui::text::{Line, Span};
 use crate::format::format_threshold_tokens;
 use crate::profile::{
     ClockFormat, DEFAULT_BURN_FLOOR_PCT, DEFAULT_BURN_HORIZON_MS, DEFAULT_REFRESH_INTERVAL_MS,
-    DEFAULT_WEEKLY_SWITCH_PCT, DivergenceChoice, MAX_CONTEXT_NUDGE_TOKENS, MAX_REFRESH_INTERVAL_MS,
-    MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, ResetDisplay, WalkOrder,
+    DEFAULT_WEEKLY_SWITCH_PCT, DivergenceChoice, HomeTab, MAX_CONTEXT_NUDGE_TOKENS,
+    MAX_REFRESH_INTERVAL_MS, MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, ResetDisplay,
+    WalkOrder,
 };
 
 use super::super::app::{
@@ -65,6 +66,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             any_auto_start: cfg.profiles.iter().any(|p| p.auto_start),
             reset_display: state.reset_display(),
             clock_format: state.clock_format(),
+            home_tab: state.home_tab(),
         }
     };
     let tunables = {
@@ -138,11 +140,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 lines.extend(tooltip);
             }
             None => {
-                lines.push(if selected {
-                    highlight_row(line, inner.width as usize)
+                let row_lines = if *row == GlobalConfigRow::HomeTab {
+                    let arrow = if selected {
+                        Span::styled("❯ ", theme::accent().bold())
+                    } else {
+                        Span::raw("  ")
+                    };
+                    home_tab_lines(arrow, rows, selected, inner.width as usize)
                 } else {
-                    line
-                });
+                    vec![detail_row(*row, selected, rows, tunables, row_editing)]
+                };
+                for line in row_lines {
+                    lines.push(if selected {
+                        highlight_row(line, inner.width as usize)
+                    } else {
+                        line
+                    });
+                }
                 if selected && let Some(tip) = row_hint(*row, rows, tunables) {
                     lines.extend(help_tooltip_lines(&tip, inner.width as usize));
                 }
@@ -195,6 +209,7 @@ struct RowState {
     any_auto_start: bool,
     reset_display: ResetDisplay,
     clock_format: ClockFormat,
+    home_tab: HomeTab,
 }
 
 /// The numeric tunables the Config tab's rows render, gathered once per draw.
@@ -234,6 +249,9 @@ fn row_hint(row: GlobalConfigRow, rows: RowState, tunables: RowTunables) -> Opti
             ClockFormat::H24 => "write reset times as 21:20, in your local timezone",
             ClockFormat::H12 => "write reset times as 9:20pm, in your local timezone",
         }),
+        GlobalConfigRow::HomeTab => String::from(
+            "the tab clauth opens on; the first herdr launch opens the plugin tab with the herdr row selected",
+        ),
         GlobalConfigRow::DivergenceDefault => String::from(match default_divergence {
             None => "ask what to do when claude code signs in over the active account",
             Some(DivergenceChoice::Overwrite) => {
@@ -373,6 +391,13 @@ fn detail_row(
             } else {
                 dimmed_cycle_row("clock", &options, selected)
             }
+        }
+        GlobalConfigRow::HomeTab => {
+            let options: Vec<(&str, bool)> = HomeTab::ALL
+                .iter()
+                .map(|t| (t.as_str(), rows.home_tab == *t))
+                .collect();
+            cycle_row(arrow, "home tab", &options, selected)
         }
         GlobalConfigRow::RefreshInterval => match editing {
             Some(input) => refresh_edit_line(arrow, input),
@@ -812,6 +837,51 @@ fn cycle_row(
         spans.push(cycle_option(label, *active, row_selected));
     }
     Line::from(spans)
+}
+
+/// [`cycle_row`]'s wrap-aware form for the `home tab` row: the run is the
+/// Config tab's widest (eight chips, 87 cells focused), so at a narrow pane a
+/// single line clips the tail of the run — the selected chip included. The
+/// run breaks BETWEEN chips onto continuation lines indented to the value
+/// column (the contract's multi-select wrapping clause, extended to the cycle
+/// row), never inside a chip.
+fn home_tab_lines(
+    arrow: Span<'static>,
+    rows: RowState,
+    selected: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let value_col = 2 + KEY_W + KEY_GUTTER;
+    let mut out = vec![Line::from(vec![
+        arrow,
+        Span::styled(
+            key_cell("home tab", KEY_W, KEY_GUTTER),
+            label_style(selected),
+        ),
+    ])];
+    let mut used = value_col;
+    for (i, tab) in HomeTab::ALL.iter().enumerate() {
+        let span = cycle_option(tab.as_str(), rows.home_tab == *tab, selected);
+        let gap = if i == 0 { 0 } else { 2 };
+        let need = span.content.chars().count() + gap;
+        if used + need > width {
+            let len = span.content.chars().count();
+            let mut next = Line::from(Span::raw(" ".repeat(value_col)));
+            next.spans.push(span);
+            used = value_col + len;
+            out.push(next);
+        } else {
+            // `out` always holds the first line (built above).
+            let idx = out.len() - 1;
+            let last = &mut out[idx];
+            if gap > 0 {
+                last.spans.push(Span::raw("  "));
+            }
+            last.spans.push(span);
+            used += need;
+        }
+    }
+    out
 }
 
 /// A cloudy-tui Disabled row for a cycle setting another toggle makes inert: the

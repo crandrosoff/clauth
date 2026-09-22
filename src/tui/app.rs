@@ -46,7 +46,7 @@ use crate::lock::with_state_lock;
 use crate::lockorder::{RankedGuard, RankedMutex};
 use crate::oauth;
 use crate::profile::{
-    AppConfig, ClockFormat, ConfigHandle, ConsoleSite, DivergenceChoice, HerdrSettings,
+    AppConfig, ClockFormat, ConfigHandle, ConsoleSite, DivergenceChoice, HerdrSettings, HomeTab,
     MAX_CONTEXT_NUDGE_TOKENS, MAX_REFRESH_INTERVAL_MS, MAX_WEEKLY_SWITCH_PCT,
     MIN_CONTEXT_NUDGE_TOKENS, MIN_REFRESH_INTERVAL_MS, MIN_WEEKLY_SWITCH_PCT, ModelSettings,
     PopupWidth, Profile, ProfileName, ReloadFingerprint, ResetDisplay, ThemeName, WalkOrder,
@@ -326,6 +326,11 @@ pub(crate) enum GlobalConfigRow {
     /// (`AppState.clock_format`): `24h` / `12h`. Dimmed + inert while
     /// `reset display` is `relative`, since nothing renders a clock then.
     ClockNotation,
+    /// The tab every launch opens on (`AppState.home_tab`): space/⏎
+    /// cycles the eight tabs in [`Tab::ALL`] order. The first herdr launch
+    /// overrides it — that one landing opens the Plugin tab with the herdr
+    /// row's detail descended.
+    HomeTab,
     /// Chain-wide "when spent" behavior (`AppState.switch_off_when_spent`) — surfaced here as
     /// a program-wide default alongside the Fallback detail row.
     SwitchOffWhenSpent,
@@ -1083,6 +1088,36 @@ impl Tab {
 
     pub(crate) fn prev(self) -> Tab {
         Tab::ALL[(self.index() + Tab::ALL.len() - 1) % Tab::ALL.len()]
+    }
+}
+
+impl From<Tab> for HomeTab {
+    fn from(tab: Tab) -> Self {
+        match tab {
+            Tab::Overview => HomeTab::Overview,
+            Tab::Usage => HomeTab::Usage,
+            Tab::Tokens => HomeTab::Tokens,
+            Tab::Setup => HomeTab::Setup,
+            Tab::Fallback => HomeTab::Fallback,
+            Tab::Config => HomeTab::Config,
+            Tab::Status => HomeTab::Status,
+            Tab::Plugin => HomeTab::Plugin,
+        }
+    }
+}
+
+impl From<HomeTab> for Tab {
+    fn from(tab: HomeTab) -> Self {
+        match tab {
+            HomeTab::Overview => Tab::Overview,
+            HomeTab::Usage => Tab::Usage,
+            HomeTab::Tokens => Tab::Tokens,
+            HomeTab::Setup => Tab::Setup,
+            HomeTab::Fallback => Tab::Fallback,
+            HomeTab::Config => Tab::Config,
+            HomeTab::Status => Tab::Status,
+            HomeTab::Plugin => Tab::Plugin,
+        }
     }
 }
 
@@ -2340,21 +2375,28 @@ impl App {
         app
     }
 
-    /// herdr-mode landing, applied at construction (before the first paint):
-    /// the Plugin tab with the herdr selector row under the cursor. The herdr
-    /// probe runs here too — `HERDR_ENV=1` proves herdr is present, and each
-    /// of its three subprocesses is bounded at `herdr::PROBE_TIMEOUT` (2 s,
-    /// worst case 6 s total) — so the landing row is real at first paint
-    /// instead of waiting for `r`; the cursor clamp inside the recompute
+    /// Landing, applied at construction (before the first paint). The FIRST
+    /// herdr launch opens the Plugin tab with the herdr selector row under the
+    /// cursor and its detail pane descended, then marks the landing done in
+    /// `[herdr] first_landing_done` — once, forever. Every other launch — a
+    /// plain TUI, and herdr after the first — opens the top-level `home_tab`
+    /// (default overview); the herdr header tag is unaffected. The first
+    /// landing's probe runs here — `HERDR_ENV=1` proves herdr is present, and
+    /// each of its three subprocesses is bounded at `herdr::PROBE_TIMEOUT`
+    /// (2 s, worst case 6 s total) — so the landing row is real at first paint
+    /// instead of waiting for `r`; later launches skip it like plain ones (the
+    /// probe stays `r`-gated), and the cursor clamp inside the recompute
     /// below keeps the landing row valid when herdr does not resolve. The
     /// `claude --version` probe stays `r`-gated: construction must not block
     /// the first paint on a spawn. Nothing else changes — no key handling, no
     /// focus stealing after construction.
     pub(crate) fn with_herdr_mode(mut self, herdr_mode: bool) -> Self {
         self.herdr_mode = herdr_mode;
-        if herdr_mode {
+        let first_landing = herdr_mode && !self.config().state.herdr.first_landing_done;
+        if first_landing {
             self.tab = Tab::Plugin;
             self.plugin.cursor = HERDR_SELECTOR_ROW;
+            self.plugin.focus = PluginFocus::Detail;
             // Skipped under test (a spawned probe would read the real
             // registry); the landing test injects the probe instead.
             self.plugin.herdr = Some(if cfg!(test) {
@@ -2363,6 +2405,18 @@ impl App {
                 crate::herdr::probe()
             });
             recompute_plugin_checks(&mut self, false);
+            {
+                let mut cfg = self.config();
+                cfg.state.herdr.first_landing_done = true;
+                let _ = save_app_state(&cfg.state);
+            }
+            // Adopt the marker write like every other in-TUI save: without the
+            // bump, the app's own profiles.toml rewrite reads as an external
+            // change and re-runs a full config reload on the first tick.
+            self.last_reload_fp = reload_fingerprint();
+        } else {
+            let home: Tab = self.config().state.home_tab().into();
+            self.tab = home;
         }
         self
     }
@@ -4886,10 +4940,11 @@ pub(crate) const FALLBACK_ROWS: [FallbackRow; 8] = [
 /// Rows on the program-wide Config tab, in display order. Related knobs sit
 /// together instead of interleaving halt above detection; [`GlobalConfigRow::band`]
 /// names each run, and the renderer turns a band change into an eyebrow header.
-pub(crate) const GLOBAL_CONFIG_ROWS: [GlobalConfigRow; 17] = [
+pub(crate) const GLOBAL_CONFIG_ROWS: [GlobalConfigRow; 18] = [
     GlobalConfigRow::Theme,
     GlobalConfigRow::ResetShape,
     GlobalConfigRow::ClockNotation,
+    GlobalConfigRow::HomeTab,
     GlobalConfigRow::DivergenceDefault,
     GlobalConfigRow::RefreshInterval,
     GlobalConfigRow::RefreshSpentAccounts,
@@ -4915,7 +4970,8 @@ impl GlobalConfigRow {
         match self {
             GlobalConfigRow::Theme
             | GlobalConfigRow::ResetShape
-            | GlobalConfigRow::ClockNotation => "appearance",
+            | GlobalConfigRow::ClockNotation
+            | GlobalConfigRow::HomeTab => "appearance",
             GlobalConfigRow::DivergenceDefault
             | GlobalConfigRow::RefreshInterval
             | GlobalConfigRow::RefreshSpentAccounts
@@ -4985,6 +5041,7 @@ fn run_global_config_row(app: &mut App, row: GlobalConfigRow) {
     match row {
         GlobalConfigRow::Theme => cycle_theme(app),
         GlobalConfigRow::ResetShape => cycle_reset_display(app),
+        GlobalConfigRow::HomeTab => cycle_home_tab(app),
         // Inert while the countdown is relative (rendered dimmed): no surface
         // draws a clock then, so the notation would decide nothing.
         GlobalConfigRow::ClockNotation => {
@@ -5220,6 +5277,17 @@ fn cycle_clock_format(app: &mut App) {
     {
         let mut cfg = app.config();
         cfg.state.clock_format = Some(next);
+        let _ = save_app_state(&cfg.state);
+    }
+    app.last_reload_fp = reload_fingerprint();
+}
+
+fn cycle_home_tab(app: &mut App) {
+    let next: Tab = app.config().state.home_tab().into();
+    let next = next.next();
+    {
+        let mut cfg = app.config();
+        cfg.state.home_tab = Some(next.into());
         let _ = save_app_state(&cfg.state);
     }
     app.last_reload_fp = reload_fingerprint();

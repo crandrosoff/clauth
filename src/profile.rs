@@ -649,6 +649,53 @@ pub(crate) enum ClockFormat {
     H12,
 }
 
+/// The tab a launch opens on: the Config tab's `home tab` row, persisted as a
+/// top-level `home_tab` key in profiles.toml beside `theme` /
+/// `reset_display` / `clock_format`. Read by the TUI at construction; the
+/// first herdr launch overrides it (Plugin tab, herdr row selected, detail
+/// open) and then marks the landing done in `[herdr] first_landing_done`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum HomeTab {
+    #[default]
+    Overview,
+    Usage,
+    Tokens,
+    Setup,
+    Fallback,
+    Config,
+    Status,
+    Plugin,
+}
+
+impl HomeTab {
+    /// Every main tab, in the cycle order the `home tab` row steps through.
+    pub(crate) const ALL: [HomeTab; 8] = [
+        HomeTab::Overview,
+        HomeTab::Usage,
+        HomeTab::Tokens,
+        HomeTab::Setup,
+        HomeTab::Fallback,
+        HomeTab::Config,
+        HomeTab::Status,
+        HomeTab::Plugin,
+    ];
+
+    /// The on-disk spelling, doubled as the cycle row's chip label.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            HomeTab::Overview => "overview",
+            HomeTab::Usage => "usage",
+            HomeTab::Tokens => "tokens",
+            HomeTab::Setup => "setup",
+            HomeTab::Fallback => "fallback",
+            HomeTab::Config => "config",
+            HomeTab::Status => "status",
+            HomeTab::Plugin => "plugin",
+        }
+    }
+}
+
 /// What shape `open-pane.sh` opens the herdr entrypoint in, one of the
 /// `[herdr]` knobs in profiles.toml. Serialized as a lowercase string so the
 /// file stays human-readable: `popup_width = "fit"`.
@@ -688,9 +735,10 @@ impl PopupWidth {
 
 /// The herdr knobs, persisted under `[herdr]` in profiles.toml. Written by the
 /// Plugin tab's herdr-options form rows, read by the plugin scripts through
-/// `clauth herdr config get <key>` — so the on-disk shape is also a published
-/// read contract. The `[herdr]` table itself may be absent (defaults) or
-/// partial: a missing field fills from [`Default`] rather than erroring.
+/// `clauth herdr config get <key>` and by the TUI at launch — so the on-disk
+/// shape is also a published read contract. The `[herdr]` table itself may be
+/// absent (defaults) or partial: a missing field fills from [`Default`]
+/// rather than erroring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HerdrSettings {
@@ -710,6 +758,10 @@ pub(crate) struct HerdrSettings {
     /// The sidebar row `clauth herdr install` appends gains the
     /// `$clauth_delegate` token, so a running delegate reads as text.
     pub(crate) delegate_row_text: bool,
+    /// Set once the first herdr-mode landing fires, so that landing happens
+    /// exactly once; every later launch — herdr mode included — opens the
+    /// top-level `home_tab` instead.
+    pub(crate) first_landing_done: bool,
 }
 
 impl Default for HerdrSettings {
@@ -721,6 +773,7 @@ impl Default for HerdrSettings {
             border_label: false,
             delegate_dot: true,
             delegate_row_text: false,
+            first_landing_done: false,
         }
     }
 }
@@ -880,6 +933,14 @@ pub(crate) struct AppState {
     /// the [`ClockFormat`] default; read through [`AppState::clock_format`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) clock_format: Option<ClockFormat>,
+    /// The tab every launch opens on (the Config tab's `home tab` row). The
+    /// first herdr launch overrides it — that one landing opens the Plugin
+    /// tab with the herdr row's detail descended. `None` = the [`HomeTab`]
+    /// default, so an untouched profiles.toml carries neither this key nor
+    /// the setting and lands exactly as it did before the key existed. Read
+    /// through [`AppState::home_tab`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) home_tab: Option<HomeTab>,
     /// When false, burn-rate estimates ("34.4 %/h · 1h 56m left") are hidden
     /// in the Usage tab even when data is available.
     #[serde(default = "default_show_estimates", skip_serializing_if = "is_true")]
@@ -934,9 +995,9 @@ pub(crate) struct AppState {
     /// through [`AppState::burn_horizon_cap_ms`]. Inert unless burn-aware is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) burn_horizon_cap_ms: Option<u64>,
-    /// herdr-mode knobs (popup width, pane tag, the delegate dot). Omitted from
-    /// the file while every knob is at its default, so an untouched
-    /// profiles.toml gains no `[herdr]` block on the next save.
+    /// The `[herdr]` table: the herdr-plugin knobs plus the first-landing
+    /// marker. Omitted from the file while every key is at its default, so an
+    /// untouched profiles.toml gains no `[herdr]` block on the next save.
     #[serde(default, skip_serializing_if = "herdr_is_default")]
     pub(crate) herdr: HerdrSettings,
     /// The daemon's `[serve]` table. Omitted from the file while at its
@@ -997,6 +1058,11 @@ impl AppState {
     /// The effective wall-clock notation (unset = 24-hour).
     pub(crate) fn clock_format(&self) -> ClockFormat {
         self.clock_format.unwrap_or_default()
+    }
+
+    /// The effective landing tab (unset = [`HomeTab`] default, overview).
+    pub(crate) fn home_tab(&self) -> HomeTab {
+        self.home_tab.unwrap_or_default()
     }
 
     /// The effective weekly exhaustion line: the configured value when it sits
@@ -1140,6 +1206,7 @@ impl Default for AppState {
             theme: None,
             reset_display: None,
             clock_format: None,
+            home_tab: None,
             show_estimates: true,
             show_pace: false,
             count_cache: false,
