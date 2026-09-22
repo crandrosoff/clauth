@@ -1760,8 +1760,12 @@ fn the_census_collects_unexplained_items_and_spares_live_dirs() {
     );
 
     // The salvage-then-delete leg the production census drives, on the
-    // throwaway only.
-    salvage_delete_namespaced_item(&orphan_service).expect("collect the orphan");
+    // throwaway only: the gate takes the flock, walks the live set and stamps
+    // the in-flight record the delete must carry.
+    let gate = crate::runtime::census_delete_gate(&orphan_service)
+        .expect("census gate")
+        .expect("the orphan is not live");
+    salvage_delete_namespaced_item(&gate).expect("collect the orphan");
     assert!(
         read_blob_at(&orphan_service, &account)
             .expect("read orphan")

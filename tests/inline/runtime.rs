@@ -10429,6 +10429,8 @@ fn a_stale_in_flight_record_is_swept_and_admits_the_write() {
 /// stamped child is ALIVE must refuse the write however old the row is, or
 /// the late delete destroys a freshly seeded item: #82 in the crash case.
 /// The alive pid is the test binary's own.
+// pid liveness is unix-only (`pid_alive` is false on windows by design).
+#[cfg(unix)]
 #[test]
 fn an_alive_delete_child_keeps_refusing_past_the_age_bound() {
     let home = HomeSandbox::new();
@@ -10539,6 +10541,8 @@ fn a_pid_dead_row_falls_back_to_the_age_bound() {
 /// test's own process alive and a just-reaped child dead (pid allocation is
 /// monotonic until it wraps at `pid_max`, so the freed pid is not reissued
 /// inside this test's lifetime).
+// pid liveness is unix-only (`pid_alive` is false on windows by design).
+#[cfg(unix)]
 #[test]
 fn pid_liveness_reads_self_alive_and_a_reaped_child_dead() {
     assert!(
