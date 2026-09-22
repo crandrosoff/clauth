@@ -533,13 +533,40 @@ pub(super) fn value_caret(input: &InputState, invalid: bool) -> Vec<Span<'static
 /// Title: always italic, always UPPERCASE; bold added only when focused.
 /// Color: `ACCENT_2` for the first bordered panel on the screen body, `TEXT_DIM` for the rest.
 pub(super) fn section_box(title: &str, focused: bool, first: bool) -> Block<'static> {
-    section_box_impl(title, focused, first, true, Vec::new())
+    section_box_impl(title, focused, first, true, Vec::new(), None)
 }
 
 /// Like [`section_box`] but preserves the title's original case — use only when
 /// the title is a profile/account name, not a structural label.
 pub(super) fn section_box_verbatim(title: &str, focused: bool, first: bool) -> Block<'static> {
-    section_box_impl(title, focused, first, false, Vec::new())
+    section_box_impl(title, focused, first, false, Vec::new(), None)
+}
+
+/// Border cells of rule a title must keep before the meta slot may render: a
+/// single dash between the two reads as part of the title's own rule run.
+const META_RULE_MIN: usize = 3;
+
+/// [`section_box_verbatim`] with a title-right meta slot: a short count/state
+/// label in the border break just before the top-right corner, rendered
+/// `… meta ─╮`. The slot is data — `TEXT_DIM`, never bold, never italic — and
+/// the dashes either side keep the border token.
+///
+/// The slot gives way rather than colliding with the title: it renders only
+/// while `width` leaves it at least [`META_RULE_MIN`] border cells of rule
+/// after the title's own inset, since the title names the panel and the meta
+/// only describes what is in it. An empty `meta` renders the plain box too.
+pub(super) fn section_box_verbatim_meta(
+    title: &str,
+    meta: &str,
+    focused: bool,
+    first: bool,
+    width: u16,
+) -> Block<'static> {
+    // `╭` + ` title ` + rule + ` meta ` + the slot's closing dash + `╮`.
+    let insets = 2 + (title.chars().count() + 2) + (meta.chars().count() + 3);
+    let rule = (width as usize).saturating_sub(insets);
+    let meta = (!meta.is_empty() && rule >= META_RULE_MIN).then_some(meta);
+    section_box_impl(title, focused, first, false, Vec::new(), meta)
 }
 
 /// [`section_box`] with a live braille spinner `frame` appended inside the title
@@ -553,7 +580,7 @@ pub(super) fn section_box_loading(
     frame: &str,
 ) -> Block<'static> {
     let suffix = vec![Span::styled(format!("{frame} "), theme::accent())];
-    section_box_impl(title, focused, first, true, suffix)
+    section_box_impl(title, focused, first, true, suffix, None)
 }
 
 fn section_box_impl(
@@ -562,6 +589,7 @@ fn section_box_impl(
     first: bool,
     uppercase: bool,
     suffix: Vec<Span<'static>>,
+    meta: Option<&str>,
 ) -> Block<'static> {
     let border_style = if focused {
         Style::default().fg(theme::line_strong_color())
@@ -590,11 +618,23 @@ fn section_box_impl(
     };
     let mut title_spans = vec![Span::styled(label, title_style)];
     title_spans.extend(suffix);
-    Block::bordered()
+    let mut block = Block::bordered()
         .border_set(border::ROUNDED)
         .border_style(border_style)
         .title(Line::from(title_spans))
-        .padding(Padding::horizontal(1))
+        .padding(Padding::horizontal(1));
+    if let Some(meta) = meta {
+        // A right-aligned title ends flush against the top-right corner, so the
+        // slot closes with a border cell of its own: `… meta ─╮`.
+        block = block.title_top(
+            Line::from(vec![
+                Span::styled(format!(" {meta} "), theme::dim()),
+                Span::styled("─", border_style),
+            ])
+            .right_aligned(),
+        );
+    }
+    block
 }
 
 pub(super) fn draw_profile_selector(

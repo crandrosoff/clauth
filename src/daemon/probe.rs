@@ -5,10 +5,10 @@
 //!     life by the running daemon; a display-only try-lock tells the TUI header
 //!     whether a daemon is up (an advisory lock auto-releases on process death,
 //!     so a dead daemon reads as absent on the next probe). Paired with
-//!     `status.json`'s freshness it drives the `● daemon` health dot
+//!     `status.json`'s freshness it drives the `[ daemon ]` header chip
 //!     ([`daemon_health`]). [`singleton_held`] reads the same lock as a decision
 //!     for `clauth daemon --status`, where not knowing has to be an error rather
-//!     than a hidden dot.
+//!     than a dim chip.
 //!   * `clauthd-standby.lock` — the **standby slot** ([`StandbySlot`], #57). One
 //!     waiter may park on the singleton lock; every later instance is
 //!     [`Claim::Redundant`] and exits, so a spawner that fires repeatedly can no
@@ -31,7 +31,8 @@ use anyhow::{Context, Result};
 
 use crate::profile::clauth_dir;
 
-/// How stale `status.json` may be before the `● daemon` dot flips green→amber.
+/// How stale `status.json` may be before the `[ daemon ]` header chip flips
+/// green→amber.
 /// The daemon stamps it every ~1s loop tick, but a single tick can legitimately
 /// block on the keychain shell-outs: a rotation's mirror makes three `security`
 /// calls (read, write, read-back verify) at 10 s each, unclamped because it
@@ -51,7 +52,7 @@ const _: () = assert!(
      read green, never amber"
 );
 
-/// The `● daemon` header dot's three display states, derived from the daemon
+/// The `[ daemon ]` header chip's three display states, derived from the daemon
 /// singleton flock (presence) + the `generated_at` stamp inside `status.json`
 /// (health — the daemon's own write time, not the file's mtime). Nothing here
 /// gates fetching — that is [`FetchLease`] — but `clauth daemon --status` does
@@ -60,7 +61,7 @@ const _: () = assert!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonHealth {
     /// No daemon: `clauthd.lock` is free (never started, or the holder died).
-    /// The dot is hidden; the TUI self-fetches under its own lease.
+    /// The chip is dim; the TUI self-fetches under its own lease.
     Absent,
     /// A daemon holds the lock but its feed is stale/unwritten — wedging,
     /// pre-abort, or just-booted before the first `status.json` write. Amber.
@@ -69,9 +70,9 @@ pub(crate) enum DaemonHealth {
     Fresh,
 }
 
-/// Probe the daemon's presence + health for the header dot. Best-effort: any
+/// Probe the daemon's presence + health for the header chip. Best-effort: any
 /// error that hides whether a daemon is up reads as [`DaemonHealth::Absent`]
-/// (the dot simply disappears — never a false "daemon up"). Never CREATES the
+/// (the chip simply dims — never a false "daemon up"). Never CREATES the
 /// lock file: a missing file means no daemon has ever started here.
 pub(crate) fn daemon_health() -> DaemonHealth {
     let Ok(dir) = clauth_dir() else {
@@ -89,7 +90,7 @@ pub(crate) fn daemon_health() -> DaemonHealth {
         Ok(()) => return DaemonHealth::Absent,
         // Held → a daemon is present; fall through to the health read.
         Err(std::fs::TryLockError::WouldBlock) => {}
-        // Can't tell (io error): hide the dot rather than assert a daemon.
+        // Can't tell (io error): dim the chip rather than assert a daemon.
         Err(std::fs::TryLockError::Error(_)) => return DaemonHealth::Absent,
     }
     // Present. A missing/unreadable feed = booted-but-not-yet-published → amber.
@@ -106,7 +107,7 @@ pub(crate) fn daemon_health() -> DaemonHealth {
 /// Pure freshness test: `body`'s `generated_at` stamp is within [`DAEMON_STALE_MS`]
 /// of `now_ms`. An unparseable body or a missing/malformed stamp reads as stale —
 /// never render a feed we can't read as fresh. A stamp in the FUTURE counts as
-/// fresh (clock skew must not flap the dot).
+/// fresh (clock skew must not flap the chip).
 pub(crate) fn status_is_fresh(body: &str, now_ms: u64) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
         return false;
@@ -554,7 +555,7 @@ fn stamp_pid() -> std::io::Result<()> {
 
 /// The pid the running daemon stamped into the [`PID_FILE`] sidecar, when one is
 /// fully written. Informational only — its one caller reaches it past a true
-/// [`singleton_held`], and the header dot answers off [`daemon_health`], so
+/// [`singleton_held`], and the header chip answers off [`daemon_health`], so
 /// presence is proven by the flock either way and a pid left behind by a dead
 /// daemon is never read as one being up.
 ///

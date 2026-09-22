@@ -15,7 +15,8 @@ use super::format::{
 };
 use super::header::pulse_name_spans;
 use super::panes::{
-    bold_when, draw_scrollbar, empty_state, name_color, section_box, select_line, wrap_words,
+    bold_when, draw_scrollbar, empty_state, name_color, section_box, section_box_verbatim_meta,
+    select_line, wrap_words,
 };
 use super::usage::{eta_left_secs, window_rate_unit};
 use crate::fallback::{
@@ -64,10 +65,35 @@ fn chain_panel_height(content_rows: usize, area_height: u16) -> u16 {
     desired.min(max_chain).max(3)
 }
 
+/// The accounts panel's title-right meta: one count per harness — both
+/// harnesses whatever the filter shows, since the counts describe the rows the
+/// table lists, never the view. A roster with no accounts drops out of the
+/// words; with both empty there is nothing to count and no slot renders.
+fn harness_counts(app: &App) -> String {
+    let mut terms: Vec<String> = Vec::new();
+    let claude_n = app.config().profiles.len();
+    if claude_n > 0 {
+        terms.push(format!("{claude_n} claude"));
+    }
+    let codex_n = app.codex_rows.len();
+    if codex_n > 0 {
+        terms.push(format!("{codex_n} codex"));
+    }
+    terms.join(" · ")
+}
+
 fn draw_overview_accounts(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // Sole interactive content panel on this screen — always focused.
     let focused = true;
-    let block = section_box("accounts", focused, true);
+    // The title carries the harness filter and the meta slot the counts. The
+    // eyebrow is pre-cased because the verbatim builder skips the central
+    // uppercase: the harness name is a name and keeps its own case, so the
+    // title reads `ACCOUNTS ─ codex`.
+    let title = match app.harness_filter.label_name() {
+        Some(name) => format!("ACCOUNTS ─ {name}"),
+        None => "ACCOUNTS".to_string(),
+    };
+    let block = section_box_verbatim_meta(&title, &harness_counts(app), focused, true, area.width);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

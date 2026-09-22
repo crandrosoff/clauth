@@ -2233,31 +2233,223 @@ fn deepseek_amount_w_spans_all_currencies() {
     );
 }
 
-/// `c` cycles the Overview's harness filter, and the header chip says which
-/// harness the account count is about. Absent while both show, so the default
-/// header is byte-identical to the one that predates codex.
+/// `c` cycles the Overview's harness filter, and the accounts panel's title
+/// names the harness the panel is showing. Nameless while both show, so the
+/// unfiltered title carries only the eyebrow and the border rule.
 #[test]
 fn the_harness_filter_cycles_and_names_itself() {
     use crate::tui::app::HarnessFilter;
     assert_eq!(HarnessFilter::default(), HarnessFilter::All);
     assert_eq!(
-        HarnessFilter::All.chip(),
+        HarnessFilter::All.label_name(),
         None,
-        "the default carries no badge"
+        "the unfiltered label carries no harness name"
     );
 
     let claude = HarnessFilter::All.next();
     assert_eq!(claude, HarnessFilter::Claude);
-    assert_eq!(claude.chip(), Some("claude only"));
+    assert_eq!(claude.label_name(), Some("claude"));
     assert!(claude.shows_claude() && !claude.shows_codex());
 
     let codex = claude.next();
     assert_eq!(codex, HarnessFilter::Codex);
-    assert_eq!(codex.chip(), Some("codex only"));
+    assert_eq!(codex.label_name(), Some("codex"));
     assert!(codex.shows_codex() && !codex.shows_claude());
 
     assert_eq!(codex.next(), HarnessFilter::All, "three states, then back");
     assert!(HarnessFilter::All.shows_claude() && HarnessFilter::All.shows_codex());
+}
+
+/// The accounts panel's top border row, which carries the panel title and its
+/// title-right meta slot.
+fn accounts_title_row(app: &App, width: u16) -> String {
+    let mut term =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 8)).expect("terminal");
+    term.draw(|f| draw_overview_accounts(f, f.area(), app))
+        .expect("draw");
+    crate::testutil::buffer_rows(term.backend().buffer())[0].clone()
+}
+
+/// Writes a codex roster into the sandboxed `~/.clauth` — the roster `App::new`
+/// reads into `App::codex_rows`.
+fn write_codex_roster(names: &[&str]) {
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
+    let list = names
+        .iter()
+        .map(|n| format!("\"{n}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        dir.join("codex-profiles.toml"),
+        format!("profiles = [{list}]\n"),
+    )
+    .expect("write codex state");
+}
+
+/// The accounts panel's title carries the harness filter: the plain eyebrow
+/// unfiltered, the harness name after it under the filter. The border rule
+/// supplies the trailing dashes, and the name keeps its own case — only the
+/// eyebrow is uppercased.
+///
+/// The panel's row is `╭` + ` TITLE ` + rule + ` meta ` + `─` + `╮`, so the
+/// one-claude fixture's 8-cell meta needs `rule = width - title - 8 - 7 >= 3`
+/// with the title 8 cells unfiltered and 17 filtered: at width 25 the
+/// unfiltered rule is 2 and the filtered one has none at all, so the slot
+/// sheds a fortiori — which is what keeps these three rows the title and its
+/// rule alone.
+#[test]
+fn the_accounts_title_carries_the_harness_filter() {
+    use crate::tui::app::HarnessFilter;
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = App::new(config_with(
+        vec![profile("cl1", 80.0, 10.0, 3_600)],
+        None,
+        vec![],
+    ));
+
+    assert_eq!(
+        accounts_title_row(&app, 25),
+        "╭ ACCOUNTS ─────────────╮",
+        "unfiltered: the eyebrow and the border rule alone"
+    );
+
+    app.harness_filter = HarnessFilter::Claude;
+    assert_eq!(
+        accounts_title_row(&app, 25),
+        "╭ ACCOUNTS ─ claude ────╮",
+        "the claude filter names the harness it shows"
+    );
+
+    app.harness_filter = HarnessFilter::Codex;
+    assert_eq!(
+        accounts_title_row(&app, 25),
+        "╭ ACCOUNTS ─ codex ─────╮",
+        "the codex filter names the harness it shows"
+    );
+}
+
+/// The meta slot counts both harnesses whatever the filter shows — the counts
+/// describe the rows the table lists, never the view the filter narrows — as
+/// one term per harness joined by a middot.
+#[test]
+fn the_accounts_meta_slot_counts_both_harnesses_whatever_the_filter_shows() {
+    use crate::tui::app::HarnessFilter;
+    let _home = crate::testutil::HomeSandbox::new();
+    write_codex_roster(&["cx1", "cx2"]);
+    let mut app = App::new(config_with(
+        vec![
+            profile("cl1", 80.0, 10.0, 3_600),
+            profile("cl2", 80.0, 20.0, 3_600),
+            profile("cl3", 80.0, 30.0, 3_600),
+        ],
+        None,
+        vec![],
+    ));
+    assert_eq!(
+        app.codex_rows.len(),
+        2,
+        "fixture control: the roster loaded"
+    );
+
+    assert_eq!(
+        accounts_title_row(&app, 50),
+        "╭ ACCOUNTS ───────────────── 3 claude · 2 codex ─╮",
+        "unfiltered: both rosters, the shorter title leaving a longer rule"
+    );
+
+    app.harness_filter = HarnessFilter::Claude;
+    assert_eq!(
+        accounts_title_row(&app, 50),
+        "╭ ACCOUNTS ─ claude ──────── 3 claude · 2 codex ─╮",
+        "the claude filter leaves the counts alone"
+    );
+
+    app.harness_filter = HarnessFilter::Codex;
+    assert_eq!(
+        accounts_title_row(&app, 50),
+        "╭ ACCOUNTS ─ codex ───────── 3 claude · 2 codex ─╮",
+        "the codex filter leaves the counts alone"
+    );
+}
+
+/// A roster with no accounts drops out of the words — the slot counts what the
+/// panel lists — so a claude-only config reads `2 claude` and a codex-only one
+/// `2 codex` rather than naming a harness at zero.
+#[test]
+fn the_accounts_meta_slot_omits_a_roster_with_no_accounts() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let claude_only = App::new(config_with(
+        vec![
+            profile("cl1", 80.0, 10.0, 3_600),
+            profile("cl2", 80.0, 20.0, 3_600),
+        ],
+        None,
+        vec![],
+    ));
+    assert_eq!(
+        accounts_title_row(&claude_only, 50),
+        "╭ ACCOUNTS ─────────────────────────── 2 claude ─╮"
+    );
+
+    write_codex_roster(&["cx1", "cx2"]);
+    let codex_only = App::new(config_with(Vec::new(), None, vec![]));
+    assert_eq!(
+        codex_only.codex_rows.len(),
+        2,
+        "fixture control: the roster loaded"
+    );
+    assert_eq!(
+        accounts_title_row(&codex_only, 50),
+        "╭ ACCOUNTS ──────────────────────────── 2 codex ─╮"
+    );
+}
+
+/// Both rosters empty is nothing to count: an empty meta renders the plain box,
+/// the title's border rule running on to the corner.
+#[test]
+fn an_empty_roster_pair_renders_no_meta_slot() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let app = App::new(config_with(Vec::new(), None, vec![]));
+    assert_eq!(
+        accounts_title_row(&app, 50),
+        "╭ ACCOUNTS ──────────────────────────────────────╮"
+    );
+}
+
+/// The slot sheds whole rather than crowding the title: at a `3 claude ·
+/// 2 codex` meta (18 cells) under an `ACCOUNTS` title (8) it renders while
+/// `rule = width - 8 - 18 - 7 >= 3`, so 36 holds it at the three rule cells
+/// `META_RULE_MIN` asks for and 35 drops it with the rule run whole.
+#[test]
+fn the_accounts_meta_slot_sheds_before_the_title_loses_its_rule() {
+    let _home = crate::testutil::HomeSandbox::new();
+    write_codex_roster(&["cx1", "cx2"]);
+    let app = App::new(config_with(
+        vec![
+            profile("cl1", 80.0, 10.0, 3_600),
+            profile("cl2", 80.0, 20.0, 3_600),
+            profile("cl3", 80.0, 30.0, 3_600),
+        ],
+        None,
+        vec![],
+    ));
+    assert_eq!(
+        app.codex_rows.len(),
+        2,
+        "fixture control: the roster loaded"
+    );
+
+    assert_eq!(
+        accounts_title_row(&app, 36),
+        "╭ ACCOUNTS ─── 3 claude · 2 codex ─╮",
+        "at 36 the slot keeps its three rule cells"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 35),
+        "╭ ACCOUNTS ───────────────────────╮",
+        "one column narrower the slot is gone and the title keeps its rule"
+    );
 }
 
 /// The codex rows the Overview draws come from the codex roster plus the same

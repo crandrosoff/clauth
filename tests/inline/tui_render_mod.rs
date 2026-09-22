@@ -1129,24 +1129,18 @@ fn narrow_header_hides_the_gauge_without_a_dangling_separator() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = narrow_app();
     app.tab = Tab::Usage;
-    let narrow = dump(&app, 45, 38);
-    let row = narrow
-        .lines()
-        .find(|l| l.contains("accounts"))
-        .unwrap_or_else(|| panic!("header count row missing:\n{narrow}"));
-    assert!(
-        !row.contains('·'),
-        "hidden gauge left a dangling separator:\n{row}"
-    );
-    let wide = dump(&app, 120, 30);
-    let wide_row = wide
-        .lines()
-        .find(|l| l.contains("accounts"))
-        .unwrap_or_else(|| panic!("wide header count row missing:\n{wide}"));
-    assert!(
-        wide_row.contains('·'),
-        "desktop separator + gauge unchanged:\n{wide_row}"
-    );
+    // The count and its separator left the header for the accounts panel's
+    // title: no header row names the accounts or carries a separator middot
+    // at any width — the rows are the gauge and the indicator alone.
+    for width in [45, 120] {
+        let out = dump(&app, width, 38);
+        for (i, line) in out.lines().enumerate().take(3) {
+            assert!(
+                !line.contains("accounts") && !line.contains('·'),
+                "header row {i} at {width} names accounts or carries a separator:\n{line}"
+            );
+        }
+    }
 }
 
 #[test]

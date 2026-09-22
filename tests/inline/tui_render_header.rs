@@ -83,6 +83,23 @@ fn app_with(profiles: Vec<Profile>, active: Option<&str>) -> App {
     App::new(config)
 }
 
+/// Writes a codex roster into the sandboxed `~/.clauth` — the roster
+/// `App::new` reads into `App::codex_rows`.
+fn write_codex_roster(names: &[&str]) {
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
+    let list = names
+        .iter()
+        .map(|n| format!("\"{n}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        dir.join("codex-profiles.toml"),
+        format!("profiles = [{list}]\n"),
+    )
+    .expect("write codex state");
+}
+
 /// Renders only the header block (sized by `header_height`).
 fn render_header_rows(app: &App, width: u16) -> Vec<String> {
     let height = header_height(app);
@@ -196,96 +213,154 @@ fn header_height_is_always_three() {
     assert_eq!(header_height(&compact), 3);
 }
 
-// ── Gauge on row 1, after account count ─────────────────────────────────
+// ── Row 1: the gauge and the status indicator alone ──────────────────────
+//
+// Row 1's text column starts after the 10-cell glyph column, so a terminal `W`
+// columns wide offers it `W - 10`. The indicator `● status.claude.ai` is 18
+// cells (dot, space, 16-char feed) plus a 3-cell reserve, so the gauge is
+// fitted to `W - 31` and the indicator is gated on the gauge as rendered. No
+// account count and no `ACCOUNTS ─ …` label takes part: both live on the
+// accounts panel's title.
 
 #[test]
-fn gauge_after_account_count_on_wide_terminal() {
+fn row1_is_the_gauge_and_the_status_indicator_alone_when_wide() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
     app.tab = Tab::Tokens;
-    let row1 = row_content(&app, 120, 1);
+
+    // At 120 the text column is 110 cells: the gauge's widest rung is 26
+    // (8 name + 2 gap + 10 bar + 2 brackets + ` 42%`), the indicator 18, and
+    // the 66 cells between them are the elastic gap.
+    let chars: Vec<char> = row_content(&app, 120, 1).chars().collect();
+    let left: String = chars[..26].iter().collect();
+    let gap: String = chars[26..92].iter().collect();
+    let dot: String = chars[92..].iter().collect();
+    assert_eq!(left, "uwuclxdy  [████░░░░░░] 42%", "the gauge leads row 1");
     assert!(
-        row1.starts_with("1 account"),
-        "row 1 starts with account count"
+        gap.chars().all(|c| c == ' '),
+        "the elastic gap carries whitespace alone: {gap:?}"
     );
-    assert!(row1.contains("·"), "middot separates count and gauge");
-    assert!(row1.contains("uwuclxdy"), "gauge name on row 1 after count");
-    assert!(row1.contains("42%"), "gauge percent on row 1");
+    assert_eq!(dot, "● status.claude.ai", "the indicator closes the row");
 }
 
+/// The ladder's first rung on the buffer: the bar gives a cell before the name
+/// is touched. The bar at its widest (10 cells) puts the gauge at 26 and needs
+/// a `W - 31 >= 27` budget, so 58 is the first width that holds it.
 #[test]
-fn gauge_after_account_count_shows_bar_when_roomy() {
+fn row1_gauge_shrinks_its_bar_before_it_touches_the_name() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
     app.tab = Tab::Tokens;
-    let row1 = row_content(&app, 120, 1);
-    assert!(row1.contains('█'), "gauge bar visible on row 1 at 120 wide");
+
+    assert_eq!(
+        row_content(&app, 58, 1).trim_end(),
+        "uwuclxdy  [████░░░░░░] 42%    ● status.claude.ai",
+        "at its own fit width the bar is full"
+    );
+    assert_eq!(
+        row_content(&app, 57, 1).trim_end(),
+        "uwuclxdy  [████░░░░░] 42%    ● status.claude.ai",
+        "one column narrower the bar gives a cell and the name stays whole"
+    );
 }
 
+/// A provider profile has no usage window, so its gauge is the name and the
+/// 2-cell name gap alone: no bar, no percent, no dash standing in for either.
 #[test]
-fn gauge_dash_for_provider_after_account_count() {
+fn row1_gauge_for_a_provider_profile_carries_no_bar() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = app_with(vec![provider_profile("z.ai")], Some("z.ai"));
     app.tab = Tab::Tokens;
-    let row1 = row_content(&app, 90, 1);
-    assert!(row1.starts_with("1 account"), "row 1 starts with count");
-    assert!(row1.contains("·"), "middot present for provider profile");
-    assert!(row1.contains("z.ai"));
+
+    // 90 - 10 = 80 text cells; the gauge is 6 of them, the indicator 18.
+    let row = row_content(&app, 90, 1);
+    let (left, rest) = row.split_at(6);
+    assert_eq!(left, "z.ai  ", "the gauge is the name and its own gap");
+    let (gap, dot) = rest.split_at(80 - 6 - 18);
     assert!(
-        !row1.contains('—'),
+        gap.chars().all(|c| c == ' '),
+        "the elastic gap carries whitespace alone: {gap:?}"
+    );
+    assert_eq!(dot, "● status.claude.ai", "the indicator closes the row");
+    assert!(
+        !row.contains('—'),
         "provider shows no dash when usage is absent"
     );
-    assert!(!row1.contains('█'), "provider must not render a bar");
-    assert!(!row1.contains('%'), "provider must not render a percent");
+    assert!(!row.contains('█'), "provider must not render a bar");
+    assert!(!row.contains('%'), "provider must not render a percent");
 }
 
+/// Two ways the active profile cannot be shown — compact mode, and a config
+/// with no active slot — leave row 1 to the indicator alone. Both are pinned
+/// on the tab where the gauge otherwise renders, so neither passes by the
+/// Overview tab's own gauge-off rule.
 #[test]
-fn gauge_hidden_in_compact_mode() {
+fn row1_carries_no_gauge_in_compact_mode_or_without_an_active_profile() {
     let _home = crate::testutil::HomeSandbox::new();
-    let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
-    app.compact = true;
-    let rows = render_header_rows(&app, 90);
-    assert_eq!(rows.len(), 3);
-    assert!(
-        !rows.iter().any(|r| r.contains("uwuclxdy")),
-        "gauge must not render in compact mode"
-    );
-    assert!(rows[1].contains("1 account"));
+    let mut compact = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
+    compact.compact = true;
+    compact.tab = Tab::Tokens;
+    let mut no_active = app_with(vec![oauth_profile("uwuclxdy", 42.0)], None);
+    no_active.tab = Tab::Tokens;
+
+    // (90 - 10) - 18 = 62: the indicator alone, right-aligned on a blank row.
+    let expected = format!("{}● status.claude.ai", " ".repeat(62));
+    for (case, app) in [("compact", &compact), ("no active profile", &no_active)] {
+        let rows = render_header_rows(app, 90);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            !rows.iter().any(|r| r.contains("uwuclxdy")),
+            "{case}: the gauge is on no header row"
+        );
+        assert_eq!(
+            row_content(app, 90, 1),
+            expected,
+            "{case}: row 1 is the indicator alone"
+        );
+    }
 }
 
+/// The ladder's tail on the buffer: the bar is already gone, the name holds
+/// while a `W - 31 >= 14` budget remains (14 = 8 name + 2 gap + the percent's
+/// 4 budgeted cells), and one column under it the name clips rather than the
+/// percent.
 #[test]
-fn gauge_hidden_when_no_active_profile() {
-    let _home = crate::testutil::HomeSandbox::new();
-    let app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], None);
-    let rows = render_header_rows(&app, 90);
-    assert_eq!(rows.len(), 3);
-    assert!(!rows.iter().any(|r| r.contains("uwuclxdy")));
-    assert!(rows[1].contains("1 account"));
-}
-
-#[test]
-fn gauge_collapses_to_name_only_on_narrow_terminal() {
-    let _home = crate::testutil::HomeSandbox::new();
-    let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
-    app.tab = Tab::Tokens;
-    let row1 = row_content(&app, 60, 1);
-    assert!(
-        row1.contains("uwuclxdy"),
-        "gauge name still visible at 60 wide"
-    );
-    assert!(row1.contains("·"), "middot present");
-    assert!(row1.contains("1 account"), "account count always visible");
-}
-
-#[test]
-fn gauge_on_row1_with_status_dot() {
+fn row1_gauge_falls_to_the_name_and_percent_before_the_name_clips() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
     app.tab = Tab::Tokens;
-    let row1 = row_content(&app, 100, 1);
-    assert!(row1.contains("●"), "status dot still visible");
-    assert!(row1.contains("status.claude.ai"), "status label visible");
-    assert!(row1.contains("1 account ·"), "count middot gauge");
+
+    assert_eq!(
+        row_content(&app, 45, 1).trim_end(),
+        "uwuclxdy  42%    ● status.claude.ai",
+        "45 is the first width whose budget holds the whole name"
+    );
+    assert_eq!(
+        row_content(&app, 44, 1).trim_end(),
+        "uwuclx…  42%    ● status.claude.ai",
+        "one column narrower the name carries its truncation ellipsis"
+    );
+}
+
+/// The gauge's last rung is the percent alone, and the indicator is charged
+/// the gauge as rendered: it holds the row at that rung and one column under
+/// it, when the gauge has gone.
+#[test]
+fn row1_gauge_falls_to_the_percent_alone_and_then_away() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
+    app.tab = Tab::Tokens;
+
+    assert_eq!(
+        row_content(&app, 35, 1).trim_end(),
+        "42%    ● status.claude.ai",
+        "the percent holds a `W - 31 >= 4` budget down to 35"
+    );
+    assert_eq!(
+        row_content(&app, 34, 1).trim_end(),
+        "      ● status.claude.ai",
+        "one column narrower the gauge is gone, the indicator staying"
+    );
 }
 
 #[test]
@@ -301,10 +376,10 @@ fn row2_is_tabs_only() {
     );
 }
 
-// ── `● daemon` header dot (presence + health → color/hidden) ──────────────────
+// ── `[ daemon ]` header chip (always present; health → color) ────────────────
 
 #[test]
-fn daemon_dot_maps_health_to_color_and_hides_when_absent() {
+fn the_daemon_chip_is_always_present_and_maps_health_to_color() {
     // `HomeSandbox` outermost: its `HOME_TEST_LOCK` must not be taken while a
     // RankedMutex (here `TierSandbox`'s) is held.
     let _home = crate::testutil::HomeSandbox::new();
@@ -312,87 +387,217 @@ fn daemon_dot_maps_health_to_color_and_hides_when_absent() {
     use crate::daemon::DaemonHealth;
     let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
 
-    // Absent → no dot, and row 0 omits the label entirely.
+    // Absent → the chip still renders, dim, on the right edge.
     app.daemon_health = DaemonHealth::Absent;
-    assert!(super::daemon_dot_color(&app).is_none(), "absent → hidden");
-    assert!(
-        !row_content(&app, 100, 0).contains("daemon"),
-        "absent → row 0 omits the daemon label"
-    );
-
-    // Fresh → green, and the label appears on row 0.
-    app.daemon_health = DaemonHealth::Fresh;
     assert_eq!(
-        super::daemon_dot_color(&app),
-        Some(super::theme::success_color()),
-        "fresh → green"
+        super::daemon_chip_color(&app),
+        super::theme::text_dim_color(),
+        "absent → dim"
     );
     let row0 = row_content(&app, 100, 0);
     assert!(
-        row0.contains("● daemon"),
-        "present → row 0 shows `● daemon`"
+        row0.trim_end().ends_with("[ daemon ]"),
+        "absent → the chip is still on the row: {row0:?}"
+    );
+
+    // Fresh → green.
+    app.daemon_health = DaemonHealth::Fresh;
+    assert_eq!(
+        super::daemon_chip_color(&app),
+        super::theme::success_color(),
+        "fresh → green"
     );
 
     // Stale → amber.
     app.daemon_health = DaemonHealth::Stale;
     assert_eq!(
-        super::daemon_dot_color(&app),
-        Some(super::theme::warning_color()),
+        super::daemon_chip_color(&app),
+        super::theme::warning_color(),
         "stale → amber"
     );
 }
 
-// ── Row 1 account count under the harness filter ──────────────────────────────
+/// The chip's pill grammar on the buffer: `[ ` and ` ]` are TEXT_DIM chrome,
+/// the word between them bold in the health color (dim when absent) — pinned on
+/// cells, so a chip painted in one flat style reds.
+#[test]
+fn the_daemon_chip_cells_carry_the_pill_grammar() {
+    use crate::daemon::DaemonHealth;
+    use ratatui::style::Modifier;
+    let _home = crate::testutil::HomeSandbox::new();
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
+    let mut app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], Some("uwuclxdy"));
+    let word_w = "daemon".chars().count();
 
-/// Row 1's count, cut at the elastic gap before the status dot: the account
-/// count plus the harness chip when one shows, and nothing else.
-fn count_prefix(app: &App) -> String {
-    row_content(app, 100, 1)
-        .split("  ")
-        .next()
-        .expect("row 1 opens on the account count")
-        .to_string()
+    for (health, expected) in [
+        (DaemonHealth::Absent, super::theme::text_dim_color()),
+        (DaemonHealth::Fresh, super::theme::success_color()),
+        (DaemonHealth::Stale, super::theme::warning_color()),
+    ] {
+        app.daemon_health = health;
+        let width = 100;
+        let height = header_height(&app);
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            super::draw(f, area, &app);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row = crate::testutil::buffer_rows(buf)[0]
+            .chars()
+            .skip(10)
+            .collect::<String>();
+        let chip = 10 + row.find("[ daemon ]").expect("chip renders");
+
+        // Cells 0-1 are `[ `, the last two ` ]`: chrome either side.
+        for cell in [chip, chip + 1, chip + word_w + 2, chip + word_w + 3] {
+            assert_eq!(
+                buf.content[cell].fg,
+                super::theme::text_dim_color(),
+                "{health:?}: the bracket at cell {cell} is TEXT_DIM chrome"
+            );
+            assert!(
+                !buf.content[cell].modifier.contains(Modifier::BOLD),
+                "{health:?}: the bracket at cell {cell} is not bold"
+            );
+        }
+        // Cells 2..word_w+2 are the word: bold, in the health color.
+        for i in 0..word_w {
+            let cell = chip + 2 + i;
+            assert_eq!(
+                buf.content[cell].fg, expected,
+                "{health:?}: the word carries the health color at cell {cell}"
+            );
+            assert!(
+                buf.content[cell].modifier.contains(Modifier::BOLD),
+                "{health:?}: the word is bold at cell {cell}"
+            );
+        }
+    }
 }
 
-/// The count is a statement about the rows the Overview lists under the
-/// filter: both rosters by default, one roster under its chip. A codex-only
-/// view over three codex rows reads `3 accounts · codex only` and means it.
+/// The status indicator is right-aligned across an elastic gap, and it DROPS
+/// whole when the row cannot hold it: a dot left to render would clip the feed
+/// mid-word. With no gauge on the row, the indicator's own fit (`col >= 18 + 3`)
+/// never passes inside the sub-30 band — there the logo column yields its
+/// cells to the `Min(20)` text column, capping it at 20 — so the gate decides
+/// at the band's edge: at 31 the text column is 21 and the indicator renders
+/// with its 3-cell gap; at 30 it drops whole.
 #[test]
-fn the_account_count_follows_the_harness_filter() {
+fn the_status_indicator_drops_rather_than_clipping_when_the_row_runs_short() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let app = app_with(vec![oauth_profile("uwuclxdy", 42.0)], None);
+
+    assert_eq!(
+        row_content(&app, 31, 1),
+        "   ● status.claude.ai",
+        "exact fit: the indicator renders with its 3-cell gap"
+    );
+    assert_eq!(
+        row_content(&app, 30, 1).trim_end(),
+        "",
+        "one column narrower it drops whole rather than clipping the feed"
+    );
+}
+
+// ── The counts live on the accounts panel, never in the header ───────────
+//
+// The by-harness counts moved onto the accounts panel's title, which carries
+// them as its title-right meta slot (`tui_render_overview.rs` pins that slot's
+// own shed). These two pins are the guard against a count or an `ACCOUNTS ─ …`
+// label coming back to a header row.
+
+/// No header row names the accounts at any width, tab or harness filter: the
+/// sweep walks every seam the old count line had — the label, the count, each
+/// gauge rung, the indicator — on both tabs the gauge differs between.
+#[test]
+fn no_header_row_counts_accounts_at_any_width_tab_or_filter() {
     use crate::tui::app::HarnessFilter;
     let _home = crate::testutil::HomeSandbox::new();
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        "profiles = [\"cx1\", \"cx2\", \"cx3\"]\n",
-    )
-    .expect("write codex state");
+    write_codex_roster(&["cx1", "cx2", "cx3"]);
+    let mut app = app_with(
+        vec![oauth_profile("uwuclxdy", 42.0), provider_profile("z.ai")],
+        Some("uwuclxdy"),
+    );
+
+    for filter in [
+        HarnessFilter::All,
+        HarnessFilter::Claude,
+        HarnessFilter::Codex,
+    ] {
+        app.harness_filter = filter;
+        for tab in [Tab::Overview, Tab::Tokens] {
+            app.tab = tab;
+            for width in 24..=140u16 {
+                for (row, content) in render_header_rows(&app, width).iter().enumerate() {
+                    let lower = content.to_lowercase();
+                    assert!(
+                        !lower.contains("account"),
+                        "{filter:?} on {tab:?} at {width}: header row {row} names the \
+                         accounts: {content:?}"
+                    );
+                    // The row-18 wording (`52 claude · 1 codex`) and the chip
+                    // form (`[ 52 · 1 ]`) carry no "account" substring: the
+                    // harness words (space-led, so the feed's own
+                    // `status.claude.ai` never trips them) and the middot each
+                    // red them on their own, whatever the wording a count
+                    // comes back in.
+                    assert!(
+                        !lower.contains(" claude") && !lower.contains("codex"),
+                        "{filter:?} on {tab:?} at {width}: header row {row} names a \
+                         harness: {content:?}"
+                    );
+                    assert!(
+                        !content.contains('·'),
+                        "{filter:?} on {tab:?} at {width}: header row {row} carries a \
+                         count middot: {content:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The word `ACCOUNTS` belongs to the accounts panel's title alone: a full
+/// Overview frame carries it once, on the panel's top border. A count or a
+/// second `ACCOUNTS ─ …` label one row above that border — where the header
+/// used to carry both — reds this.
+#[test]
+fn the_word_accounts_renders_on_the_panel_title_alone() {
+    let _home = crate::testutil::HomeSandbox::new();
+    write_codex_roster(&["cx1"]);
     let mut app = app_with(
         vec![oauth_profile("uwuclxdy", 42.0), provider_profile("z.ai")],
         None,
     );
+    app.tab = Tab::Overview;
 
-    assert_eq!(count_prefix(&app), "5 accounts");
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| crate::tui::render::draw(f, &app)).unwrap();
+    let rows = crate::testutil::buffer_rows(term.backend().buffer());
 
-    app.harness_filter = HarnessFilter::Claude;
-    assert_eq!(count_prefix(&app), "2 accounts · claude only");
+    for (y, row) in rows.iter().take(header_height(&app) as usize).enumerate() {
+        assert!(
+            !row.contains("ACCOUNTS"),
+            "header row {y} carries no ACCOUNTS: {row:?}"
+        );
+    }
 
-    app.harness_filter = HarnessFilter::Codex;
-    assert_eq!(count_prefix(&app), "3 accounts · codex only");
-}
-
-/// No codex roster: the default header is byte-identical to the one that
-/// predates codex, and the codex-only chip counts nothing.
-#[test]
-fn the_account_count_without_a_codex_roster_is_the_claude_count() {
-    use crate::tui::app::HarnessFilter;
-    let _home = crate::testutil::HomeSandbox::new();
-    let mut app = app_with(
-        vec![oauth_profile("uwuclxdy", 42.0), provider_profile("z.ai")],
-        None,
+    let carrying: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("ACCOUNTS"))
+        .map(|(y, _)| y)
+        .collect();
+    assert_eq!(
+        carrying.len(),
+        1,
+        "the word renders exactly once on the whole screen: {carrying:?}"
     );
-    assert_eq!(count_prefix(&app), "2 accounts");
-    app.harness_filter = HarnessFilter::Codex;
-    assert_eq!(count_prefix(&app), "0 accounts · codex only");
+    assert!(
+        rows[carrying[0]].starts_with("╭ ACCOUNTS "),
+        "and it is the accounts panel's title: {:?}",
+        rows[carrying[0]]
+    );
 }

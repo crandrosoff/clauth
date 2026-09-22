@@ -1590,13 +1590,13 @@ impl HarnessFilter {
     pub(crate) fn shows_codex(self) -> bool {
         !matches!(self, HarnessFilter::Claude)
     }
-    /// Header chip text; `None` while both harnesses show, so the default view
-    /// carries no badge at all.
-    pub(crate) fn chip(self) -> Option<&'static str> {
+    /// Harness name for the accounts panel's title; `None` while both harnesses
+    /// show, so the unfiltered title carries no name.
+    pub(crate) fn label_name(self) -> Option<&'static str> {
         match self {
             HarnessFilter::All => None,
-            HarnessFilter::Claude => Some("claude only"),
-            HarnessFilter::Codex => Some("codex only"),
+            HarnessFilter::Claude => Some("claude"),
+            HarnessFilter::Codex => Some("codex"),
         }
     }
 }
@@ -1881,7 +1881,7 @@ pub(crate) struct App {
     /// Manual-refresh signal to the status thread; a `()` triggers a refetch.
     pub(crate) status_refresh: std::sync::mpsc::Sender<()>,
 
-    /// `● daemon` header-dot state: daemon presence + `status.json` health,
+    /// `[ daemon ]` header-chip state: daemon presence + `status.json` health,
     /// re-probed on a throttled cadence in `on_tick`. UI-thread-only.
     pub(crate) daemon_health: crate::daemon::DaemonHealth,
     /// Throttle for the `daemon_health` flock probe; construct probes once
@@ -10373,9 +10373,9 @@ fn poll_codex_rows(app: &mut App) {
     app.codex_rows = codex_rows();
 }
 
-/// Re-probe the daemon presence + `status.json` health for the `● daemon`
-/// header dot, at most once a second (a flock try-lock + `status.json` read is
-/// cheap but not free, and the dot changes on a human timescale).
+/// Re-probe the daemon presence + `status.json` health for the `[ daemon ]`
+/// header chip, at most once a second (a flock try-lock + `status.json` read is
+/// cheap but not free, and the chip changes on a human timescale).
 fn poll_daemon_health(app: &mut App) {
     const DAEMON_PROBE_INTERVAL: Duration = Duration::from_secs(1);
     if app.last_daemon_probe.elapsed() < DAEMON_PROBE_INTERVAL {

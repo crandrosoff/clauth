@@ -1424,7 +1424,7 @@ fn seed_feed(active: &str, stamp: &str) {
 }
 
 /// A switch landing outside the daemon republishes the feed, but keeps the
-/// daemon's last `generated_at`: readers (`clauth-tray`, the TUI's daemon dot)
+/// daemon's last `generated_at`: readers (`clauth-tray`, the TUI's daemon chip)
 /// treat a fresh stamp as proof a daemon is alive, and stamping `now` from the
 /// CLI would forge that proof with no daemon running.
 #[test]

@@ -3,12 +3,12 @@
 //! Probe contract (#27, #57):
 //!   * `claim_singleton` caps the daemon tree at one active instance plus one
 //!     standby: a third arrival is `Redundant` and exits instead of parking.
-//!   * `daemon_health` drives the `● daemon` header dot from two signals —
+//!   * `daemon_health` drives the `[ daemon ]` header chip from two signals —
 //!     the `clauthd.lock` flock (presence) and `status.json` freshness (health):
-//!     no lock → Absent (hidden), held + fresh → Fresh (green), held + stale →
+//!     no lock → Absent (dim), held + fresh → Fresh (green), held + stale →
 //!     Stale (amber).
 //!   * `singleton_held` asks the same presence question as a DECISION rather
-//!     than a display: where the dot hides an unreadable lock, `--status` fails
+//!     than a display: where the chip dims for an unreadable lock, `--status` fails
 //!     on it instead of telling a supervisor to spawn.
 //!   * `claim_by_replacing` (`--replace`) terminates the running daemon and takes
 //!     over, refusing to signal a pid it can't confirm is a running clauth daemon.
@@ -109,7 +109,7 @@ fn the_staleness_window_sits_above_the_watchdog_deadline() {
     );
 }
 
-// ── daemon_health (dot: presence + health) ───────────────────────────────────
+// ── daemon_health (chip: presence + health) ─────────────────────────────────
 
 #[test]
 fn no_lock_file_reads_as_absent() {
@@ -118,7 +118,7 @@ fn no_lock_file_reads_as_absent() {
     assert_eq!(
         daemon_health(),
         DaemonHealth::Absent,
-        "fresh status but no lock file ever → dot hidden"
+        "fresh status but no lock file ever → chip dimmed"
     );
     // And the probe must not have manufactured the lock file.
     assert!(
@@ -140,7 +140,7 @@ fn unheld_lock_reads_as_absent() {
     assert_eq!(
         daemon_health(),
         DaemonHealth::Absent,
-        "a released flock means the daemon died → dot hidden"
+        "a released flock means the daemon died → chip dimmed"
     );
 }
 
@@ -400,9 +400,9 @@ fn a_won_standby_slot_is_kept_rather_than_re_taken() {
     );
 }
 
-/// `clauth daemon --status` decides on `singleton_held`, not on the header dot:
+/// `clauth daemon --status` decides on `singleton_held`, not on the header chip:
 /// a lock it cannot read has to surface as an error there, since a `--status ||
-/// spawn` supervisor respawns on the dot's "no daemon". These are the three
+/// spawn` supervisor respawns on the chip's dim state ("no daemon"). These are the three
 /// answers a sandbox can produce — the io-error arm needs a filesystem without
 /// working locks.
 #[test]
@@ -544,7 +544,7 @@ fn wait_for_active_times_out_while_the_lock_stays_held() {
     );
 }
 
-/// A transient reader of the singleton lock (TUI header dot at 1 Hz,
+/// A transient reader of the singleton lock (TUI header chip at 1 Hz,
 /// `clauth daemon --status`) holds the flock for microseconds and releases it.
 /// Without retry, `claim_by_replacing_with`'s fast path reads this as a daemon,
 /// falls through to `holder_pid` (which returns `None` for a reader with no pid

@@ -20,7 +20,7 @@ mod tick;
 mod types;
 
 use probe::{Claim, DaemonLock, StandbySlot, claim_singleton};
-/// The single-fetcher lease + the header dot's daemon presence/health probe
+/// The single-fetcher lease + the header chip's daemon presence/health probe
 /// (dual-scheduler dedup, #27).
 pub(crate) use probe::{DaemonHealth, FetchLease, daemon_health, singleton_held};
 #[cfg(test)]
@@ -439,9 +439,9 @@ fn redundant_reason(mode: StartMode) -> String {
 /// stdout while a daemon is up (exit 0); exit 1 with nothing on stdout when
 /// none is, matching the sessions surface's convention.
 pub(crate) fn status_probe() -> Result<()> {
-    // The presence DECISION goes through `singleton_held`, not the header dot's
-    // `daemon_health`: the dot maps an unusable lock to `Absent` so it can hide
-    // rather than assert a daemon that may not be there, and a `--status ||
+    // The presence DECISION goes through `singleton_held`, not the header chip's
+    // `daemon_health`: the chip maps an unusable lock to `Absent`, which dims it
+    // rather than asserting a daemon that may not be there, and a `--status ||
     // spawn` supervisor reading that as "none running" respawns forever on a
     // filesystem without working locks. Here the same condition is an error the
     // caller sees. `daemon_health` still owns the freshness word below.
@@ -501,7 +501,7 @@ pub(crate) fn status_oneshot(include_disabled: bool) -> Result<()> {
 /// be written.
 ///
 /// The stamp is the daemon's, never this publish's: `generated_at` is how every
-/// reader (`clauth-tray`, the TUI's daemon dot) decides a daemon is alive, so
+/// reader (`clauth-tray`, the TUI's daemon chip) decides a daemon is alive, so
 /// the republish carries the daemon's last stamp forward, or the epoch when no
 /// daemon has ever published — see [`prior_generated_at`].
 ///
