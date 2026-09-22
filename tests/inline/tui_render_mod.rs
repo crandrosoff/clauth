@@ -1574,8 +1574,12 @@ fn the_home_tab_row_wraps_between_chips_at_a_narrow_pane() {
     );
     assert!(
         screen.lines().any(|l| {
-            let t = l.trim_matches(['│', '┊', '┃', ' ']);
-            t.starts_with("fallback")
+            // The value column: `2 + KEY_W + KEY_GUTTER` (17 + 2) from
+            // `home_tab_lines`; the dump's border column adds one space.
+            // Trimming the spaces here would let a column-0 continuation pass.
+            let t = l.trim_start_matches(['│', '┊', '┃']);
+            let t = t.strip_prefix(' ').unwrap_or(t);
+            t.starts_with(&format!("{}fallback", " ".repeat(21)))
         }),
         "the chip run must continue between chips on a line indented to the value column:\n{screen}"
     );
