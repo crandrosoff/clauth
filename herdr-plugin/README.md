@@ -31,7 +31,7 @@ The six knobs live in `~/.clauth/profiles.toml` under `[herdr]` and edit from th
 
 ## Paste these if you installed by hand
 
-`clauth herdr install` writes both. herdr does not let a plugin declare either one, so without them the key does nothing and the tag stays invisible.
+`clauth herdr install` writes both. herdr does not let a plugin declare either one, so without them the key does nothing and the tag stays invisible. The installer writes the `claude` row below; add the `codex` row by hand until it writes that one too.
 
 ```toml
 [[keys.command]]
