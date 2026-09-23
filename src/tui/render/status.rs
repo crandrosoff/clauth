@@ -20,8 +20,7 @@ use super::format::{NO_DATA, relative_age, spinner_frame};
 use super::panes::{draw_scrollbar, empty_state, key_cell, master_detail, section_box, wrap_words};
 use crate::status::{Impact, Incident, IncidentUpdate, UpdatePhase, shorten_component_status};
 
-/// Detail-pane key column width (the house 11: chain/config's `KEY_W` and the
-/// usage tab's `TP_KEY_W`).
+/// Detail-pane key column width, the usage tab's `TP_KEY_W` (11).
 const KEY_W: usize = 11;
 /// Fixed gap between the padded key and the value column (house standard).
 const KEY_GUTTER: usize = 2;

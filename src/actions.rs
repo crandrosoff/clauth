@@ -834,8 +834,16 @@ pub(crate) fn edit_profile_model(
     })
 }
 
-/// Replace an account's `preferred_days` list and persist it — the Setup tab's
-/// day-row commit.
+/// Rewrite an account's `preferred_days` list and persist it — the Fallback
+/// card's `preferred days` row commit. `edit` maps the list on disk to the new
+/// one; the saved list comes back.
+///
+/// [`set_member_threshold`]'s fresh-state shape: the roster is read off disk so
+/// an account deleted since the last reload is refused rather than recreated,
+/// the profile is re-read so a field another writer changed meanwhile is not
+/// rewound, and the in-memory copy moves only once the save landed. `edit` runs
+/// on the list read under the lock, so a concurrent writer's day is kept rather
+/// than overwritten by a toggle computed from a stale copy.
 ///
 /// No `apply_profile_to_claude_settings` follow-up, unlike its model-field
 /// twin: the list is read per chain build (`AppConfig::is_home_today`) and
@@ -844,12 +852,19 @@ pub(crate) fn edit_profile_model(
 pub(crate) fn edit_profile_preferred_days(
     config: &mut AppConfig,
     name: &ProfileName,
-    days: Vec<chrono::Weekday>,
-) -> Result<()> {
+    edit: impl FnOnce(&[chrono::Weekday]) -> Vec<chrono::Weekday>,
+) -> Result<Vec<chrono::Weekday>> {
     with_state_lock(|_held| {
-        let profile = config.find_mut(name).context("profile not found")?;
-        profile.preferred_days = days;
-        save_profile(profile)
+        if !load_app_state()?.profiles.iter().any(|n| n == name) {
+            bail!("profile not found");
+        }
+        let mut fresh = load_profile(name)?;
+        fresh.preferred_days = edit(&fresh.preferred_days);
+        save_profile(&fresh)?;
+        if let Some(profile) = config.find_mut(name) {
+            profile.preferred_days = fresh.preferred_days.clone();
+        }
+        Ok(fresh.preferred_days)
     })
 }
 

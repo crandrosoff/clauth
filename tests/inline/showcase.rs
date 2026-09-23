@@ -877,8 +877,7 @@ fn demo_data_drives_all_actions() {
     assert_eq!(app.config_focus, app::ConfigFocus::Actions);
     assert!(app.config_draft.is_some());
     press(&mut app, KeyCode::Down); // Name → AutoStart (OAuth row)
-    press(&mut app, KeyCode::Down); // AutoStart → PreferredDays
-    press(&mut app, KeyCode::Down); // PreferredDays → BaseUrl
+    press(&mut app, KeyCode::Down); // AutoStart → BaseUrl
     press(&mut app, KeyCode::Enter); // start capturing the field
     assert_eq!(
         app.config_draft.as_ref().and_then(|d| d.active),
@@ -1199,8 +1198,7 @@ fn tab_key_does_not_leak_past_modal_or_field_capture() {
     press(&mut app, KeyCode::Enter); // focus detail pane for "personal" (cursor 0)
     assert_eq!(app.config_focus, app::ConfigFocus::Actions);
     press(&mut app, KeyCode::Down); // Name → AutoStart
-    press(&mut app, KeyCode::Down); // AutoStart → PreferredDays
-    press(&mut app, KeyCode::Down); // PreferredDays → BaseUrl
+    press(&mut app, KeyCode::Down); // AutoStart → BaseUrl
     press(&mut app, KeyCode::Enter); // start capturing BaseUrl
     assert_eq!(
         app.config_draft.as_ref().and_then(|d| d.active),

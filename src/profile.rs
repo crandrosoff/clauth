@@ -3396,29 +3396,6 @@ fn parse_preferred_days(raw: &[String]) -> Vec<Weekday> {
     out
 }
 
-/// A typed day list → weekdays, for the Setup tab's editor. Commas and
-/// whitespace both separate, so `sat sun` and `sat, sun` land the same, and the
-/// entries themselves go through the loader's chrono parse.
-///
-/// `Err` carries the first entry that did not parse, where [`parse_preferred_days`]
-/// drops it: the loader is reading a file nobody is watching, so one typo must
-/// not take the profile with it — a human who just typed the word is owed the
-/// refusal instead.
-pub(crate) fn parse_day_list(raw: &str) -> Result<Vec<Weekday>, String> {
-    let mut out: Vec<Weekday> = Vec::new();
-    for entry in raw.split([',', ' ', '\t']) {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let day = entry.parse::<Weekday>().map_err(|_| entry.to_string())?;
-        if !out.contains(&day) {
-            out.push(day);
-        }
-    }
-    Ok(out)
-}
-
 /// The canonical on-disk spelling: lowercase three-letter names, so a rewrite
 /// of a hand-written `["Saturday", "SUN"]` settles instead of alternating.
 pub(crate) fn render_preferred_days(days: &[Weekday]) -> Vec<String> {

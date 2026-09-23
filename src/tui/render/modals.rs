@@ -728,6 +728,14 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
                 ("+ / -", "step rotate at / weekly at by 5"),
                 ("\u{21b5} on rotate at", "type a value, \u{21b5} saves"),
                 ("\u{21b5} on weekly at", "type a %, empty clears"),
+                (
+                    "space on preferred days",
+                    "step never / weekdays / weekends / every day",
+                ),
+                (
+                    "\u{21b5} on preferred days",
+                    "pick days: \u{2190} \u{2192} walk \u{00b7} space toggles and saves \u{00b7} \u{21b5} esc q leave \u{00b7} \u{2191}\u{2193} leave and move",
+                ),
                 ("esc", "back / cancel edit"),
             ][..],
         )],

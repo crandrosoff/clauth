@@ -868,18 +868,17 @@ fn config_rows_account_actions_tail_matches_runtime_order() {
     let rows = config_rows(&app);
     // Full runtime sequence for this fixture (OAuth account, no base url, no
     // overrides, no custom env, holding OAuth credentials): auto-start in the
-    // second slot with the day row beside it, the alias overrides collapsed
-    // behind `ModelOverrideAdd`, no env rows, then the
-    // login/delete-creds/disabled/delete action tail. A
+    // second slot, the alias overrides collapsed behind `ModelOverrideAdd`, no
+    // env rows, then the login/delete-creds/disabled/delete action tail. A
     // future reorder of `config_rows`' row-construction (the `rows.push(...)`
     // builder) reds here; a match-arm reorder elsewhere is unobservable at
-    // runtime and isn't what this test guards.
+    // runtime and isn't what this test guards. The per-account day list is NOT
+    // here: it lives on the Fallback tab's member card.
     assert_eq!(
         rows,
         [
             ConfigRow::Name,
             ConfigRow::AutoStart,
-            ConfigRow::PreferredDays,
             ConfigRow::BaseUrl,
             ConfigRow::Model,
             ConfigRow::ModelOverrideAdd,
@@ -11902,7 +11901,7 @@ fn the_codex_only_view_disarms_the_claude_selection_keys() {
     re_armed(&mut app, HarnessFilter::Claude, ["a", "b"]);
 }
 
-// ── the Setup tab's day row ─────────────────────────────────────────────────
+// ── the day-list collision warning ───────────────────────────
 
 fn app_with_chain(profiles: Vec<crate::profile::Profile>) -> App {
     use crate::profile::{AppConfig, AppState};
@@ -11916,149 +11915,6 @@ fn app_with_chain(profiles: Vec<crate::profile::Profile>) -> App {
         profiles,
     })
 }
-
-/// The row is an existing account's, next to `auto-start`. The `+ new` form
-/// stays out: the account has no chain seat yet, so a list typed there would
-/// claim nothing and say so on a form that cannot fix it.
-#[test]
-fn the_day_row_sits_with_auto_start_and_skips_the_new_form() {
-    use super::{ConfigRow, config_rows};
-    use crate::profile::Profile;
-    let _home = crate::testutil::HomeSandbox::new();
-
-    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
-    app.config_draft = None;
-
-    app.profile_cursor = 0;
-    let rows = config_rows(&app);
-    let day = rows
-        .iter()
-        .position(|r| *r == ConfigRow::PreferredDays)
-        .expect("an existing account has the day row");
-    let auto_start = rows
-        .iter()
-        .position(|r| *r == ConfigRow::AutoStart)
-        .expect("an oauth account has auto-start");
-    assert_eq!(
-        day,
-        auto_start + 1,
-        "the two chain-behaviour rows sit together"
-    );
-
-    app.profile_cursor = 1; // the `+ new` action row
-    assert!(
-        !config_rows(&app).contains(&ConfigRow::PreferredDays),
-        "the create form has no day row"
-    );
-}
-
-/// ⏎ parses what was typed, saves it, and reseeds the field with the canonical
-/// spelling — the same settling a rewrite of a hand-written list does, so the
-/// field and the file never disagree about `Saturday` vs `sat`.
-#[test]
-fn committing_a_day_list_saves_and_reseeds_the_canonical_spelling() {
-    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
-    use crate::profile::{Profile, ProfileName};
-    let _home = crate::testutil::HomeSandbox::new();
-
-    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
-    app.profile_cursor = 0;
-    let mut draft = build_draft_existing(&app, &ProfileName::from("work"));
-    draft.preferred_days = InputState::new("Saturday, SUN");
-    draft.active = Some(ConfigRow::PreferredDays);
-    app.config_draft = Some(draft);
-
-    commit_config_field(&mut app, ConfigRow::PreferredDays);
-
-    assert_eq!(
-        app.config()
-            .find(&ProfileName::from("work"))
-            .map(|p| p.preferred_days.clone()),
-        Some(vec![chrono::Weekday::Sat, chrono::Weekday::Sun]),
-        "the typed list lands on the profile"
-    );
-    let draft = app
-        .config_draft
-        .as_ref()
-        .expect("draft survives the commit");
-    assert_eq!(draft.preferred_days.value, "sat, sun");
-    assert_eq!(draft.active, None, "the editor closes on a good commit");
-}
-
-/// A word that is not a weekday names itself and leaves the editor open with
-/// the typing intact: the loader drops a bad entry because a file nobody is
-/// watching must still load, but the operator is standing at this field.
-#[test]
-fn a_day_list_typo_names_the_word_and_keeps_the_editor_open() {
-    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
-    use crate::profile::{Profile, ProfileName};
-    let _home = crate::testutil::HomeSandbox::new();
-
-    let mut app = app_with_chain(vec![Profile::new("work".to_string(), None, None)]);
-    app.profile_cursor = 0;
-    let mut draft = build_draft_existing(&app, &ProfileName::from("work"));
-    draft.preferred_days = InputState::new("sat, funday");
-    draft.active = Some(ConfigRow::PreferredDays);
-    app.config_draft = Some(draft);
-
-    commit_config_field(&mut app, ConfigRow::PreferredDays);
-
-    assert!(
-        app.config()
-            .find(&ProfileName::from("work"))
-            .is_some_and(|p| p.preferred_days.is_empty()),
-        "nothing is saved from a list that does not parse"
-    );
-    let draft = app.config_draft.as_ref().expect("draft survives");
-    assert_eq!(
-        draft.active,
-        Some(ConfigRow::PreferredDays),
-        "editor stays open"
-    );
-    assert_eq!(draft.preferred_days.value, "sat, funday", "typing survives");
-    assert!(
-        app.toasts.iter().any(|t| t.body.contains("'funday'")),
-        "the refusal names the word, got {:?}",
-        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
-    );
-}
-
-/// A list on an account the walk skips is saved and then explained. Refusing
-/// the save would hide a state `is_home_on` already handles; saving it in
-/// silence would leave a row that reads set and does nothing.
-#[test]
-fn a_day_list_on_a_dead_account_saves_with_the_reason_it_claims_nothing() {
-    use super::{ConfigRow, InputState, build_draft_existing, commit_config_field};
-    use crate::profile::{Profile, ProfileName};
-    let _home = crate::testutil::HomeSandbox::new();
-
-    let mut dead = Profile::new("old".to_string(), None, None);
-    dead.disabled = true;
-    let mut app = app_with_chain(vec![dead]);
-    app.profile_cursor = 0;
-    let mut draft = build_draft_existing(&app, &ProfileName::from("old"));
-    draft.preferred_days = InputState::new("sat");
-    app.config_draft = Some(draft);
-
-    commit_config_field(&mut app, ConfigRow::PreferredDays);
-
-    assert_eq!(
-        app.config()
-            .find(&ProfileName::from("old"))
-            .map(|p| p.preferred_days.clone()),
-        Some(vec![chrono::Weekday::Sat]),
-        "the list is saved"
-    );
-    assert!(
-        app.toasts
-            .iter()
-            .any(|t| t.body.contains("claims nothing") && t.body.contains("disabled")),
-        "the warning names the blocker, got {:?}",
-        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
-    );
-}
-
-// ── the day-list collision warning ───────────────────────────
 
 /// Every weekday, so a fixture reads the same whatever day the suite runs on.
 fn all_weekdays() -> Vec<chrono::Weekday> {
@@ -12158,4 +12014,606 @@ fn the_day_collision_warning_fires_on_the_edge_only() {
     }
     warn_day_claim_notices(&mut app);
     assert_eq!(app.toasts.len(), 2, "a collision re-introduced warns again");
+}
+
+// ── the Fallback card's `preferred days` row ─────────────────────────────────
+
+/// The row's index in `FALLBACK_ROWS`, read off the list itself so a future
+/// inserted row can never silently re-point these tests.
+fn preferred_days_row() -> usize {
+    super::FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == super::FallbackRow::PreferredDays)
+        .expect("the row exists")
+}
+
+/// A disk-backed app, one chain member, cursor on the `preferred days` row. A
+/// member with a list is saved whole to disk as well as memory, since the row's
+/// save reads the profile it edits off disk.
+fn preferred_days_app(days: Vec<chrono::Weekday>) -> App {
+    let mut p = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
+    p.preferred_days = days;
+    if !p.preferred_days.is_empty() {
+        crate::profile::save_profile(&p).expect("save the member");
+    }
+    let mut app = app_with_unlinked_profiles(vec![p]);
+    app.tab = Tab::Fallback;
+    app.fallback_focus = super::FallbackFocus::Detail;
+    app.chain_cursor = 0;
+    app.fallback_detail_cursor = preferred_days_row();
+    app
+}
+
+/// Member `a`'s list on disk ([`disk_days`]).
+fn on_disk_days() -> Vec<chrono::Weekday> {
+    disk_days("a")
+}
+
+/// Write a list to the member's own file, so an unchanged file afterwards is a
+/// real claim rather than a missing one.
+fn seed_disk_days(app: &App, days: Vec<chrono::Weekday>) {
+    let mut cfg = app.config();
+    crate::actions::edit_profile_preferred_days(
+        &mut cfg,
+        &crate::profile::ProfileName::from("a"),
+        |_| days,
+    )
+    .expect("seed the member's list");
+}
+
+#[test]
+fn fallback_preferred_days_space_walks_the_preset_ladder_and_persists() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(Vec::new());
+
+    let ladder: [(Vec<chrono::Weekday>, &str); 4] = [
+        (vec![Mon, Tue, Wed, Thu, Fri], "weekdays"),
+        (vec![Sat, Sun], "weekends"),
+        (super::WEEKDAYS_ALL.to_vec(), "every day"),
+        (Vec::new(), "never"),
+    ];
+    for (expected, rung) in ladder {
+        super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+        assert_eq!(on_disk_days(), expected, "space steps onto `{rung}`");
+    }
+}
+
+// A hand-written set matches no rung, so space lands on the ladder's first: a
+// set has no order, so no rung sits above it the way the weekly threshold
+// stepper finds the next preset above a custom percent.
+#[test]
+fn fallback_preferred_days_space_steps_a_custom_set_to_never() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let app = preferred_days_app(vec![Wed, Fri]);
+    seed_disk_days(&app, vec![Wed, Fri]);
+    assert_eq!(
+        on_disk_days(),
+        vec![Wed, Fri],
+        "precondition: the custom set"
+    );
+
+    let mut app = app;
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+    assert!(on_disk_days().is_empty(), "a custom set steps to `never`");
+}
+
+/// The picker's caret, `None` while it is closed.
+fn picker_caret(app: &App) -> Option<usize> {
+    app.fallback_day_picker.as_ref().map(|e| e.state.cursor)
+}
+
+// No draft: each space writes the member's toggled list at once, and the
+// picker stays open for the next one.
+#[test]
+fn each_space_in_the_day_picker_saves_the_toggled_list() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(vec![Mon, Fri]);
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(picker_caret(&app), Some(0), "the caret starts on Monday");
+
+    super::handle_key(&mut app, key(KeyCode::Right));
+    super::handle_key(&mut app, key(KeyCode::Right));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        on_disk_days(),
+        vec![Mon, Wed, Fri],
+        "→ → space saved Wednesday on and left the rest alone"
+    );
+    assert_eq!(picker_caret(&app), Some(2), "the picker stays open");
+
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(on_disk_days(), vec![Mon, Fri], "space again saved it off");
+}
+
+/// A toggle is computed from the list read off disk under the lock, so a day
+/// another writer saved since the last reload survives it.
+#[test]
+fn a_picker_toggle_keeps_a_day_another_writer_saved() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(Vec::new());
+    let name = crate::profile::ProfileName::from("a");
+    let mut other = crate::profile::load_profile(&name).expect("load a");
+    other.preferred_days = vec![Wed];
+    crate::profile::save_profile(&other).expect("the other writer's save");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+
+    assert_eq!(
+        on_disk_days(),
+        vec![Mon, Wed],
+        "Monday joined the list on disk"
+    );
+}
+
+/// A press answers the list the card shows: with another writer's list on
+/// disk, space on a shown-on day saves it off and a preset steps from the shown
+/// rung, never inverting what the operator saw.
+#[test]
+fn a_press_follows_the_shown_list_when_another_writer_raced_it() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let name = crate::profile::ProfileName::from("a");
+    let race = |days: Vec<chrono::Weekday>| {
+        let mut other = crate::profile::load_profile(&name).expect("load a");
+        other.preferred_days = days;
+        crate::profile::save_profile(&other).expect("the other writer's save");
+    };
+
+    let mut app = preferred_days_app(vec![Mon]);
+    race(vec![Fri]);
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(on_disk_days(), vec![Fri], "Monday went off, as shown");
+
+    let mut app = preferred_days_app(vec![Mon, Tue, Wed, Thu, Fri]);
+    race(vec![Sat, Sun]);
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        on_disk_days(),
+        vec![Sat, Sun],
+        "`weekdays` stepped to `weekends`, the rung after the shown one"
+    );
+}
+
+/// Space at rest on a chain entry with no account behind it does nothing, the
+/// same answer ⏎ gives there.
+#[test]
+fn space_on_a_chain_entry_with_no_account_does_nothing() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_app(Vec::new());
+    app.config()
+        .state
+        .fallback_chain
+        .insert(0, crate::profile::ProfileName::from("ghost"));
+    app.chain_cursor = 0;
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    assert!(app.toasts.is_empty(), "no toast for `ghost`");
+    assert!(
+        !crate::profile::profile_subpath(
+            &crate::profile::ProfileName::from("ghost"),
+            "config.toml"
+        )
+        .expect("path")
+        .exists(),
+        "nothing written for `ghost`"
+    );
+}
+
+/// The row's save re-reads the profile under the lock, so a field another
+/// writer changed since the last reload is not rewound by the day save.
+#[test]
+fn a_day_save_keeps_a_field_another_writer_changed() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(Vec::new());
+    let name = crate::profile::ProfileName::from("a");
+    let mut other = crate::profile::load_profile(&name).expect("load a");
+    other.fallback_threshold = Some(55.0);
+    crate::profile::save_profile(&other).expect("the other writer's save");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    let after = crate::profile::load_profile(&name).expect("reload a");
+    assert_eq!(after.preferred_days, vec![Mon, Tue, Wed, Thu, Fri]);
+    assert_eq!(
+        after.fallback_threshold,
+        Some(55.0),
+        "the threshold edit survived"
+    );
+}
+
+/// A chain entry with no account behind it draws no `preferred days` row, so ⏎
+/// there opens no picker to claim the keys invisibly.
+#[test]
+fn enter_on_a_chain_entry_with_no_account_opens_no_picker() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_app(Vec::new());
+    app.config()
+        .state
+        .fallback_chain
+        .insert(0, crate::profile::ProfileName::from("ghost"));
+    app.chain_cursor = 0;
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+
+    assert!(picker_caret(&app).is_none(), "no picker opened on `ghost`");
+}
+
+/// An account deleted on disk since the last reload is refused by name, and the
+/// save never recreates its directory.
+#[test]
+fn a_day_save_refuses_an_account_deleted_since_the_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_app(Vec::new());
+    let name = crate::profile::ProfileName::from("a");
+    let dir = crate::profile::profile_subpath(&name, "config.toml")
+        .expect("config path")
+        .parent()
+        .expect("profile dir")
+        .to_path_buf();
+    assert!(
+        !dir.exists(),
+        "precondition: the fixture holds no dir for a"
+    );
+    let mut state = crate::profile::load_app_state().expect("load the roster");
+    state.profiles.retain(|n| *n != name);
+    crate::profile::save_app_state(&state).expect("drop a from the roster");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    assert_eq!(app.toasts.len(), 1, "one toast");
+    assert!(matches!(app.toasts[0].kind, super::ToastKind::Danger));
+    assert_eq!(
+        app.toasts[0].body,
+        "preferred days update failed\nprofile not found"
+    );
+    assert!(
+        !dir.exists(),
+        "the save recreated the deleted account's dir"
+    );
+}
+
+#[test]
+fn opening_and_leaving_the_day_picker_writes_nothing() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(vec![Mon, Fri]);
+    seed_disk_days(&app, vec![Mon, Fri]);
+    let path =
+        crate::profile::profile_subpath(&crate::profile::ProfileName::from("a"), "config.toml")
+            .expect("config path");
+    let before = std::fs::read(&path).expect("read the seeded file");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Right));
+    super::handle_key(&mut app, key(KeyCode::Esc));
+
+    assert!(app.fallback_day_picker.is_none(), "esc left the picker");
+    assert_eq!(
+        std::fs::read(&path).expect("read back"),
+        before,
+        "walking the caret and leaving wrote nothing"
+    );
+}
+
+#[test]
+fn the_day_picker_caret_wraps_both_ways() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_app(Vec::new());
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Left));
+    assert_eq!(picker_caret(&app), Some(6), "← wraps past Monday to Sunday");
+    super::handle_key(&mut app, key(KeyCode::Right));
+    assert_eq!(picker_caret(&app), Some(0), "→ wraps past Sunday to Monday");
+    assert_eq!(app.tab, Tab::Fallback, "neither arrow switched tabs");
+}
+
+// While descended the picker owns the keyboard: `?`, `a`, `x`, tab and
+// shift-tab reach none of their global senses, and the picker stays open.
+#[test]
+fn the_day_picker_claims_help_actions_dismiss_and_tab() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_app(Vec::new());
+    app.toast(super::ToastKind::Info, "a toast `x` would dismiss");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    for code in [
+        KeyCode::Char('?'),
+        KeyCode::Char('a'),
+        KeyCode::Char('x'),
+        KeyCode::Tab,
+        KeyCode::BackTab,
+    ] {
+        super::handle_key(&mut app, key(code));
+        assert!(app.modals.is_empty(), "{code:?} opened no modal");
+        assert_eq!(app.toasts.len(), 1, "{code:?} dismissed nothing");
+        assert_eq!(app.tab, Tab::Fallback, "{code:?} switched no tab");
+        assert_eq!(picker_caret(&app), Some(0), "{code:?} left the picker open");
+    }
+    assert!(on_disk_days().is_empty(), "nothing was written");
+}
+
+/// A dead account with a list on the Fallback card, cursor on the day row.
+fn dead_member_app(days: Vec<chrono::Weekday>) -> App {
+    let mut p = crate::testutil::blank_profile(&crate::profile::ProfileName::from("a"));
+    p.disabled = true;
+    p.preferred_days = days;
+    if !p.preferred_days.is_empty() {
+        crate::profile::save_profile(&p).expect("save the member");
+    }
+    let mut app = app_with_unlinked_profiles(vec![p]);
+    app.tab = Tab::Fallback;
+    app.fallback_focus = super::FallbackFocus::Detail;
+    app.chain_cursor = 0;
+    app.fallback_detail_cursor = preferred_days_row();
+    app
+}
+
+// An empty list claims nothing on any account, so clearing a dead account's
+// list is a plain save with nothing to warn about.
+#[test]
+fn a_dead_account_stepping_to_never_raises_no_toast() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = dead_member_app(super::WEEKDAYS_ALL.to_vec());
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    assert!(on_disk_days().is_empty(), "`every day` stepped to `never`");
+    assert!(
+        app.toasts.is_empty(),
+        "no warning, got {:?}",
+        app.toasts.iter().map(|t| &t.body).collect::<Vec<_>>()
+    );
+}
+
+// The picker warns about a dead account once per descend, not once per
+// toggle: the first save that leaves a list raises it, the toggles after it
+// stay quiet, and a fresh descend says it again.
+#[test]
+fn a_dead_account_warns_once_per_day_picker_descend() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let warning = "saved, but this list claims nothing: the account is disabled\n\
+                   the chain decides those days without this account";
+    let mut app = dead_member_app(Vec::new());
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    super::handle_key(&mut app, key(KeyCode::Right));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(on_disk_days(), vec![Mon, Tue], "both toggles saved");
+    assert_eq!(
+        app.toasts
+            .iter()
+            .map(|t| t.body.as_str())
+            .collect::<Vec<_>>(),
+        vec![warning],
+        "one warning for the whole descend"
+    );
+    assert_eq!(app.toasts[0].kind, super::ToastKind::Warning);
+
+    super::handle_key(&mut app, key(KeyCode::Enter));
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(on_disk_days(), vec![Tue], "the new descend saved too");
+    assert_eq!(
+        app.toasts
+            .iter()
+            .map(|t| t.body.as_str())
+            .collect::<Vec<_>>(),
+        vec![warning, warning],
+        "a fresh descend warns again"
+    );
+}
+
+// A list on an account the walk skips is saved and then explained, with the
+// blocker's own wording: refusing the save would hide a state `is_home_on`
+// already handles, and saving it in silence would leave a row that reads set
+// and does nothing.
+#[test]
+fn a_dead_accounts_day_list_saves_with_the_claim_nothing_warning() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = dead_member_app(Vec::new());
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    assert_eq!(
+        on_disk_days(),
+        vec![Mon, Tue, Wed, Thu, Fri],
+        "the list is saved anyway"
+    );
+    assert_eq!(app.toasts.len(), 1, "one toast, not a stack");
+    assert!(matches!(app.toasts[0].kind, super::ToastKind::Warning));
+    assert_eq!(
+        app.toasts[0].body,
+        "saved, but this list claims nothing: the account is disabled\n\
+         the chain decides those days without this account",
+        "the warning names the blocker and what the list cannot do"
+    );
+}
+
+/// `name`'s list as it sits in its own `config.toml` — read back through the
+/// loader, so a change that never reached disk fails here.
+fn disk_days(name: &str) -> Vec<chrono::Weekday> {
+    crate::profile::load_profile(&crate::profile::ProfileName::from(name))
+        .expect("reload the member")
+        .preferred_days
+}
+
+/// Chain `[a, b]` on disk and in memory, both members saved, the cursor on
+/// `a`'s `preferred days` row.
+fn two_member_app() -> App {
+    use crate::profile::ProfileName;
+    let a = crate::testutil::blank_profile(&ProfileName::from("a"));
+    let b = crate::testutil::blank_profile(&ProfileName::from("b"));
+    crate::profile::save_profile(&a).expect("seed a");
+    crate::profile::save_profile(&b).expect("seed b");
+    let mut app = app_with_unlinked_profiles(vec![a, b]);
+    app.tab = Tab::Fallback;
+    app.fallback_focus = super::FallbackFocus::Detail;
+    app.chain_cursor = 0;
+    app.fallback_detail_cursor = preferred_days_row();
+    app
+}
+
+/// Rewrite the chain on disk the way another writer would (the REST chain
+/// route, a second TUI), then run the tick's reload over it.
+fn reload_with_chain(app: &mut App, chain: &[&str]) {
+    let mut state = crate::profile::load_app_state().expect("load the state");
+    state.fallback_chain = chain
+        .iter()
+        .map(|n| crate::profile::ProfileName::from(*n))
+        .collect();
+    crate::profile::save_app_state(&state).expect("rewrite the chain");
+    // A distinct mtime, so the fingerprint moves however fast the write lands.
+    let path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("profiles.toml");
+    crate::testutil::set_mtime(
+        &path,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000),
+    );
+    assert!(app.reload_if_state_changed(), "the reload branch ran");
+}
+
+/// The picker is pinned to the member it opened on, by name: a reload that
+/// reorders the chain under it moves the cursor with that member, and the next
+/// toggle lands on it rather than on whoever took its old slot.
+#[test]
+fn the_day_picker_follows_its_member_through_a_reorder_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    reload_with_chain(&mut app, &["b", "a"]);
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    super::handle_key(&mut app, key(KeyCode::Enter));
+
+    assert_eq!(
+        (disk_days("a"), disk_days("b")),
+        (vec![chrono::Weekday::Mon], Vec::new()),
+        "the toggle lands on the member the picker opened on"
+    );
+    assert_eq!(
+        app.chain_cursor, 1,
+        "the cursor followed `a` to its new slot"
+    );
+    assert!(app.fallback_day_picker.is_none(), "⏎ left the picker");
+}
+
+/// A reload that drops the member from the chain closes its picker and hands
+/// focus back to the chain list: there is no member left for a toggle to write
+/// to, and the next key must not land on the member that moved into the slot.
+#[test]
+fn the_day_picker_closes_when_a_reload_drops_its_member() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+    assert!(
+        app.fallback_day_picker.is_some(),
+        "precondition: the picker is open on `a`"
+    );
+    reload_with_chain(&mut app, &["b"]);
+
+    assert!(
+        app.fallback_day_picker.is_none(),
+        "the picker closed with its member gone"
+    );
+    assert_eq!(
+        app.fallback_focus,
+        super::FallbackFocus::Chain,
+        "focus went back to the chain list"
+    );
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        (disk_days("a"), disk_days("b")),
+        (Vec::new(), Vec::new()),
+        "closing wrote nothing, and a space meant for the picker reached no member"
+    );
+}
+
+/// Every way out of the picker the contract names: ⏎, esc and q leave the mode
+/// on the same row; ↑/↓ leave the row and the mode together. None of them
+/// ascends out of the card or writes.
+#[test]
+fn enter_esc_q_up_and_down_each_leave_the_day_picker() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let row = preferred_days_row();
+    let exits = [
+        (KeyCode::Enter, row),
+        (KeyCode::Esc, row),
+        (KeyCode::Char('q'), row),
+        (KeyCode::Up, row - 1),
+        (KeyCode::Down, row + 1),
+    ];
+    for (code, lands_on) in exits {
+        let mut app = preferred_days_app(Vec::new());
+        super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
+        assert!(
+            app.fallback_day_picker.is_some(),
+            "{code:?}: precondition, the picker is open"
+        );
+
+        super::handle_key(&mut app, key(code));
+
+        assert!(
+            app.fallback_day_picker.is_none(),
+            "{code:?} leaves the picker"
+        );
+        assert_eq!(
+            app.fallback_focus,
+            super::FallbackFocus::Detail,
+            "{code:?} stays on the card"
+        );
+        assert_eq!(
+            app.fallback_detail_cursor, lands_on,
+            "{code:?} leaves the row cursor here"
+        );
+        assert!(on_disk_days().is_empty(), "{code:?} writes nothing");
+    }
+}
+
+/// A save that fails leaves the in-memory list on what the disk still holds and
+/// names the failure. Unix-only: it forces the failure by dropping write on the
+/// member's own directory, the posture the repo's other save-failure probes take.
+#[cfg(unix)]
+#[test]
+fn a_failed_day_list_save_keeps_memory_on_the_disk_value_and_names_the_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = crate::testutil::HomeSandbox::new();
+    let name = crate::profile::ProfileName::from("a");
+    let mut app = preferred_days_app(Vec::new());
+    seed_disk_days(&app, Vec::new());
+    let dir = crate::profile::profile_dir(&name).expect("profile dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
+        .expect("chmod the member dir read-only");
+
+    super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
+
+    // Restore before any assertion so a failure still lets the sandbox clean up.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .expect("restore the member dir");
+    assert_eq!(
+        app.config().find(&name).map(|p| p.preferred_days.clone()),
+        Some(Vec::new()),
+        "memory keeps the list the disk still holds"
+    );
+    assert!(on_disk_days().is_empty(), "nothing reached the disk");
+    assert_eq!(app.toasts.len(), 1, "one toast");
+    assert_eq!(app.toasts[0].kind, super::ToastKind::Danger);
+    assert_eq!(
+        app.toasts[0].body,
+        "preferred days update failed\nfailed to write config.toml"
+    );
 }

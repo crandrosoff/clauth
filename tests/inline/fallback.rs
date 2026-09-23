@@ -6846,9 +6846,9 @@ fn a_day_list_reaches_the_chain_member_with_the_flag_off() {
     );
 }
 
-// The editor's refusal copy, one branch at a time. Chain membership is
-// checked before health because that is the order an operator fixes them in:
-// a healthy account still off the chain claims nothing.
+// The editor's saved-anyway warning copy, one branch at a time. Chain
+// membership is checked before health because that is the order an operator
+// fixes them in: a healthy account still off the chain claims nothing.
 #[test]
 fn a_day_list_blocker_names_the_first_thing_in_the_way() {
     let on_chain = start_walk_profile("work");

@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use chrono::Weekday;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::actions::{
@@ -199,6 +200,13 @@ pub(crate) enum FallbackRow {
     /// it. Marking it opts the chain into returning here once it reads clear and
     /// fresh again.
     Preferred,
+    /// The weekdays this member is home (`Profile::preferred_days`): a cycle row
+    /// over `PREFERRED_DAY_PRESETS` at rest, a multi-select chip row once ⏎
+    /// descends into it (`App::fallback_day_picker`). A hand-written list
+    /// matching no preset renders in its canonical spelling and steps to
+    /// `never`, the ladder's first rung: a set has no order, so there is no next
+    /// rung above it to step to.
+    PreferredDays,
     /// Dollar ceiling on what the chain may spend of this member's
     /// pay-as-you-go budget unattended (`Profile::max_auto_spend`, $0 default).
     /// Inert unless `AppState::spend_budget_switching` is also on — see
@@ -218,12 +226,6 @@ pub(crate) enum ConfigRow {
     /// OAuth-only auto-start toggle. `config_rows` renders it in the second
     /// slot (right below `Name`); declared here so the enum tracks that order.
     AutoStart,
-    /// `Profile::preferred_days` as a typed list (`sat, sun`). Sits with
-    /// `AutoStart` because both change how the chain treats this account,
-    /// rather than what it talks to. ⏎ opens an inline editor;
-    /// `profile::parse_day_list` reads what is typed, and the commit reseeds
-    /// the buffer from the canonical spelling.
-    PreferredDays,
     BaseUrl,
     ApiKey,
     /// Default model (CC `model` setting). Hybrid: space cycles aliases, ⏎ types a custom value.
@@ -288,7 +290,6 @@ impl ConfigRow {
         matches!(
             self,
             ConfigRow::Name
-                | ConfigRow::PreferredDays
                 | ConfigRow::BaseUrl
                 | ConfigRow::ApiKey
                 | ConfigRow::OpusModel
@@ -308,6 +309,54 @@ pub(crate) const MODEL_PRESETS: [&str; 4] = ["opus", "sonnet", "haiku", "opuspla
 /// control AND `step_weekly_threshold`'s cycle. 100 reproduces the old
 /// hard-cap behavior (switch only once the API already refuses).
 pub(crate) const WEEKLY_PRESETS: [f64; 4] = [90.0, 95.0, 98.0, 100.0];
+
+/// `Weekday::Mon..=Sun`: the order the day picker lays out its chips and
+/// writes a toggled list in.
+pub(crate) const WEEKDAYS_ALL: [Weekday; 7] = [
+    Weekday::Mon,
+    Weekday::Tue,
+    Weekday::Wed,
+    Weekday::Thu,
+    Weekday::Fri,
+    Weekday::Sat,
+    Weekday::Sun,
+];
+
+const DAYS_WEEKDAYS: [Weekday; 5] = [
+    Weekday::Mon,
+    Weekday::Tue,
+    Weekday::Wed,
+    Weekday::Thu,
+    Weekday::Fri,
+];
+const DAYS_WEEKENDS: [Weekday; 2] = [Weekday::Sat, Weekday::Sun];
+
+/// The `preferred days` preset ladder: one source for the row's display AND
+/// `step_preferred_days`' cycle, in cycle order. Space walks it forward and
+/// wraps past the last rung back to `never`; a set matching no rung steps to
+/// `never`.
+pub(crate) const PREFERRED_DAY_PRESETS: [(&str, &[Weekday]); 4] = [
+    ("never", &[]),
+    ("weekdays", &DAYS_WEEKDAYS),
+    ("weekends", &DAYS_WEEKENDS),
+    ("every day", &WEEKDAYS_ALL),
+];
+
+/// The preset rung a day set matches, or `None` for a custom set. Order-blind:
+/// `["sun", "sat"]` is the `weekends` rung whatever the file wrote.
+pub(crate) fn preferred_days_preset(days: &[Weekday]) -> Option<usize> {
+    PREFERRED_DAY_PRESETS.iter().position(|(_, preset)| {
+        preset.len() == days.len() && days.iter().all(|d| preset.contains(d))
+    })
+}
+
+/// The preset rung's days at `index`, or the empty set — the `never` value.
+pub(crate) fn preferred_days_at(index: usize) -> Vec<Weekday> {
+    PREFERRED_DAY_PRESETS
+        .get(index)
+        .map(|(_, days)| days.to_vec())
+        .unwrap_or_default()
+}
 
 /// Presets for the burn-aware early-switch floor (percent). The projection may
 /// not switch below the chosen value, so wasted headroom is capped at
@@ -410,9 +459,6 @@ pub(crate) struct ConfigDraft {
     /// commit per-field on ⏎; new drafts buffer until the `create` row fires.
     pub(crate) editing_name: Option<String>,
     pub(crate) name: InputState,
-    /// The day list as typed (`sat, sun`), seeded from and reseeded to
-    /// `profile::render_preferred_days`' canonical spelling.
-    pub(crate) preferred_days: InputState,
     pub(crate) base_url: InputState,
     pub(crate) api_key: InputState,
     pub(crate) model: InputState,
@@ -462,7 +508,6 @@ impl ConfigDraft {
     pub(crate) fn field(&self, row: ConfigRow) -> Option<&InputState> {
         Some(match row {
             ConfigRow::Name => &self.name,
-            ConfigRow::PreferredDays => &self.preferred_days,
             ConfigRow::BaseUrl => &self.base_url,
             ConfigRow::ApiKey => &self.api_key,
             ConfigRow::Model => &self.model,
@@ -490,7 +535,6 @@ impl ConfigDraft {
     pub(crate) fn field_mut(&mut self, row: ConfigRow) -> Option<&mut InputState> {
         Some(match row {
             ConfigRow::Name => &mut self.name,
-            ConfigRow::PreferredDays => &mut self.preferred_days,
             ConfigRow::BaseUrl => &mut self.base_url,
             ConfigRow::ApiKey => &mut self.api_key,
             ConfigRow::Model => &mut self.model,
@@ -1836,6 +1880,9 @@ pub(crate) struct App {
     /// lifecycle as `fallback_threshold_draft`; an EMPTY commit clears the
     /// member's override.
     pub(crate) fallback_weekly_draft: Option<InputState>,
+    /// The `preferred days` chip picker, `Some` while ⏎ has descended into it
+    /// (owns the keyboard). No draft: each space saves the toggled list at once.
+    pub(crate) fallback_day_picker: Option<MemberEdit<DayPicker>>,
     /// Cursor into [`GLOBAL_CONFIG_ROWS`] on the program-wide Config tab.
     pub(crate) global_config_cursor: usize,
     /// `Some` while the refresh-interval custom-value field is open (⏎ opens,
@@ -2323,6 +2370,7 @@ impl App {
             fallback_threshold_draft: None,
             fallback_max_spend_draft: None,
             fallback_weekly_draft: None,
+            fallback_day_picker: None,
             global_config_cursor: 0,
             refresh_interval_draft: None,
             context_nudge_draft: None,
@@ -2928,6 +2976,7 @@ impl App {
             }
             self.session_tokens = collect_session_tokens(&names);
             self.refresh_unsaved_live_login();
+            repin_member_edit(self);
             true
         } else {
             false
@@ -3203,6 +3252,17 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         && app.fallback_weekly_draft.is_some()
     {
         handle_fallback_weekly_edit_key(app, key);
+        return;
+    }
+
+    // Same for the per-member `preferred days` chip picker: it claims ←/→
+    // (chip caret) before tab switching does, and `q`/`?`/`a`/`x` before their
+    // global senses.
+    if app.tab == Tab::Fallback
+        && app.fallback_focus == FallbackFocus::Detail
+        && app.fallback_day_picker.is_some()
+    {
+        handle_day_picker_key(app, key);
         return;
     }
 
@@ -3540,6 +3600,7 @@ fn switch_tab(app: &mut App, tab: Tab) {
             app.fallback_detail_cursor = 0;
             app.fallback_armed_remove = false;
             app.fallback_threshold_draft = None;
+            app.fallback_day_picker = None;
         }
         Tab::Config => {
             app.global_config_cursor = 0;
@@ -4945,14 +5006,15 @@ pub(crate) fn chain_items(app: &App) -> Vec<ChainItemKind> {
 }
 
 /// Detail rows for a chain member: threshold stepper, last-resort/preferred
-/// toggles, remove.
-pub(crate) const FALLBACK_ROWS: [FallbackRow; 8] = [
+/// toggles, preferred-days presets + day picker, remove.
+pub(crate) const FALLBACK_ROWS: [FallbackRow; 9] = [
     FallbackRow::Threshold,
     FallbackRow::WeeklyAt,
     FallbackRow::CheckWeekly,
     FallbackRow::CheckScoped,
     FallbackRow::LastResort,
     FallbackRow::Preferred,
+    FallbackRow::PreferredDays,
     FallbackRow::MaxSpend,
     FallbackRow::Remove,
 ];
@@ -5129,6 +5191,27 @@ fn cycle_theme(app: &mut App) {
     theme::set_tier(next);
 }
 
+/// An open edit on the Fallback member card, pinned to the member it opened on
+/// by NAME. A reload can reorder or shrink the chain under an open editor, so a
+/// write resolved through `chain_cursor` lands on whichever member took the
+/// slot; every write goes to `member` instead, and [`repin_member_edit`] moves
+/// `chain_cursor` after it, or closes the edit and returns focus to the chain
+/// list once it left the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemberEdit<T> {
+    pub(crate) member: ProfileName,
+    pub(crate) state: T,
+}
+
+/// The `preferred days` chip picker: the chip under the caret (a
+/// `WEEKDAYS_ALL` index), and whether this descend already raised the
+/// claims-nothing warning, which it raises once rather than once per toggle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DayPicker {
+    pub(crate) cursor: usize,
+    pub(crate) warned: bool,
+}
+
 /// Fallback footer hint derived from current focus + selection + edit state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FallbackHint {
@@ -5143,6 +5226,8 @@ pub(crate) enum FallbackHint {
     DetailCheckScoped,
     DetailLastResort,
     DetailPreferred,
+    DetailPreferredDays,
+    DetailPreferredDaysEdit,
     DetailMaxSpend,
     DetailMaxSpendEdit,
     DetailRemove,
@@ -5161,6 +5246,11 @@ pub(crate) fn fallback_hint(app: &App) -> FallbackHint {
             None => FallbackHint::ChainAdd,
         },
         FallbackFocus::Detail => {
+            // First, on the same test `handle_key`'s picker guard runs: while it
+            // claims the keys, only its grammar is true.
+            if app.fallback_day_picker.is_some() {
+                return FallbackHint::DetailPreferredDaysEdit;
+            }
             if selected_chain_member(app).is_none() {
                 return FallbackHint::DetailAdd;
             }
@@ -5181,6 +5271,7 @@ pub(crate) fn fallback_hint(app: &App) -> FallbackHint {
                 FallbackRow::CheckScoped => FallbackHint::DetailCheckScoped,
                 FallbackRow::LastResort => FallbackHint::DetailLastResort,
                 FallbackRow::Preferred => FallbackHint::DetailPreferred,
+                FallbackRow::PreferredDays => FallbackHint::DetailPreferredDays,
                 FallbackRow::MaxSpend => FallbackHint::DetailMaxSpend,
                 FallbackRow::Remove if app.fallback_armed_remove => FallbackHint::DetailRemoveArmed,
                 FallbackRow::Remove => FallbackHint::DetailRemove,
@@ -5757,6 +5848,11 @@ fn handle_fallback_detail_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('-' | '_') if row == FallbackRow::Threshold => adjust_threshold(app, -5.0),
         KeyCode::Char('+' | '=') if row == FallbackRow::WeeklyAt => adjust_weekly(app, 5.0),
         KeyCode::Char('-' | '_') if row == FallbackRow::WeeklyAt => adjust_weekly(app, -5.0),
+        // The day row is a cycle row at rest and a chip row once descended:
+        // space walks the preset ladder (the `weekly limit` row's grammar), ⏎
+        // opens the chip picker. Split here so `run_fallback_row` keeps its
+        // single meaning for every other row.
+        KeyCode::Char(' ') if row == FallbackRow::PreferredDays => step_preferred_days(app),
         KeyCode::Enter | KeyCode::Char(' ') => {
             run_fallback_row(app, row);
         }
@@ -5888,7 +5984,9 @@ fn leave_fallback_detail(app: &mut App) {
     app.fallback_armed_remove = false;
     app.fallback_detail_cursor = 0;
     app.fallback_threshold_draft = None;
+    app.fallback_max_spend_draft = None;
     app.fallback_weekly_draft = None;
+    app.fallback_day_picker = None;
 }
 
 /// ⇧↑↓: move the selected member up/down, cursor follows. No-op on `+ add`
@@ -5944,6 +6042,8 @@ fn run_fallback_row(app: &mut App, row: FallbackRow) {
         FallbackRow::CheckScoped => toggle_member_flag(app, MemberFlag::CheckScoped),
         FallbackRow::LastResort => toggle_last_resort(app),
         FallbackRow::Preferred => toggle_preferred(app),
+        // ⏎ only: space is the preset stepper and never reaches here for this row.
+        FallbackRow::PreferredDays => open_day_picker(app),
         FallbackRow::MaxSpend => {
             // Inert while spend budget is off (rendered dimmed): opening the editor
             // would let a ceiling be typed that does nothing, so no-op.
@@ -6126,6 +6226,173 @@ fn write_max_spend(app: &mut App, value: f64) {
     if let Some(e) = save_err {
         app.toast(ToastKind::Danger, format!("save failed\n{e}"));
     }
+}
+
+/// The chain member under the cursor, by name, or `None` on `+ add`.
+fn selected_member_name(app: &App) -> Option<ProfileName> {
+    let pos = selected_chain_member(app)?;
+    app.config().state.fallback_chain.get(pos).cloned()
+}
+
+/// `name`'s home days as the in-memory config holds them.
+pub(crate) fn member_days(app: &App, name: &ProfileName) -> Option<Vec<Weekday>> {
+    app.config().find(name).map(|p| p.preferred_days.clone())
+}
+
+/// After a config reload: point `chain_cursor` back at the member an open
+/// [`MemberEdit`] is pinned to. When the reload took that member off the
+/// chain, close the edit and hand focus back to the chain list, so no key meant
+/// for the edit lands on the member that moved into its slot.
+fn repin_member_edit(app: &mut App) {
+    let Some(member) = app.fallback_day_picker.as_ref().map(|e| e.member.clone()) else {
+        return;
+    };
+    let slot = app
+        .config()
+        .state
+        .fallback_chain
+        .iter()
+        .position(|n| *n == member);
+    match slot {
+        Some(i) => app.chain_cursor = i,
+        None => leave_fallback_detail(app),
+    }
+}
+
+/// Space on the `preferred days` row at rest: step to the next preset rung and
+/// persist. A set matching no rung (a hand-written list) steps to `never`, the
+/// ladder's first rung: a set has no order, so no rung sits above it the way
+/// `step_weekly_threshold` finds the next preset above a custom percent.
+fn step_preferred_days(app: &mut App) {
+    let Some(name) = selected_member_name(app) else {
+        return;
+    };
+    // Stepped from the rung the card shows, since that is what the press
+    // answered; a chain entry with no account behind it has no rung to step.
+    let Some(shown) = member_days(app, &name) else {
+        return;
+    };
+    let next = match preferred_days_preset(&shown) {
+        Some(i) if i + 1 < PREFERRED_DAY_PRESETS.len() => i + 1,
+        _ => 0,
+    };
+    let next = preferred_days_at(next);
+    if let Some(reason) = write_preferred_days(app, &name, move |_| next) {
+        warn_list_claims_nothing(app, reason);
+    }
+}
+
+/// ⏎ on the day row: descend into the chip picker, pinned to the member under
+/// the cursor, caret on Monday. A chain entry with no account behind it has no
+/// row to draw the picker in, so it opens nothing.
+fn open_day_picker(app: &mut App) {
+    if let Some(member) = selected_member_name(app)
+        && member_days(app, &member).is_some()
+    {
+        app.fallback_day_picker = Some(MemberEdit {
+            member,
+            state: DayPicker::default(),
+        });
+    }
+}
+
+/// Keystrokes while the chip picker is open (cloudy-tui multi-select chip row):
+/// ←/→ walk the caret with wrap, space toggles the day under it and saves at
+/// once, ⏎/esc/q leave the mode, ↑/↓ leave the mode and the row together. Every
+/// other key is claimed and does nothing, so no global binding fires mid-pick.
+fn handle_day_picker_key(app: &mut App, key: KeyEvent) {
+    let days = WEEKDAYS_ALL.len();
+    match key.code {
+        KeyCode::Left | KeyCode::Right => {
+            if let Some(picker) = app.fallback_day_picker.as_mut() {
+                let step = if key.code == KeyCode::Left {
+                    days - 1
+                } else {
+                    1
+                };
+                picker.state.cursor = (picker.state.cursor + step) % days;
+            }
+        }
+        KeyCode::Char(' ') => toggle_picked_day(app),
+        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.fallback_day_picker = None,
+        KeyCode::Up | KeyCode::Down => {
+            app.fallback_day_picker = None;
+            handle_fallback_detail_key(app, key);
+        }
+        _ => {}
+    }
+}
+
+/// Space in the picker: flip the day under the caret on the pinned member's
+/// list and save the result in `WEEKDAYS_ALL` order. A dead account's list
+/// still saves; its claims-nothing warning is raised once per descend.
+fn toggle_picked_day(app: &mut App) {
+    let Some(MemberEdit { member, state }) = app.fallback_day_picker.clone() else {
+        return;
+    };
+    let (Some(&day), Some(shown)) = (WEEKDAYS_ALL.get(state.cursor), member_days(app, &member))
+    else {
+        return;
+    };
+    // The caret's day lands where the shown list says the press sends it; the
+    // other days come from the list read under the lock, so another writer's
+    // days survive and the operator's own press is never inverted.
+    let want = !shown.contains(&day);
+    let toggle = move |days: &[Weekday]| -> Vec<Weekday> {
+        WEEKDAYS_ALL
+            .into_iter()
+            .filter(|d| if *d == day { want } else { days.contains(d) })
+            .collect()
+    };
+    if let Some(reason) = write_preferred_days(app, &member, toggle)
+        && !state.warned
+    {
+        warn_list_claims_nothing(app, reason);
+        if let Some(picker) = app.fallback_day_picker.as_mut() {
+            picker.state.warned = true;
+        }
+    }
+}
+
+/// Rewrite `name`'s home days through `edit` and persist. A failed save toasts
+/// the error and leaves the in-memory list on what the disk still holds.
+/// `Some(reason)` when the saved list claims nothing, for the caller to say so.
+///
+/// Saved rather than refused because the state is reachable without this row — a
+/// list goes inert when the account later leaves the chain or its login breaks —
+/// and a row that quietly does nothing is worse than one that says why.
+fn write_preferred_days(
+    app: &mut App,
+    name: &ProfileName,
+    edit: impl FnOnce(&[Weekday]) -> Vec<Weekday>,
+) -> Option<&'static str> {
+    let result = {
+        let mut cfg = app.config();
+        crate::actions::edit_profile_preferred_days(&mut cfg, name, edit)
+    };
+    match result {
+        Ok(saved) => (!saved.is_empty())
+            .then(|| crate::fallback::day_claim_blocker(&app.config(), name))
+            .flatten(),
+        Err(e) => {
+            app.toast(
+                ToastKind::Danger,
+                format!("preferred days update failed\n{e}"),
+            );
+            None
+        }
+    }
+}
+
+/// The saved-anyway warning for a day list the chain walk will never read.
+fn warn_list_claims_nothing(app: &mut App, reason: &str) {
+    app.toast(
+        ToastKind::Warning,
+        format!(
+            "saved, but this list claims nothing: {reason}\nthe chain decides those days \
+             without this account"
+        ),
+    );
 }
 
 /// Effective threshold for the selected member, or `None` on `+ add`.
@@ -6995,11 +7262,6 @@ pub(crate) fn config_rows(app: &App) -> Vec<ConfigRow> {
     if !is_api {
         rows.push(ConfigRow::AutoStart);
     }
-    // The day list keeps auto-start company: the two rows on this card that
-    // change how the CHAIN treats the account, above the endpoint/model rows
-    // that describe what it talks to. Existing accounts only — same rule the
-    // env rows follow, and the `+ new` form has no chain seat to claim from yet.
-    rows.push(ConfigRow::PreferredDays);
     rows.push(ConfigRow::BaseUrl);
     if is_api {
         rows.push(ConfigRow::ApiKey);
@@ -7112,7 +7374,6 @@ pub(crate) fn build_draft_new() -> ConfigDraft {
     ConfigDraft {
         editing_name: None,
         name: InputState::new(""),
-        preferred_days: InputState::new(""),
         base_url: InputState::new(""),
         api_key: InputState::new(""),
         model: InputState::new(""),
@@ -7139,7 +7400,6 @@ fn build_draft_existing(app: &App, name: &ProfileName) -> ConfigDraft {
     ConfigDraft {
         editing_name: Some(name.to_string()),
         name: InputState::new(name),
-        preferred_days: InputState::new(&preferred_days_buffer(profile)),
         base_url: InputState::new(profile.and_then(|p| p.base_url.as_deref()).unwrap_or("")),
         api_key: InputState::new(profile.and_then(|p| p.api_key.as_deref()).unwrap_or("")),
         model: InputState::new(m.default.as_deref().unwrap_or("")),
@@ -7984,22 +8244,11 @@ fn cancel_just_added_env(app: &mut App, name: &ProfileName, key: &str) {
     }
 }
 
-/// A profile's day list as the editor shows it: the canonical lowercase
-/// three-letter names, comma-separated. One spelling for the seed, the ⎋
-/// revert and the post-commit reseed, so `Saturday, SUN` settles to `sat, sun`
-/// in the field exactly as it settles on disk.
-fn preferred_days_buffer(profile: Option<&Profile>) -> String {
-    profile
-        .map(|p| crate::profile::render_preferred_days(&p.preferred_days).join(", "))
-        .unwrap_or_default()
-}
-
 /// The persisted value behind a buffered row, used to revert on ⎋ and to reseed
 /// the buffer after a commit. Toggle/action rows have no buffer → empty string.
 fn row_committed_value(profile: Option<&Profile>, name: &ProfileName, row: ConfigRow) -> String {
     match row {
         ConfigRow::Name => name.to_string(),
-        ConfigRow::PreferredDays => preferred_days_buffer(profile),
         ConfigRow::BaseUrl => profile.and_then(|p| p.base_url.clone()).unwrap_or_default(),
         ConfigRow::ApiKey => profile.and_then(|p| p.api_key.clone()).unwrap_or_default(),
         ConfigRow::Model => profile
@@ -8052,7 +8301,6 @@ fn commit_config_field(app: &mut App, field: ConfigRow) {
     }
     match field {
         ConfigRow::Name => commit_rename(app),
-        ConfigRow::PreferredDays => commit_preferred_days(app),
         ConfigRow::BaseUrl | ConfigRow::ApiKey => commit_endpoint(app),
         ConfigRow::Model
         | ConfigRow::OpusModel
@@ -8067,80 +8315,6 @@ fn commit_config_field(app: &mut App, field: ConfigRow) {
                 d.active = None;
             }
         }
-    }
-}
-
-/// ⏎ on the day row: parse the typed list, persist it, then reseed the buffer
-/// from the saved value so the canonical spelling lands in the field.
-///
-/// An entry that does not parse leaves the editor OPEN with the typing intact
-/// — the loader drops a bad entry because a file nobody is watching must still
-/// load, but here the operator is standing at the field and can fix it.
-///
-/// A saved list on an account the chain walk would skip claims nothing
-/// (`AppConfig::is_home_on` lets only members the claim scan reaches claim), so
-/// the save is followed by the reason. Saved rather than refused because the
-/// state is reachable without this row — a list goes inert when the account
-/// later leaves the chain or its login breaks — and a row that quietly does
-/// nothing is worse than one that says why.
-fn commit_preferred_days(app: &mut App) {
-    let Some(name) = app
-        .config_draft
-        .as_ref()
-        .and_then(|d| d.editing_name.clone())
-        .map(ProfileName::from)
-    else {
-        return;
-    };
-    let raw = app
-        .config_draft
-        .as_ref()
-        .and_then(|d| d.field(ConfigRow::PreferredDays))
-        .map(|i| i.trimmed().to_string())
-        .unwrap_or_default();
-    let days = match crate::profile::parse_day_list(&raw) {
-        Ok(days) => days,
-        Err(bad) => {
-            app.toast(
-                ToastKind::Danger,
-                format!("'{bad}' is not a weekday\nuse sat, sun — or saturday, sunday"),
-            );
-            return;
-        }
-    };
-    let claims = !days.is_empty();
-    let result = {
-        let mut cfg = app.config();
-        crate::actions::edit_profile_preferred_days(&mut cfg, &name, days)
-    };
-    match result {
-        Ok(()) => {
-            let (value, blocker) = {
-                let cfg = app.config();
-                (
-                    preferred_days_buffer(cfg.find(&name)),
-                    claims
-                        .then(|| crate::fallback::day_claim_blocker(&cfg, &name))
-                        .flatten(),
-                )
-            };
-            if let Some(d) = app.config_draft.as_mut() {
-                if let Some(input) = d.field_mut(ConfigRow::PreferredDays) {
-                    *input = InputState::new(&value);
-                }
-                d.active = None;
-            }
-            if let Some(reason) = blocker {
-                app.toast(
-                    ToastKind::Warning,
-                    format!(
-                        "saved, but this list claims nothing: {reason}\nthe chain decides those \
-                         days without this account"
-                    ),
-                );
-            }
-        }
-        Err(e) => app.toast(ToastKind::Danger, format!("home days update failed\n{e}")),
     }
 }
 
@@ -8205,7 +8379,6 @@ fn apply_model_field(models: &mut ModelSettings, field: ConfigRow, raw: &str) {
         // `ConfigRow` variant fails the build instead of a silent no-op.
         ConfigRow::Name
         | ConfigRow::AutoStart
-        | ConfigRow::PreferredDays
         | ConfigRow::BaseUrl
         | ConfigRow::ApiKey
         | ConfigRow::ModelOverrideAdd

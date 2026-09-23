@@ -288,7 +288,7 @@ fn preferred_hint_names_the_day_list_when_one_is_set() {
 // A list this account could not serve claims nothing, so the card must not
 // promise home on those days — `is_home_on` refuses the same claim. The
 // eligibility check is the one the `claimed_elsewhere` branch already applied
-// to the other side; the reason lives on the Setup tab's `home days` row.
+// to the other side; the reason lives on the card's own `preferred days` row.
 #[test]
 fn preferred_hint_drops_a_day_list_the_account_cannot_serve() {
     let mut a = profile("a", 95.0, 20.0, 3600);
@@ -938,10 +938,10 @@ fn headroom_member_shows_no_reason_pill() {
     );
 }
 
-/// The `rows_start` `member_detail` RETURNS must be the index of the FIRST
-/// `FALLBACK_ROWS` row it actually pushed, at every header height — 0 pills,
-/// 1 pill + its fix line, and the stacked 2. That figure is what
-/// `draw_chain_detail` adds to the native-cursor row math, so a drift puts a
+/// The first row's span `member_detail` RETURNS (`rows_start`, its start) must
+/// be the index of the FIRST `FALLBACK_ROWS` row it actually pushed, at every
+/// header height — 0 pills, 1 pill + its fix line, and the stacked 2. The spans
+/// are what `draw_chain_detail` places the native caret with, so a drift puts a
 /// typed field's caret on the wrong row, which no text-only assertion catches.
 /// `rotate at` is the first `FALLBACK_ROWS` entry, so pinning
 /// `rows_start == position_of("rotate at")` is the whole contract in one
@@ -955,7 +955,7 @@ fn headroom_member_shows_no_reason_pill() {
 #[test]
 fn member_detail_rows_start_indexes_the_first_fallback_row_at_every_header_height() {
     let at_width = |cfg: &AppConfig, width: usize| -> (usize, usize) {
-        let (lines, rows_start) = member_detail(
+        let (lines, spans) = member_detail(
             cfg,
             &crate::profile::ProfileName::from("a"),
             MemberCard {
@@ -967,7 +967,7 @@ fn member_detail_rows_start_indexes_the_first_fallback_row_at_every_header_heigh
             .iter()
             .position(|l| line_text(l).contains("rotate at"))
             .expect("the first FALLBACK_ROWS row renders");
-        (rows_start, first_row_at)
+        (spans[0].start, first_row_at)
     };
     let start_and_first_row = |cfg: &AppConfig| at_width(cfg, 60);
 
@@ -1127,6 +1127,46 @@ fn typed_threshold_row_scrolls_into_view_and_carries_the_caret() {
     );
 }
 
+/// A custom day list that wraps at rest pushes every row beneath it down a
+/// line, and the `max spend` caret follows: it lands on the row's rendered
+/// line, not on the line its `FALLBACK_ROWS` index alone would name.
+#[test]
+fn typed_max_spend_caret_lands_on_its_row_under_a_wrapped_day_list() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut a = profile("a", 95.0, 10.0, 7200);
+    a.preferred_days = vec![Mon, Tue, Wed, Thu, Fri, Sat];
+    let mut app = App::new(config_with(vec![a], Some("a"), vec!["a"]));
+    app.fallback_focus = FallbackFocus::Detail;
+    app.fallback_detail_cursor = FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == FallbackRow::MaxSpend)
+        .unwrap();
+    app.fallback_max_spend_draft = Some(InputState::new("5"));
+
+    let mut term = Terminal::new(TestBackend::new(60, 40)).unwrap();
+    term.draw(|f| super::draw(f, f.area(), &app)).unwrap();
+    let rows = crate::testutil::buffer_rows(term.backend().buffer());
+    let day_row = rows
+        .iter()
+        .position(|r| r.contains("preferred days"))
+        .expect("the day row renders");
+    assert!(
+        rows[day_row + 1].contains("thu, fri, sat"),
+        "precondition: the day list wraps onto a second line:\n{}",
+        rows.join("\n")
+    );
+    let rendered_at = rows
+        .iter()
+        .position(|r| r.contains("max spend"))
+        .expect("the max spend row renders");
+    let caret = term.get_cursor_position().unwrap();
+    assert_eq!(
+        caret.y as usize, rendered_at,
+        "caret must sit on the max spend row"
+    );
+}
+
 /// Finding shape from review round 2: a 40x24 terminal (~14 inner rows after
 /// borders and the left chain) with a blocked member fills the card past the
 /// pane, and the card has no scrollbar — the LAST rows must stay reachable by
@@ -1179,9 +1219,9 @@ fn member_detail_stacks_the_health_pill_under_disabled() {
     assert_eq!(
         block,
         vec![
-            "status       [ disabled ]".to_string(),
+            "status          [ disabled ]".to_string(),
             "├ excluded from the walk, enable it on the setup tab".to_string(),
-            "│            [ auth broken ]".to_string(),
+            "│               [ auth broken ]".to_string(),
             "└ re-login with clauth login a".to_string(),
         ],
         "both facts stack on one rail, each naming its own fix"
@@ -1203,7 +1243,7 @@ fn member_detail_stacks_the_health_pill_under_disabled() {
     assert_eq!(
         lines.iter().take(2).map(line_text).collect::<Vec<_>>(),
         vec![
-            "status       [ auth broken ]".to_string(),
+            "status          [ auth broken ]".to_string(),
             "└ re-login with clauth login a".to_string(),
         ],
         "a single pill stays a lone `└` — nothing to connect"
@@ -1502,7 +1542,7 @@ fn weekly_at_default_reminder_only_shows_when_value_differs_from_default() {
 fn edit_glyph_is_bold_like_the_selection_caret() {
     let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
     let input = InputState::new("80");
-    let line = detail_row(
+    let lines = detail_row(
         FallbackRow::Threshold,
         true,
         MemberRow {
@@ -1513,13 +1553,16 @@ fn edit_glyph_is_bold_like_the_selection_caret() {
             check_scoped: true,
             last_resort: false,
             preferred: false,
+            preferred_days: &[],
+            day_picker: None,
             max_spend: 0.0,
             spend_budget: false,
             armed_remove: false,
         },
         Some(&input),
+        60,
     );
-    let glyph = &line.spans[0];
+    let glyph = &lines[0].spans[0];
     assert!(
         glyph
             .style
@@ -1643,7 +1686,7 @@ fn the_session_block_emits_the_follower_qualifier_when_one_session_follows() {
 
     assert_eq!(
         card_texts(&live_session_lines(sessions, 60)),
-        vec!["live         2, 1 with fallback".to_string()],
+        vec!["live            2, 1 with fallback".to_string()],
     );
 }
 
@@ -1660,7 +1703,7 @@ fn the_session_block_omits_the_qualifier_when_no_session_follows() {
 
     assert_eq!(
         card_texts(&live_session_lines(sessions, 60)),
-        vec!["live         2".to_string()],
+        vec!["live            2".to_string()],
     );
 }
 
@@ -1681,8 +1724,8 @@ fn the_session_block_dates_the_last_swap_and_says_when_it_is_picked_up() {
     assert_eq!(
         card_texts(&live_session_lines(sessions, 60)),
         vec![
-            "live         1, 1 with fallback".to_string(),
-            "last swap    3h ago".to_string(),
+            "live            1, 1 with fallback".to_string(),
+            "last swap       3h ago".to_string(),
             " └ picked up on the session's next request".to_string(),
         ],
     );
@@ -1704,8 +1747,8 @@ fn a_swap_this_very_second_reads_as_just_now() {
     assert_eq!(
         card_texts(&live_session_lines(sessions, 60)),
         vec![
-            "live         1".to_string(),
-            "last swap    just now".to_string(),
+            "live            1".to_string(),
+            "last swap       just now".to_string(),
             " └ picked up on the session's next request".to_string(),
         ],
     );
@@ -1768,16 +1811,16 @@ fn the_session_block_is_absent_when_nothing_is_live() {
 }
 
 /// Position and rhythm: the block sits ABOVE the 5h gauge with its own
-/// trailing blank separating the two. `rows_start` is read off the buffer, so
-/// a block inserted anywhere else would move the native caret off every row
-/// it points at.
+/// trailing blank separating the two. The row spans are read off the buffer,
+/// so a block inserted anywhere else would move the native caret off every
+/// row they point at.
 #[test]
 fn the_member_card_places_the_session_block_above_the_five_hour_gauge() {
     let cfg = config_with(vec![profile("a", 95.0, 10.0, 3600)], None, vec!["a"]);
     let sessions = crate::live_sessions::LiveTally::of([live_row("4242-0", "a", true, None)])
         .member(&crate::profile::ProfileName::from("a"));
 
-    let (lines, rows_start) = member_detail(
+    let (lines, spans) = member_detail(
         &cfg,
         &crate::profile::ProfileName::from("a"),
         MemberCard {
@@ -1789,12 +1832,12 @@ fn the_member_card_places_the_session_block_above_the_five_hour_gauge() {
     let texts = card_texts(&lines);
 
     assert_eq!(
-        &texts[..rows_start],
+        &texts[..spans[0].start],
         [
-            "live         1, 1 with fallback",
+            "live            1, 1 with fallback",
             "",
-            "5h usage     ██░░░░░░░░░░░░░░░░░░░│  10% used",
-            "             85% until rotate",
+            "5h usage        ██░░░░░░░░░░░░░░░░░░░│  10% used",
+            "                85% until rotate",
             "",
         ],
     );
@@ -1835,7 +1878,7 @@ fn the_fallback_tab_reads_the_apps_live_session_tally() {
     let rows = crate::testutil::buffer_rows(term.backend().buffer());
     // The padded key cell, not the bare word: `live` is short enough that a
     // frame-wide search for it would match any prose on the screen.
-    const KEY: &str = "live         ";
+    const KEY: &str = "live            ";
     let card = rows
         .iter()
         .find(|r| r.contains(KEY))
@@ -1844,7 +1887,7 @@ fn the_fallback_tab_reads_the_apps_live_session_tally() {
         card.split('│')
             .find(|seg| seg.contains(KEY))
             .map(str::trim_end),
-        Some(" live         1, 1 with fallback"),
+        Some(" live            1, 1 with fallback"),
     );
 }
 
@@ -1922,12 +1965,13 @@ fn a_narrow_pane_clamps_a_marked_members_name_rather_than_dropping_its_marker() 
     );
 }
 
-/// `rows_start` against the SESSION BLOCK, which the header-height sweep above
-/// cannot see: it passes a default `MemberSessions`, so `live_session_lines`
-/// early-returns and contributes nothing. The block is pushed immediately
-/// BEFORE `rows_start` is read, so its 2-to-5 lines move the anchor as surely as
-/// a pill does — and a caret on the wrong row is invisible to every text
-/// assertion, which is the whole reason `rows_start` is read off the buffer.
+/// `rows_start` (the first row span's start) against the SESSION BLOCK, which
+/// the header-height sweep above cannot see: it passes a default
+/// `MemberSessions`, so `live_session_lines` early-returns and contributes
+/// nothing. The block is pushed immediately BEFORE the rows, so its 2-to-5
+/// lines move the anchor as surely as a pill does — and a caret on the wrong
+/// row is invisible to every text assertion, which is the whole reason the
+/// spans are read off the buffer.
 ///
 /// Three heights, one per thing the block can add: the count alone, the count
 /// plus a dated swap and its always-on caveat, and that caveat WRAPPED on a
@@ -1938,7 +1982,7 @@ fn member_detail_rows_start_clears_the_session_block_at_every_height() {
     let cfg = config_with(vec![profile("a", 95.0, 10.0, 7200)], None, vec!["a"]);
     let start_and_first_row =
         |sessions: crate::live_sessions::MemberSessions, width: usize| -> (usize, usize, usize) {
-            let (lines, rows_start) = member_detail(
+            let (lines, spans) = member_detail(
                 &cfg,
                 &crate::profile::ProfileName::from("a"),
                 MemberCard {
@@ -1951,7 +1995,7 @@ fn member_detail_rows_start_clears_the_session_block_at_every_height() {
                 .iter()
                 .position(|l| line_text(l).contains("rotate at"))
                 .expect("the first FALLBACK_ROWS row renders");
-            (rows_start, first_row_at, lines.len())
+            (spans[0].start, first_row_at, lines.len())
         };
 
     // Baseline: no live session, so the block contributes nothing.
@@ -1987,5 +2031,280 @@ fn member_detail_rows_start_clears_the_session_block_at_every_height() {
         narrow > start,
         "a 30-col pane must wrap the caveat and push the rows down \
          (wide={start}, narrow={narrow}) — otherwise nothing here tests wrapping"
+    );
+}
+
+// ── the `preferred days` row ─────────────────────────────────────────────────
+
+/// The card with the cursor parked on `preferred days`, handing back that row's
+/// own line. Read by whole-line equality because `preferred` is a prefix of this
+/// key — anything looser lets the toggle row answer for it.
+fn preferred_days_line(cfg: &AppConfig) -> Line<'static> {
+    let row = FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == FallbackRow::PreferredDays)
+        .expect("the row exists");
+    let lines = member_detail(
+        cfg,
+        &crate::profile::ProfileName::from("a"),
+        MemberCard {
+            row_cursor: row,
+            width: 80,
+            ..Default::default()
+        },
+    )
+    .0;
+    lines
+        .iter()
+        .find(|l| line_text(l).contains("preferred days"))
+        .cloned()
+        .expect("the preferred days row renders")
+}
+
+#[test]
+fn preferred_days_row_names_each_preset_and_spells_the_custom_set() {
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
+    use chrono::Weekday::*;
+    // A hand-written list is read order-blind, so `sun, sat` is the `weekends`
+    // rung whatever order the file wrote it in.
+    let cases: [(Vec<chrono::Weekday>, &str); 6] = [
+        (Vec::new(), "never"),
+        (vec![Mon, Tue, Wed, Thu, Fri], "weekdays"),
+        (vec![Sat, Sun], "weekends"),
+        (WEEKDAYS_ALL.to_vec(), "every day"),
+        (vec![Tue, Thu], "tue, thu"),
+        (vec![Sun, Sat], "weekends"),
+    ];
+    for (set, expected) in cases {
+        let mut a = profile("a", 95.0, 20.0, 3600);
+        a.preferred_days = set;
+        let cfg = config_with(vec![a], Some("a"), vec!["a"]);
+        let line = preferred_days_line(&cfg);
+        assert_eq!(
+            line_text(&line),
+            format!("  preferred days  {expected}"),
+            "the row names the set it holds"
+        );
+        let want = if expected == "never" {
+            theme::faint().fg
+        } else {
+            theme::accent().fg
+        };
+        assert_eq!(
+            line.spans.last().expect("a value span").style.fg,
+            want,
+            "`never` reads faint like an off toggle, any other set as a set value"
+        );
+    }
+}
+
+/// The row's help line, one per state: blocker first (an empty list included,
+/// since the blocker is about the account, not the list), then the empty list,
+/// then a set list; descended, the picker's edit grammar instead. Whole-line
+/// equality, since each arm names a different fact.
+#[test]
+fn preferred_days_row_hint_names_the_blocker_then_the_list_state() {
+    let hint_under = |cfg: &AppConfig, day_picker: Option<usize>| -> String {
+        let row = FALLBACK_ROWS
+            .iter()
+            .position(|r| *r == FallbackRow::PreferredDays)
+            .expect("the row exists");
+        let lines = member_detail(
+            cfg,
+            &crate::profile::ProfileName::from("a"),
+            MemberCard {
+                focused: true,
+                row_cursor: row,
+                day_picker,
+                width: 80,
+                ..Default::default()
+            },
+        )
+        .0;
+        let at = lines
+            .iter()
+            .position(|l| line_text(l).contains("preferred days"))
+            .expect("the preferred days row renders");
+        line_text(&lines[at + 1])
+    };
+
+    let empty = config_with(vec![profile("a", 95.0, 20.0, 3600)], Some("a"), vec!["a"]);
+    assert_eq!(
+        hint_under(&empty, None),
+        " └ no home days; `preferred` holds every day"
+    );
+
+    let mut set = profile("a", 95.0, 20.0, 3600);
+    set.preferred_days = vec![chrono::Weekday::Sat, chrono::Weekday::Sun];
+    let set = config_with(vec![set], Some("a"), vec!["a"]);
+    assert_eq!(
+        hint_under(&set, None),
+        " └ home on these days; `preferred` decides the rest"
+    );
+
+    let mut dead = profile("a", 95.0, 20.0, 3600);
+    dead.disabled = true;
+    dead.preferred_days = vec![chrono::Weekday::Sat];
+    let dead = config_with(vec![dead], Some("other"), vec!["a"]);
+    assert_eq!(
+        hint_under(&dead, None),
+        " └ a day list here would claim nothing: the account is disabled"
+    );
+
+    let mut dead_empty = profile("a", 95.0, 20.0, 3600);
+    dead_empty.disabled = true;
+    let dead_empty = config_with(vec![dead_empty], Some("other"), vec!["a"]);
+    assert_eq!(
+        hint_under(&dead_empty, None),
+        " └ a day list here would claim nothing: the account is disabled",
+        "the blocker leads on an empty list too"
+    );
+    assert_eq!(
+        hint_under(&dead_empty, Some(0)),
+        " └ space toggles and saves · ↵ done",
+        "descended, the picker's grammar replaces the at-rest hint"
+    );
+}
+
+// The descended row is the cloudy-tui multi-select chip row: `✎` in the gutter,
+// a `[x]`/`[ ]` mark per day read off the saved list (brackets TEXT_DIM, `x`
+// ACCENT), the day ACCENT picked / TEXT_FAINT unpicked, and the caret a bold
+// ACCENT `❯` in a slot every chip reserves — never a background fill.
+#[test]
+fn the_day_picker_row_marks_picks_and_carries_its_caret_in_a_slot() {
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
+    use chrono::Weekday::{Mon, Wed};
+    let lines = day_picker_lines(&[Mon, Wed], 2, 80);
+    assert_eq!(
+        lines.iter().map(line_text).collect::<Vec<_>>(),
+        vec![
+            "✎ preferred days  [x]mon   [ ]tue  ❯[x]wed   [ ]thu   [ ]fri   [ ]sat   [ ]sun"
+                .to_string()
+        ],
+        "a pane that holds the row keeps it on one line"
+    );
+    let spans = &lines[0].spans;
+    let accent_bold = theme::accent().bold();
+    assert_eq!(spans[0].content.as_ref(), "✎ ");
+    assert_eq!(spans[0].style, accent_bold, "the edit glyph replaces `❯`");
+    // Chip `i` is five spans (slot, `[`, mark, `]`, day) after a gap span.
+    let (slot, open, mark, close, day) = (
+        |i: usize| &spans[6 * i + 2],
+        |i: usize| &spans[6 * i + 3],
+        |i: usize| &spans[6 * i + 4],
+        |i: usize| &spans[6 * i + 5],
+        |i: usize| &spans[6 * i + 6],
+    );
+    assert_eq!(slot(2).content.as_ref(), "❯");
+    assert_eq!(slot(2).style, accent_bold, "the caret is bold ACCENT");
+    assert_eq!(
+        slot(1).content.as_ref(),
+        " ",
+        "other chips keep the slot blank"
+    );
+    for i in 0..7 {
+        assert_eq!(open(i).style, theme::dim(), "chip {i}: `[` is TEXT_DIM");
+        assert_eq!(close(i).style, theme::dim(), "chip {i}: `]` is TEXT_DIM");
+        assert_eq!(slot(i).style.bg, None, "chip {i}: no fill marks the caret");
+        assert_eq!(day(i).style.bg, None, "chip {i}: no fill marks the caret");
+    }
+    assert_eq!(
+        (mark(0).content.as_ref(), mark(0).style),
+        ("x", theme::accent())
+    );
+    assert_eq!(mark(1).content.as_ref(), " ", "tue is unpicked");
+    assert_eq!(day(0).style, theme::accent(), "a picked day reads ACCENT");
+    assert_eq!(
+        day(1).style,
+        theme::faint(),
+        "an unpicked day reads TEXT_FAINT"
+    );
+    assert_eq!(day(2).style, theme::accent());
+
+    assert_eq!(
+        day_picker_rows(1),
+        (0..7).map(|i| i..i + 1).collect::<Vec<_>>(),
+        "a pane too narrow for any chip still gives each day a line of its own"
+    );
+}
+
+/// `+ add` names a day list the candidate carries from an earlier stint on the
+/// chain, under the candidate the cursor is on, before the add re-arms it.
+#[test]
+fn the_add_picker_names_a_carried_day_list_before_the_add() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut b = profile("b", 95.0, 20.0, 3600);
+    b.preferred_days = vec![Tue, Thu];
+    let mut c = profile("c", 95.0, 20.0, 3600);
+    c.preferred_days = vec![Sun, Sat];
+    let cfg = config_with(
+        vec![
+            profile("a", 95.0, 20.0, 3600),
+            b,
+            c,
+            profile("d", 95.0, 20.0, 3600),
+        ],
+        Some("a"),
+        vec!["a"],
+    );
+    let mut app = App::new(cfg);
+    // At 80 the blurb holds one line, so the candidates open on the fifth.
+    let picker = |app: &App| -> Vec<String> {
+        add_detail(app, true, 80)
+            .iter()
+            .skip(4)
+            .map(line_text)
+            .map(|t| t.trim_end().to_string())
+            .collect()
+    };
+
+    app.fallback_detail_cursor = 0;
+    assert_eq!(
+        picker(&app),
+        vec!["❯ b", " └ home on tue, thu", "  c", "  d"],
+        "a custom list is spelled out"
+    );
+    app.fallback_detail_cursor = 1;
+    assert_eq!(
+        picker(&app),
+        vec!["  b", "❯ c", " └ home on weekends", "  d"],
+        "a preset list takes the name the member row gives it"
+    );
+    app.fallback_detail_cursor = 2;
+    assert_eq!(
+        picker(&app),
+        vec!["  b", "  c", "❯ d"],
+        "a candidate with no list says nothing"
+    );
+}
+
+/// A carried list on a candidate the walk would skip claims nothing once added,
+/// so the pick names the blocker instead of promising home days.
+#[test]
+fn the_add_picker_names_the_blocker_before_a_carried_list() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut b = profile("b", 95.0, 20.0, 3600);
+    b.preferred_days = vec![chrono::Weekday::Sat, chrono::Weekday::Sun];
+    let mut cfg = config_with(
+        vec![profile("a", 95.0, 20.0, 3600), b],
+        Some("a"),
+        vec!["a"],
+    );
+    cfg.state.auth_broken.push("b".into());
+    let mut app = App::new(cfg);
+    app.fallback_detail_cursor = 0;
+    let picker: Vec<String> = add_detail(&app, true, 80)
+        .iter()
+        .skip(4)
+        .map(line_text)
+        .map(|t| t.trim_end().to_string())
+        .collect();
+    assert_eq!(
+        picker,
+        vec![
+            "❯ b",
+            " └ its day list (weekends) would claim nothing: its login is auth-broken",
+        ]
     );
 }

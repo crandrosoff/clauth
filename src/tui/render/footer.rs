@@ -200,6 +200,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ("a", "actions"),
                 ("?", "help"),
             ],
+            // The row's own keys lead so the narrow-width trim, which drops the
+            // rightmost non-essential hint first, sheds `↑↓ row` before them.
+            FallbackHint::DetailPreferredDays => &[
+                ("space", "preset"),
+                ("↵", "days"),
+                ("↑↓", "row"),
+                ("a", "actions"),
+                ("?", "help"),
+            ],
+            // The chip picker: `←→` walk the chips here, so no `tabs` rides in
+            // front (below), and each space saves, so nothing reads as a commit.
+            FallbackHint::DetailPreferredDaysEdit => &[
+                ("←→", "day"),
+                ("space", "toggle"),
+                ("↵", "done"),
+                ("↑↓", "row"),
+            ],
             FallbackHint::DetailMaxSpend => &[
                 ("↑↓", "row"),
                 ("↵", "type"),
@@ -223,9 +240,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     // Suppress the trailing `q` hint only where `q` is fully captured by the
-    // screen (threshold edit / max-spend edit / armed-remove / refresh-interval
-    // edit own the keyboard entirely). Every other sub-focus shows `q back` via
-    // `q_label` per the cloudy-tui contract.
+    // screen (threshold edit / max-spend edit / armed-remove /
+    // refresh-interval edit own the keyboard entirely). Every other sub-focus
+    // shows `q back` via `q_label` per the cloudy-tui contract; the day picker
+    // is one, since its `q` leaves the picker.
     let show_q = !((app.tab == Tab::Fallback
         && matches!(
             fallback_hint(app),
@@ -238,7 +256,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             && (app.refresh_interval_draft.is_some() || app.context_nudge_draft.is_some()))
         || (app.tab == Tab::Plugin && app.plugin.herdr_tag_draft.is_some()));
 
+    // The day picker claims `←→` for its chip caret, so the tab hint would
+    // name a switch those keys never make there.
+    let picking_days =
+        app.tab == Tab::Fallback && fallback_hint(app) == FallbackHint::DetailPreferredDaysEdit;
     let mut hints: Vec<(&str, &str)> = std::iter::once(TAB_NAV)
+        .filter(|_| !picking_days)
         .chain(tail.iter().copied())
         .collect();
 

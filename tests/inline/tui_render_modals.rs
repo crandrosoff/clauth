@@ -78,6 +78,14 @@ fn fallback_tab_key_grammar_rows_pin_exact_order_and_copy() {
             ("+ / -", "step rotate at / weekly at by 5"),
             ("↵ on rotate at", "type a value, ↵ saves"),
             ("↵ on weekly at", "type a %, empty clears"),
+            (
+                "space on preferred days",
+                "step never / weekdays / weekends / every day",
+            ),
+            (
+                "↵ on preferred days",
+                "pick days: ← → walk · space toggles and saves · ↵ esc q leave · ↑↓ leave and move",
+            ),
             ("esc", "back / cancel edit"),
         ],
     );

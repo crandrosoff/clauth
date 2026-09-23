@@ -24,6 +24,16 @@ pub(super) fn selector_width(body_w: u16) -> u16 {
 /// it every layout is byte-identical to the desktop rendering.
 pub(super) const NARROW_BODY_W: u16 = 60;
 
+/// Key column width of the two master-detail settings cards, the Setup
+/// account card and the Fallback member card: the longest key on either, the
+/// Fallback card's `preferred days` (14). One width and one gutter
+/// ([`DETAIL_KEY_GUTTER`]) for both, so their value columns open at the same
+/// place across a tab switch.
+pub(super) const DETAIL_KEY_W: usize = 14;
+/// Fixed gap between the padded key and the value column on those two cards
+/// (house standard).
+pub(super) const DETAIL_KEY_GUTTER: usize = 2;
+
 /// True when `w` is under the phone-width threshold.
 pub(super) fn narrow(w: u16) -> bool {
     w < NARROW_BODY_W

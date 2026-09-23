@@ -2135,3 +2135,362 @@ fn session_field(app: &mut App, field: Option<crate::tui::app::InputState>) {
         s.paste_field = field;
     }
 }
+
+// ── the Fallback card's `preferred days` row ─────────────────────────────────
+
+/// The Fallback detail, cursor on the `preferred days` row, ready to dump.
+fn preferred_days_app(config: AppConfig) -> App {
+    use crate::tui::app::{FALLBACK_ROWS, FallbackFocus, FallbackRow, Tab};
+    let mut app = App::new(config);
+    app.tab = Tab::Fallback;
+    app.fallback_focus = FallbackFocus::Detail;
+    app.chain_cursor = 0;
+    app.fallback_detail_cursor = FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == FallbackRow::PreferredDays)
+        .expect("the row exists");
+    app
+}
+
+/// One chain member holding `days`, on the Fallback detail.
+fn preferred_days_card(days: Vec<chrono::Weekday>) -> App {
+    let mut p = oauth("uwuclxdy", 42.0, 18.0, true);
+    p.preferred_days = days;
+    preferred_days_app(AppConfig {
+        state: AppState {
+            active_profile: Some("uwuclxdy".into()),
+            profiles: vec!["uwuclxdy".into()],
+            fallback_chain: vec!["uwuclxdy".into()],
+            ..AppState::default()
+        },
+        profiles: vec![p],
+    })
+}
+
+/// Both hint arms, whole footer row: the row's own keys at rest, then the
+/// picker's once ⏎ descends, where `←→` walk the chips (no `tabs` claim), `q`
+/// leaves (`q back`) and `?` does nothing (no `help`). At phone width the row
+/// sheds `↑↓ row` first, so `space toggle`, the one key that picks, survives.
+#[test]
+fn fallback_preferred_days_footer_hints() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = preferred_days_card(Vec::new());
+
+    let out = dump(&app, 120, 30);
+    assert_eq!(
+        footer_of(&out),
+        "←→ tabs   space preset   ↵ days   ↑↓ row   ? help   q back",
+        "the row's hints"
+    );
+    let out = dump(&app, 45, 30);
+    assert_eq!(
+        footer_of(&out),
+        "←→ tabs   space preset   ? help   q back",
+        "at phone width `↑↓ row` sheds before the row's own keys"
+    );
+
+    crate::tui::app::handle_key(&mut app, key(KeyCode::Enter));
+    let out = dump(&app, 120, 30);
+    assert_eq!(
+        footer_of(&out),
+        "←→ day   space toggle   ↵ done   ↑↓ row   q back",
+        "the picker's hints"
+    );
+    let out = dump(&app, 45, 30);
+    assert_eq!(
+        footer_of(&out),
+        "←→ day   space toggle   ↵ done   q back",
+        "the picker's hints at phone width"
+    );
+}
+
+/// A hand-written list keeps its own spelling: rendering the card and moving the
+/// cursor across the row (`↓` then `↑` through `handle_key`) must not settle the
+/// file into canonical order.
+#[test]
+fn a_hand_written_day_list_renders_without_rewriting_its_file() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::profile::ProfileName;
+    use crate::testutil::key;
+    use ratatui::crossterm::event::KeyCode;
+    let name = ProfileName::from("uwuclxdy");
+    let path = crate::profile::profile_subpath(&name, "config.toml").expect("config path");
+
+    // Seeded the way an operator would write it: the weekends the other way round.
+    let mut seeded = oauth("uwuclxdy", 42.0, 18.0, true);
+    seeded.preferred_days = vec![chrono::Weekday::Sun, chrono::Weekday::Sat];
+    crate::profile::save_profile(&seeded).expect("seed the hand-written list");
+    let before = std::fs::read(&path).expect("read the seeded file");
+    assert!(
+        String::from_utf8_lossy(&before).contains(r#"preferred_days = ["sun", "sat"]"#),
+        "precondition: the file keeps the written order: {}",
+        String::from_utf8_lossy(&before)
+    );
+
+    // Loaded back from that file, then rendered with the cursor on the row and
+    // off it again.
+    let loaded = crate::profile::load_profile(&name).expect("load the member");
+    let mut app = preferred_days_app(AppConfig {
+        state: AppState {
+            active_profile: Some("uwuclxdy".into()),
+            profiles: vec!["uwuclxdy".into()],
+            fallback_chain: vec!["uwuclxdy".into()],
+            ..AppState::default()
+        },
+        profiles: vec![loaded],
+    });
+    assert_eq!(
+        app.config()
+            .find(&name)
+            .expect("the member")
+            .preferred_days
+            .clone(),
+        vec![chrono::Weekday::Sun, chrono::Weekday::Sat],
+        "precondition: the loader kept the written order"
+    );
+
+    let row = app.fallback_detail_cursor;
+    let on_row = dump(&app, 120, 30);
+    assert!(
+        on_row.contains("preferred days  weekends"),
+        "the unordered list reads as the `weekends` rung:\n{on_row}"
+    );
+    crate::tui::app::handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.fallback_detail_cursor, row + 1, "↓ left the row");
+    let _ = dump(&app, 120, 30);
+    crate::tui::app::handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.fallback_detail_cursor, row, "↑ came back to it");
+    let _ = dump(&app, 120, 30);
+
+    assert_eq!(
+        std::fs::read(&path).expect("read back"),
+        before,
+        "rendering the card and moving across the row wrote nothing"
+    );
+}
+
+/// The first card row carrying `key` and the `n - 1` lines under it, cut to the
+/// detail pane's inner columns (the row opens `lead` cells before its key; the
+/// pane's right padding and border are the frame's last two columns), right
+/// edge trimmed.
+fn detail_block(out: &str, key: &str, lead: usize, n: usize) -> Vec<String> {
+    let rows: Vec<Vec<char>> = out.lines().map(|l| l.chars().collect()).collect();
+    let key: Vec<char> = key.chars().collect();
+    let (at, col) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(i, r)| r.windows(key.len()).position(|w| w == key).map(|c| (i, c)))
+        .expect("the key's row renders");
+    let (start, end) = (col - lead, rows[at].len() - 2);
+    rows[at..at + n]
+        .iter()
+        .map(|r| {
+            r[start..end]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// A picker row that overruns its pane breaks BETWEEN chips onto continuation
+/// lines whose marks line up under the first line's, so every day is on screen
+/// exactly once at the side-by-side widths that used to clip it (60-68) and at
+/// the stacked phone width (45).
+#[test]
+fn the_day_picker_wraps_between_chips_at_every_width() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use ratatui::crossterm::event::KeyCode;
+    let two_a_line: &[&str] = &[
+        "✎ preferred days ❯[ ]mon   [ ]tue",
+        "                  [ ]wed   [ ]thu",
+        "                  [ ]fri   [x]sat",
+        "                  [x]sun",
+        " └ space toggles and saves · ↵ done",
+    ];
+    let three_a_line: &[&str] = &[
+        "✎ preferred days ❯[ ]mon   [ ]tue   [ ]wed",
+        "                  [ ]thu   [ ]fri   [x]sat",
+        "                  [x]sun",
+        " └ space toggles and saves · ↵ done",
+    ];
+    // The last case is a pane only 12 rows tall: the card scrolls the picker's
+    // continuation lines and its hint into view along with its first line.
+    for (w, h, want) in [
+        (60, 40, two_a_line),
+        (64, 40, two_a_line),
+        (68, 40, three_a_line),
+        (45, 40, two_a_line),
+        (60, 18, two_a_line),
+    ] {
+        let mut app = preferred_days_card(vec![chrono::Weekday::Sat, chrono::Weekday::Sun]);
+        crate::tui::app::handle_key(&mut app, key(KeyCode::Enter));
+        let block = detail_block(&dump(&app, w, h), "preferred days", 2, want.len());
+        assert_eq!(block, want, "{w}x{h}");
+        let chips = block[..want.len() - 1].join("\n");
+        for day in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] {
+            assert_eq!(chips.matches(day).count(), 1, "{w}x{h}: `{day}` once");
+        }
+    }
+}
+
+/// A picker taller than the pane keeps the caret's own line on screen: seeded
+/// on Monday the label line shows, and walked to Sunday the last line does.
+#[test]
+fn a_picker_taller_than_the_pane_keeps_its_caret_in_view() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use ratatui::crossterm::event::KeyCode;
+    for (w, h) in [(35, 18), (30, 16), (28, 12)] {
+        let mut app = preferred_days_card(vec![chrono::Weekday::Sat, chrono::Weekday::Sun]);
+        crate::tui::app::handle_key(&mut app, key(KeyCode::Enter));
+        let out = dump(&app, w, h);
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.contains("✎ preferred days ❯[ ]mon"))
+                .count(),
+            1,
+            "{w}x{h}: the caret's first line is on screen:\n{out}"
+        );
+        crate::tui::app::handle_key(&mut app, key(KeyCode::Left));
+        let out = dump(&app, w, h);
+        assert_eq!(
+            out.lines().filter(|l| l.contains("❯[x]sun")).count(),
+            1,
+            "{w}x{h}: the caret on Sunday is on screen:\n{out}"
+        );
+    }
+}
+
+/// The screen column where `key`'s value opens, on the first row carrying
+/// `key` followed by the key gutter.
+fn value_column(out: &str, key: &str) -> usize {
+    let key: Vec<char> = key.chars().collect();
+    out.lines()
+        .find_map(|l| {
+            let row: Vec<char> = l.chars().collect();
+            let after = row.windows(key.len()).position(|w| w == key)? + key.len();
+            let gap = row[after..].iter().take_while(|c| **c == ' ').count();
+            (gap >= 2).then_some(after + gap)
+        })
+        .expect("the key renders with its value")
+}
+
+/// The Setup account card and the Fallback member card open their value
+/// columns at the same screen column, so the values hold still across a tab
+/// switch.
+#[test]
+fn the_setup_and_fallback_cards_open_their_values_on_one_column() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = preferred_days_card(Vec::new());
+    let fallback = value_column(&dump(&app, 120, 30), "rotate at");
+    app.tab = crate::tui::app::Tab::Setup;
+    let setup = value_column(&dump(&app, 120, 30), "name");
+    assert_eq!(setup, fallback);
+}
+
+/// The `5h usage` row gives its gauge only what the key column and the figure
+/// leave, so the figure reads whole at the narrow side-by-side width (60) and
+/// the stacked phone width (45) as well as on a desktop pane.
+#[test]
+fn the_five_hour_gauge_shrinks_so_its_figure_reads_whole() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let app = preferred_days_card(Vec::new());
+    for (w, gauge) in [
+        (45, "██████░░░░░░│░░"),
+        (60, "████░░░░│░"),
+        (120, "█████████░░░░░░░░░│░░░"),
+    ] {
+        assert_eq!(
+            detail_block(&dump(&app, w, 40), "5h usage", 0, 2),
+            vec![
+                format!("5h usage        {gauge}  42% used"),
+                "                38% until rotate".to_string(),
+            ],
+            "width {w}"
+        );
+    }
+}
+
+/// A custom day list at rest breaks between days, never inside one, onto lines
+/// indented to the value column, the open picker's break rule, so every day is
+/// on screen once at every width a side-by-side or stacked pane takes.
+#[test]
+fn a_custom_day_list_at_rest_wraps_between_days() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let five = vec![Mon, Tue, Wed, Thu, Sat];
+    let six = vec![Mon, Tue, Wed, Thu, Fri, Sat];
+    let key = "❯ preferred days  ";
+    let cont = " ".repeat(18);
+    let cases: [(&Vec<chrono::Weekday>, u16, Vec<String>); 8] = [
+        (
+            &five,
+            60,
+            vec![format!("{key}mon, tue, wed,"), format!("{cont}thu, sat")],
+        ),
+        (
+            &five,
+            64,
+            vec![format!("{key}mon, tue, wed, thu,"), format!("{cont}sat")],
+        ),
+        (&five, 68, vec![format!("{key}mon, tue, wed, thu, sat")]),
+        (&five, 45, vec![format!("{key}mon, tue, wed, thu, sat")]),
+        (
+            &six,
+            60,
+            vec![
+                format!("{key}mon, tue, wed,"),
+                format!("{cont}thu, fri, sat"),
+            ],
+        ),
+        (
+            &six,
+            64,
+            vec![
+                format!("{key}mon, tue, wed, thu,"),
+                format!("{cont}fri, sat"),
+            ],
+        ),
+        (
+            &six,
+            68,
+            vec![
+                format!("{key}mon, tue, wed, thu, fri,"),
+                format!("{cont}sat"),
+            ],
+        ),
+        (
+            &six,
+            45,
+            vec![
+                format!("{key}mon, tue, wed, thu,"),
+                format!("{cont}fri, sat"),
+            ],
+        ),
+    ];
+    for (days, w, want) in cases {
+        let app = preferred_days_card(days.clone());
+        let block = detail_block(&dump(&app, w, 40), "preferred days", 2, want.len() + 1);
+        assert_eq!(block[..want.len()], want[..], "{} days at {w}", days.len());
+        assert!(
+            block[want.len()].starts_with(" └ "),
+            "{} days at {w}: the row's hint follows its last line, got {:?}",
+            days.len(),
+            block[want.len()]
+        );
+        let row = block[..want.len()].join("\n");
+        for day in ["mon", "tue", "wed", "thu", "sat"] {
+            assert_eq!(
+                row.matches(day).count(),
+                1,
+                "{} days at {w}: `{day}` once",
+                days.len()
+            );
+        }
+    }
+}
