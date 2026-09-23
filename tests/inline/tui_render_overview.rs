@@ -1478,12 +1478,11 @@ fn chain_row_switch_hint_rides_the_target_row() {
     );
 }
 
-/// A projected switch LANDING on the preferred (home) member carries the `⌂`
-/// homecoming glyph, while a switch onto any other member carries the plain `↩`.
-/// Pins the wording that distinguishes a return from an exhaustion hop (spec
-/// item 6) — an inverted glyph (⌂/↩ swapped) would otherwise ship green.
+/// Every projected hop carries the same `↩` glyph, the preferred (home) member
+/// included — the destination never changes the marker, and no `⌂` exists on
+/// this surface.
 #[test]
-fn chain_row_marks_a_homecoming_onto_preferred_with_the_house_glyph() {
+fn chain_row_renders_every_projected_hop_with_the_return_glyph() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut home = profile("home", 95.0, 10.0, 3600);
     home.preferred = true;
@@ -1512,8 +1511,8 @@ fn chain_row_marks_a_homecoming_onto_preferred_with_the_house_glyph() {
 
     let home_hint = hint("home");
     assert!(
-        home_hint.contains('⌂') && !home_hint.contains('↩'),
-        "a switch onto the preferred member reads as a homecoming: {home_hint}",
+        home_hint.contains('↩') && !home_hint.contains('⌂'),
+        "a switch onto the preferred member keeps the plain return glyph: {home_hint}",
     );
     let plain_hint = hint("plain");
     assert!(

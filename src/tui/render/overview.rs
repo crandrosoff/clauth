@@ -1154,18 +1154,7 @@ fn chain_row(cfg: &AppConfig, name: &crate::profile::ProfileName, ctx: ChainRowC
             // `projected_switch` only ever fires off `burn_rate_eta`, so this
             // hint is always an EXHAUSTION projection — a genuine event-driven
             // return (healthy active, preferred just freed) has no eta to show.
-            // The `⌂` glyph therefore marks an exhaustion hop that LANDS on the
-            // home account, telling it apart from the plain `↩` of a hop onto any
-            // other member; it is keyed on the destination, not on the cause.
-            let glyph = if cfg.is_home_today(name) {
-                "⌂"
-            } else {
-                "↩"
-            };
-            Span::styled(
-                format!("{glyph} ~{}", humanize_duration(secs)),
-                theme::faint(),
-            )
+            Span::styled(format!("↩ ~{}", humanize_duration(secs)), theme::faint())
         }),
         marker: reason.as_ref().map(reason_marker),
     }
