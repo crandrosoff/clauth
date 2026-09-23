@@ -43,14 +43,16 @@ Codex accounts ([Codex](Codex)) sit under the Claude Code rows in a section head
 |-----|----------|
 | <kbd>r</kbd> | Usage: refresh the selected account only. Tokens / Status / Plugin: reload that tab's data. Everywhere else: refresh every Claude Code account |
 | <kbd>t</kbd> | Tokens: cycle the period lens. Everywhere else: force-rotate every Claude Code account's token, after a confirm |
-| <kbd>⏎</kbd> | Overview: switch to the selected account. Tokens: open the model breakdown. Setup / Fallback: open a detail row, or commit an edit. Status / Plugin: open the detail |
+| <kbd>⏎</kbd> | Overview: switch to the selected account. Tokens: open the model breakdown. Setup / Fallback: open a detail row, or commit an edit; on a Fallback card's `preferred days` row, open the day picker. Status / Plugin: open the detail |
 | <kbd>⇧↑</kbd> <kbd>⇧↓</kbd> | Overview: reorder accounts. Fallback (chain focus): reorder chain members |
-| <kbd>space</kbd> | Config: cycle a value. Setup `model` row and Fallback toggle rows: flip |
+| <kbd>space</kbd> | Config: cycle a value. Setup `model` row and Fallback toggle rows: flip. Fallback `preferred days`: step `never` → `weekdays` → `weekends` → `every day` and back to `never`; on a custom set it jumps straight to `never` |
 | <kbd>+</kbd> <kbd>-</kbd> | Fallback detail: step `rotate at` or `weekly at` by 5 |
 | <kbd>e</kbd> | Usage: toggle burn estimates |
 | <kbd>p</kbd> | Usage: toggle the ideal-pace marker |
 | <kbd>c</kbd> | Overview: cycle the harness filter (both → claude → codex → both; the accounts panel title names the active one). Tokens: count cache reads and writes in the token totals |
 | <kbd>f</kbd> | Plugin: apply the selected row's fix |
+
+The day picker on a Fallback card's `preferred days` row shows each weekday as `[x]` or `[ ]`: <kbd>←</kbd> <kbd>→</kbd> walk the days (and do not switch tabs while it is open), <kbd>space</kbd> toggles the day and saves at once, <kbd>⏎</kbd>, <kbd>esc</kbd> or <kbd>q</kbd> leave it, and <kbd>↑</kbd> <kbd>↓</kbd> leave it and move to the row above or below.
 
 On macOS, <kbd>t</kbd> skips any account holding a live `clauth start` session: that session's login lives in a Keychain item clauth cannot write, so rotating it would sign the session out.
 
@@ -97,7 +99,6 @@ The account list ends in an action row: `+ new`, which turns this pane into the 
 | `token` | read-only state of a stored long-lived setup token, above the editable rows, in one of eight states. Static: `long-lived · ~Nd left`, `expires in ~Nd` inside a month, `long-lived · no recorded expiry`, and `expired`. Rolling: `rolling · re-stamps in ~Nh`, `rolling · re-stamp due` inside the last hour, `rolling · no recorded expiry`, and `rolling token stalled` once nothing re-stamped it in time. `mis-filled` is neither: the sidecar holds a rotating pair the split cannot use. The charged states carry the fix beneath them ([Configuration](Configuration#account-types)) |
 | `name` | the profile name |
 | `auto-start` | whether clauth opens the 5h window with a 1-token ping ([Configuration](Configuration#auto-start-the-5-hour-window)) |
-| `home days` | the weekdays this account is home, claimed against every account ([Configuration](Configuration#configtoml)); <kbd>⏎</kbd> types them comma-separated (`sat, sun`), an empty field clears the list. The hint names why a list here would claim nothing when the account is off the chain, disabled or auth-broken |
 | `base url` | the API endpoint; blank means an OAuth account |
 | `api key` | the key for that endpoint |
 | `model` | the account's default model; <kbd>space</kbd> cycles presets, <kbd>⏎</kbd> types a full id |
