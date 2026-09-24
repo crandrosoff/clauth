@@ -6368,7 +6368,7 @@ fn write_threshold_silently_noops_for_a_vanished_member() {
     state.fallback_chain.retain(|n| n.as_str() != a.as_str());
     crate::profile::save_app_state(&state).expect("drop a from disk");
 
-    super::write_threshold(&mut app, 90.0);
+    super::write_threshold(&mut app, &a, 90.0);
 
     assert!(
         app.toasts.is_empty(),
@@ -6691,7 +6691,7 @@ fn fallback_weekly_at_and_max_spend_editors_still_open_via_space() {
     app.fallback_detail_cursor = weekly_at_row();
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
     assert!(
-        app.fallback_weekly_draft.is_some(),
+        card_edit_row(&app) == Some(super::FallbackRow::WeeklyAt),
         "space still opens the weekly-at editor"
     );
     super::handle_key(&mut app, key(KeyCode::Esc));
@@ -6699,12 +6699,17 @@ fn fallback_weekly_at_and_max_spend_editors_still_open_via_space() {
     app.fallback_detail_cursor = max_spend_row();
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Char(' ')));
     assert!(
-        app.fallback_max_spend_draft.is_some(),
+        card_edit_row(&app) == Some(super::FallbackRow::MaxSpend),
         "space still opens the max-spend editor"
     );
 }
 
 // ── fallback max auto-spend (real money) ────────────────────────────────────
+
+/// The row the member card's open edit sits on, `None` at rest.
+fn card_edit_row(app: &App) -> Option<super::FallbackRow> {
+    app.fallback_edit.as_ref().map(|e| e.state.row())
+}
 
 /// Read the row's position rather than hardcoding it, so inserting a row above
 /// it can't silently point these tests at a different field.
@@ -6753,7 +6758,10 @@ fn fallback_max_spend_editor_types_and_persists() {
 
     // ⏎ opens the editor seeded with the current ceiling.
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
-    assert!(app.fallback_max_spend_draft.is_some(), "⏎ opens the field");
+    assert!(
+        card_edit_row(&app) == Some(super::FallbackRow::MaxSpend),
+        "⏎ opens the field"
+    );
 
     // The field opens seeded with the current ceiling ("0.00"), so clear it
     // before typing or the digits append to it.
@@ -6764,7 +6772,7 @@ fn fallback_max_spend_editor_types_and_persists() {
         super::handle_key(&mut app, key(KeyCode::Char(c)));
     }
     super::handle_key(&mut app, key(KeyCode::Enter));
-    assert!(app.fallback_max_spend_draft.is_none(), "⏎ closes the field");
+    assert!(app.fallback_edit.is_none(), "⏎ closes the field");
     assert_eq!(
         app.config()
             .find(&crate::profile::ProfileName::from("a"))
@@ -6793,7 +6801,7 @@ fn fallback_max_spend_editor_is_inert_while_spend_budget_is_off() {
 
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
     assert!(
-        app.fallback_max_spend_draft.is_none(),
+        app.fallback_edit.is_none(),
         "⏎ must not open the editor while the row is inert"
     );
 }
@@ -6823,7 +6831,7 @@ fn fallback_max_spend_editor_refuses_an_infinite_ceiling() {
     }
     super::handle_key(&mut app, key(KeyCode::Enter));
     assert!(
-        app.fallback_max_spend_draft.is_some(),
+        card_edit_row(&app) == Some(super::FallbackRow::MaxSpend),
         "an invalid ceiling keeps the field open"
     );
     assert_eq!(
@@ -8689,12 +8697,15 @@ fn fallback_weekly_override_editor_sets_and_clears() {
 
     // ⏎ opens the editor with an EMPTY seed (no override yet).
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
-    assert!(app.fallback_weekly_draft.is_some(), "⏎ opens the field");
+    assert!(
+        card_edit_row(&app) == Some(super::FallbackRow::WeeklyAt),
+        "⏎ opens the field"
+    );
     for c in ['9', '0'] {
         super::handle_key(&mut app, key(KeyCode::Char(c)));
     }
     super::handle_key(&mut app, key(KeyCode::Enter));
-    assert!(app.fallback_weekly_draft.is_none(), "⏎ closes the field");
+    assert!(app.fallback_edit.is_none(), "⏎ closes the field");
     assert_eq!(
         app.config()
             .find(&crate::profile::ProfileName::from("a"))
@@ -8723,7 +8734,10 @@ fn fallback_weekly_override_editor_sets_and_clears() {
         super::handle_key(&mut app, key(KeyCode::Char(c)));
     }
     super::handle_key(&mut app, key(KeyCode::Enter));
-    assert!(app.fallback_weekly_draft.is_some(), "invalid stays open");
+    assert!(
+        card_edit_row(&app) == Some(super::FallbackRow::WeeklyAt),
+        "invalid stays open"
+    );
     assert_eq!(
         app.config()
             .find(&crate::profile::ProfileName::from("a"))
@@ -8747,7 +8761,7 @@ fn fallback_weekly_override_editor_is_inert_while_gate_is_off() {
 
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
     assert!(
-        app.fallback_weekly_draft.is_none(),
+        app.fallback_edit.is_none(),
         "⏎ must not open the editor while the weekly gate is off"
     );
 }
@@ -12101,7 +12115,10 @@ fn fallback_preferred_days_space_steps_a_custom_set_to_never() {
 
 /// The picker's caret, `None` while it is closed.
 fn picker_caret(app: &App) -> Option<usize> {
-    app.fallback_day_picker.as_ref().map(|e| e.state.cursor)
+    match app.fallback_edit.as_ref().map(|e| &e.state) {
+        Some(super::CardEdit::Days(picker)) => Some(picker.cursor),
+        _ => None,
+    }
 }
 
 // No draft: each space writes the member's toggled list at once, and the
@@ -12296,7 +12313,7 @@ fn opening_and_leaving_the_day_picker_writes_nothing() {
     super::handle_key(&mut app, key(KeyCode::Right));
     super::handle_key(&mut app, key(KeyCode::Esc));
 
-    assert!(app.fallback_day_picker.is_none(), "esc left the picker");
+    assert!(picker_caret(&app).is_none(), "esc left the picker");
     assert_eq!(
         std::fs::read(&path).expect("read back"),
         before,
@@ -12469,12 +12486,20 @@ fn two_member_app() -> App {
 /// Rewrite the chain on disk the way another writer would (the REST chain
 /// route, a second TUI), then run the tick's reload over it.
 fn reload_with_chain(app: &mut App, chain: &[&str]) {
+    reload_with_state(app, |state| {
+        state.fallback_chain = chain
+            .iter()
+            .map(|n| crate::profile::ProfileName::from(*n))
+            .collect();
+    });
+}
+
+/// Rewrite `profiles.toml` through `edit` the way another writer would, then
+/// run the tick's reload over it.
+fn reload_with_state(app: &mut App, edit: impl FnOnce(&mut AppState)) {
     let mut state = crate::profile::load_app_state().expect("load the state");
-    state.fallback_chain = chain
-        .iter()
-        .map(|n| crate::profile::ProfileName::from(*n))
-        .collect();
-    crate::profile::save_app_state(&state).expect("rewrite the chain");
+    edit(&mut state);
+    crate::profile::save_app_state(&state).expect("rewrite the state");
     // A distinct mtime, so the fingerprint moves however fast the write lands.
     let path = crate::profile::clauth_dir()
         .expect("clauth dir")
@@ -12508,7 +12533,7 @@ fn the_day_picker_follows_its_member_through_a_reorder_reload() {
         app.chain_cursor, 1,
         "the cursor followed `a` to its new slot"
     );
-    assert!(app.fallback_day_picker.is_none(), "⏎ left the picker");
+    assert!(picker_caret(&app).is_none(), "⏎ left the picker");
 }
 
 /// A reload that drops the member from the chain closes its picker and hands
@@ -12521,13 +12546,13 @@ fn the_day_picker_closes_when_a_reload_drops_its_member() {
 
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
     assert!(
-        app.fallback_day_picker.is_some(),
+        picker_caret(&app).is_some(),
         "precondition: the picker is open on `a`"
     );
     reload_with_chain(&mut app, &["b"]);
 
     assert!(
-        app.fallback_day_picker.is_none(),
+        picker_caret(&app).is_none(),
         "the picker closed with its member gone"
     );
     assert_eq!(
@@ -12540,6 +12565,269 @@ fn the_day_picker_closes_when_a_reload_drops_its_member() {
         (disk_days("a"), disk_days("b")),
         (Vec::new(), Vec::new()),
         "closing wrote nothing, and a space meant for the picker reached no member"
+    );
+}
+
+/// `name`'s own `config.toml` whole: a write meant for another member that
+/// lands here changes it.
+fn member_file(name: &str) -> String {
+    let path =
+        crate::profile::profile_subpath(&crate::profile::ProfileName::from(name), "config.toml")
+            .expect("config path");
+    std::fs::read_to_string(path).expect("read the member file")
+}
+
+/// On `a`'s card, open the typed field on `row` with ⏎, clear its seed and type
+/// `value`, leaving the field open.
+fn type_into_card_field(app: &mut App, row: super::FallbackRow, value: &str) {
+    app.fallback_detail_cursor = super::FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == row)
+        .expect("the row exists");
+    super::handle_key(app, key(KeyCode::Enter));
+    for _ in 0..8 {
+        super::handle_key(app, key(KeyCode::Backspace));
+    }
+    for c in value.chars() {
+        super::handle_key(app, key(KeyCode::Char(c)));
+    }
+}
+
+/// A typed field opened on `a`, a reload that puts `b` in `a`'s slot, then ⏎:
+/// the commit lands on `a` and `b`'s file never moves.
+fn commit_across_a_reorder_reload(app: &mut App, row: super::FallbackRow, value: &str) {
+    let b_before = member_file("b");
+    type_into_card_field(app, row, value);
+    reload_with_chain(app, &["b", "a"]);
+    super::handle_key(app, key(KeyCode::Enter));
+    assert_eq!(member_file("b"), b_before, "`b`'s file is byte-identical");
+}
+
+#[test]
+fn the_rotate_at_field_commits_to_its_member_through_a_reorder_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+
+    commit_across_a_reorder_reload(&mut app, super::FallbackRow::Threshold, "42");
+
+    assert_eq!(
+        crate::profile::load_profile(&crate::profile::ProfileName::from("a"))
+            .expect("reload a")
+            .fallback_threshold,
+        Some(42.0),
+        "`a` carries the typed threshold"
+    );
+}
+
+#[test]
+fn the_weekly_at_field_commits_to_its_member_through_a_reorder_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+
+    commit_across_a_reorder_reload(&mut app, super::FallbackRow::WeeklyAt, "90");
+
+    assert_eq!(
+        crate::profile::load_profile(&crate::profile::ProfileName::from("a"))
+            .expect("reload a")
+            .weekly_threshold,
+        Some(90.0),
+        "`a` carries the typed weekly line"
+    );
+}
+
+/// The costly one: a dollar ceiling written on the wrong account is money the
+/// operator never agreed to spend there.
+#[test]
+fn the_max_spend_field_commits_to_its_member_through_a_reorder_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+    let mut state = crate::profile::load_app_state().expect("load the state");
+    state.spend_budget_switching = true;
+    crate::profile::save_app_state(&state).expect("arm the spend budget");
+    app.config().state.spend_budget_switching = true;
+
+    commit_across_a_reorder_reload(&mut app, super::FallbackRow::MaxSpend, "25");
+
+    assert_eq!(
+        crate::profile::load_profile(&crate::profile::ProfileName::from("a"))
+            .expect("reload a")
+            .max_auto_spend,
+        Some(25.0),
+        "`a` carries the typed ceiling"
+    );
+}
+
+/// The armed remove is pinned like a typed field: the confirming ⏎ after a
+/// reorder reload removes the member it armed on, and only that one.
+#[test]
+fn the_armed_remove_removes_its_member_through_a_reorder_reload() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+    let b_before = member_file("b");
+    app.fallback_detail_cursor = super::FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == super::FallbackRow::Remove)
+        .expect("the row exists");
+
+    super::handle_key(&mut app, key(KeyCode::Enter));
+    reload_with_chain(&mut app, &["b", "a"]);
+    super::handle_key(&mut app, key(KeyCode::Enter));
+
+    assert_eq!(
+        crate::profile::load_app_state()
+            .expect("load the state")
+            .fallback_chain,
+        vec![crate::profile::ProfileName::from("b")],
+        "`a` left the chain and `b` stayed"
+    );
+    assert_eq!(member_file("b"), b_before, "`b`'s file is byte-identical");
+}
+
+/// Moving off an armed remove disarms it: ↓ then ↑ lands back on `remove`
+/// unarmed, so the next ⏎ arms it afresh and removes nothing.
+#[test]
+fn moving_off_an_armed_remove_disarms_it() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let mut app = two_member_app();
+    app.fallback_detail_cursor = super::FALLBACK_ROWS
+        .iter()
+        .position(|r| *r == super::FallbackRow::Remove)
+        .expect("the row exists");
+
+    super::handle_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        card_edit_row(&app),
+        Some(super::FallbackRow::Remove),
+        "precondition: the first ⏎ armed it"
+    );
+    super::handle_key(&mut app, key(KeyCode::Down));
+    super::handle_key(&mut app, key(KeyCode::Up));
+    super::handle_key(&mut app, key(KeyCode::Enter));
+
+    assert_eq!(
+        crate::profile::load_app_state()
+            .expect("load the state")
+            .fallback_chain,
+        vec![
+            crate::profile::ProfileName::from("a"),
+            crate::profile::ProfileName::from("b")
+        ],
+        "one ⏎ after moving away removed nothing"
+    );
+    assert_eq!(
+        card_edit_row(&app),
+        Some(super::FallbackRow::Remove),
+        "that ⏎ armed it afresh"
+    );
+}
+
+/// The write reads the pin, never the cursor. No key moves `chain_cursor` while
+/// an edit is open and a reload re-pins it, so the test moves it onto `b` by
+/// hand, standing in for any path that leaves it elsewhere. Every edit is
+/// checked before any assertion fires.
+#[test]
+fn a_card_edit_writes_its_member_wherever_the_cursor_points() {
+    use super::FallbackRow;
+    use crate::profile::{Profile, ProfileName};
+    type Landed = fn(&Profile, &[ProfileName]) -> bool;
+    let cases: [(FallbackRow, &str, Landed); 4] = [
+        (FallbackRow::Threshold, "42", |a, _| {
+            a.fallback_threshold == Some(42.0)
+        }),
+        (FallbackRow::WeeklyAt, "90", |a, _| {
+            a.weekly_threshold == Some(90.0)
+        }),
+        (FallbackRow::MaxSpend, "25", |a, _| {
+            a.max_auto_spend == Some(25.0)
+        }),
+        (FallbackRow::Remove, "", |_, chain| {
+            chain == [ProfileName::from("b")]
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for (row, value, landed) in cases {
+        let _home = crate::testutil::HomeSandbox::new();
+        let mut app = two_member_app();
+        app.config().state.spend_budget_switching = true;
+        let b_before = member_file("b");
+        if row == FallbackRow::Remove {
+            app.fallback_detail_cursor = super::FALLBACK_ROWS
+                .iter()
+                .position(|r| *r == row)
+                .expect("the row exists");
+            super::handle_key(&mut app, key(KeyCode::Enter));
+        } else {
+            type_into_card_field(&mut app, row, value);
+        }
+
+        app.chain_cursor = 1;
+        super::handle_key(&mut app, key(KeyCode::Enter));
+
+        let a = crate::profile::load_profile(&ProfileName::from("a")).expect("reload a");
+        let chain = crate::profile::load_app_state()
+            .expect("load the state")
+            .fallback_chain;
+        if !landed(&a, &chain) || member_file("b") != b_before {
+            wrong.push(format!("{row:?}: the write missed `a` or touched `b`"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "writes that followed the cursor:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// An account that leaves the roster while its name stays on the chain (only a
+/// hand-edited `profiles.toml` gets there) closes whatever edit its card held
+/// and hands focus back to the chain list, for every edit the card can hold.
+/// Every edit is checked before any assertion fires.
+#[test]
+fn a_card_edit_closes_when_a_reload_drops_its_account_from_the_roster() {
+    use super::FallbackRow;
+    let mut wrong = Vec::new();
+    for row in [
+        FallbackRow::Threshold,
+        FallbackRow::WeeklyAt,
+        FallbackRow::MaxSpend,
+        FallbackRow::PreferredDays,
+        FallbackRow::Remove,
+    ] {
+        let _home = crate::testutil::HomeSandbox::new();
+        let mut app = two_member_app();
+        app.config().state.spend_budget_switching = true;
+        app.fallback_detail_cursor = super::FALLBACK_ROWS
+            .iter()
+            .position(|r| *r == row)
+            .expect("the row exists");
+        super::handle_key(&mut app, key(KeyCode::Enter));
+
+        reload_with_state(&mut app, |state| {
+            state.profiles.retain(|n| n.as_str() != "a")
+        });
+        assert_eq!(
+            app.config().state.fallback_chain,
+            vec![
+                crate::profile::ProfileName::from("a"),
+                crate::profile::ProfileName::from("b")
+            ],
+            "{row:?}: precondition, `a` is still on the chain"
+        );
+
+        let focus = app.fallback_focus;
+        // → switches tabs only once no edit owns the arrows.
+        super::handle_key(&mut app, key(KeyCode::Right));
+        if focus != super::FallbackFocus::Chain || app.tab != Tab::Fallback.next() {
+            wrong.push(format!(
+                "{row:?}: focus {focus:?}, → left the tab at {:?}",
+                app.tab
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "edits left open on a member gone from the roster:\n{}",
+        wrong.join("\n")
     );
 }
 
@@ -12561,16 +12849,13 @@ fn enter_esc_q_up_and_down_each_leave_the_day_picker() {
         let mut app = preferred_days_app(Vec::new());
         super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
         assert!(
-            app.fallback_day_picker.is_some(),
+            picker_caret(&app).is_some(),
             "{code:?}: precondition, the picker is open"
         );
 
         super::handle_key(&mut app, key(code));
 
-        assert!(
-            app.fallback_day_picker.is_none(),
-            "{code:?} leaves the picker"
-        );
+        assert!(picker_caret(&app).is_none(), "{code:?} leaves the picker");
         assert_eq!(
             app.fallback_focus,
             super::FallbackFocus::Detail,

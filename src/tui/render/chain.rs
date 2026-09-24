@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::super::app::{
-    App, ChainItemKind, FALLBACK_ROWS, FallbackFocus, FallbackRow, InputState,
+    App, CardEdit, ChainItemKind, FALLBACK_ROWS, FallbackFocus, FallbackRow, InputState,
     PREFERRED_DAY_PRESETS, WEEKDAYS_ALL, chain_candidates, chain_items, member_days,
     parse_max_spend, parse_weekly_override, preferred_days_preset,
 };
@@ -153,6 +153,19 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // Switch-grade kick blocks, read before the Config lock (rank order:
     // KickBlockState 230 < Config 400).
     let kick_lifts = switch_grade_kick_lifts(&app.kick_blocks);
+    // The card's open edit, drawn only on the member it is pinned to.
+    let edit = match selected {
+        Some(ChainItemKind::Member(i)) => {
+            let cfg = app.config();
+            let name = cfg.state.fallback_chain.get(i);
+            app.fallback_edit
+                .as_ref()
+                .filter(|e| name == Some(&e.member))
+                .map(|e| &e.state)
+        }
+        Some(ChainItemKind::Add) | None => None,
+    };
+    let typed = |row: FallbackRow| edit.filter(|e| e.row() == row).and_then(CardEdit::input);
 
     // `Add` arm must NOT hold the `config` guard — `add_detail` re-locks it via
     // `chain_candidates`, and the mutex is non-reentrant (deadlock on `+ add` row).
@@ -169,21 +182,20 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 let cfg = app.config();
                 let name = cfg.state.fallback_chain.get(i).cloned().unwrap_or_default();
                 let kick_lift = kick_lifts.get(name.as_str()).copied();
-                let day_picker = app
-                    .fallback_day_picker
-                    .as_ref()
-                    .filter(|edit| edit.member == name)
-                    .map(|edit| edit.state.cursor);
+                let day_picker = match edit {
+                    Some(CardEdit::Days(picker)) => Some(picker.cursor),
+                    _ => None,
+                };
                 let (lines, spans) = member_detail(
                     &cfg,
                     &name,
                     MemberCard {
                         focused: detail_focused,
                         row_cursor: app.fallback_detail_cursor,
-                        armed_remove: app.fallback_armed_remove,
-                        editing: app.fallback_threshold_draft.as_ref(),
-                        max_spend_editing: app.fallback_max_spend_draft.as_ref(),
-                        weekly_editing: app.fallback_weekly_draft.as_ref(),
+                        armed_remove: matches!(edit, Some(CardEdit::ArmedRemove)),
+                        editing: typed(FallbackRow::Threshold),
+                        max_spend_editing: typed(FallbackRow::MaxSpend),
+                        weekly_editing: typed(FallbackRow::WeeklyAt),
                         day_picker,
                         width: inner_w,
                         kick_lift,
@@ -230,16 +242,15 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
         // caret line outranks the label when the two cannot share the pane: a
         // space there saves the day under the caret, which must be on screen.
         let base = (row.end + 2).saturating_sub(height).min(row.start);
-        let caret_line = app
-            .fallback_day_picker
-            .as_ref()
-            .filter(|_| FALLBACK_ROWS[cursor] == FallbackRow::PreferredDays)
-            .and_then(|p| {
+        let caret_line = match edit {
+            Some(CardEdit::Days(picker)) if FALLBACK_ROWS[cursor] == FallbackRow::PreferredDays => {
                 day_picker_rows(inner_w)
                     .iter()
-                    .position(|r| r.contains(&p.state.cursor))
-            })
-            .map(|k| row.start + k);
+                    .position(|r| r.contains(&picker.cursor))
+            }
+            _ => None,
+        }
+        .map(|k| row.start + k);
         caret_line
             .map_or(base, |line| base.max((line + 1).saturating_sub(height)))
             .min(content_h.saturating_sub(height))
@@ -260,26 +271,11 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // skips this has no visible caret at all. The typed row's first line comes
     // from `spans`, so everything pushed above it, a wrapped `preferred days`
     // row included, is already counted.
-    let typing = [
-        (
-            FallbackRow::Threshold,
-            app.fallback_threshold_draft.as_ref(),
-            0usize,
-        ),
+    let typing = edit.and_then(|e| {
         // `+ 1` for the leading `$`, which sits before the buffer.
-        (
-            FallbackRow::MaxSpend,
-            app.fallback_max_spend_draft.as_ref(),
-            1usize,
-        ),
-        (
-            FallbackRow::WeeklyAt,
-            app.fallback_weekly_draft.as_ref(),
-            0usize,
-        ),
-    ]
-    .into_iter()
-    .find_map(|(row, draft, unit_cols)| draft.map(|d| (row, d, unit_cols)));
+        let unit_cols = usize::from(e.row() == FallbackRow::MaxSpend);
+        e.input().map(|draft| (e.row(), draft, unit_cols))
+    });
 
     // The row must actually be ON the pane before its caret is placed. The
     // scroll above chases the CURSORED row, which is the row being typed on

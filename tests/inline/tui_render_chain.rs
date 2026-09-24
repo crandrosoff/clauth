@@ -1034,7 +1034,10 @@ fn typed_threshold_caret_lands_on_the_rotate_at_row_at_every_header_height() {
             .iter()
             .position(|r| *r == FallbackRow::Threshold)
             .unwrap();
-        app.fallback_threshold_draft = Some(InputState::new("80"));
+        app.fallback_edit = Some(crate::tui::app::MemberEdit {
+            member: "a".into(),
+            state: CardEdit::Threshold(InputState::new("80")),
+        });
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| super::draw(f, f.area(), &app)).unwrap();
         let caret = term
@@ -1096,7 +1099,10 @@ fn typed_threshold_row_scrolls_into_view_and_carries_the_caret() {
         .iter()
         .position(|r| *r == FallbackRow::Threshold)
         .unwrap();
-    app.fallback_threshold_draft = Some(InputState::new("80"));
+    app.fallback_edit = Some(crate::tui::app::MemberEdit {
+        member: "a".into(),
+        state: CardEdit::Threshold(InputState::new("80")),
+    });
 
     // 26x17: without the scroll, the two wrapped fix lines pushed the rows
     // past the pane's last line (the pre-scroll revision of this test pinned
@@ -1142,7 +1148,10 @@ fn typed_max_spend_caret_lands_on_its_row_under_a_wrapped_day_list() {
         .iter()
         .position(|r| *r == FallbackRow::MaxSpend)
         .unwrap();
-    app.fallback_max_spend_draft = Some(InputState::new("5"));
+    app.fallback_edit = Some(crate::tui::app::MemberEdit {
+        member: "a".into(),
+        state: CardEdit::MaxSpend(InputState::new("5")),
+    });
 
     let mut term = Terminal::new(TestBackend::new(60, 40)).unwrap();
     term.draw(|f| super::draw(f, f.area(), &app)).unwrap();

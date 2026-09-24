@@ -8,30 +8,43 @@ use ratatui::widgets::Paragraph;
 
 use super::super::app::{
     App, ConfigFocus, ConfigRow, FallbackHint, FooterAlert, GLOBAL_CONFIG_ROWS, GlobalConfigRow,
-    HERDR_OPTIONS, HerdrOption, LoginSession, Modal, PluginFocus, StatusFocus, Tab, TokenView,
-    build_action_menu, config_rows, fallback_hint, has_sub_focus, herdr_config_writable,
+    HERDR_OPTIONS, HerdrOption, KeyOwner, LoginSession, Modal, PluginFocus, StatusFocus, Tab,
+    TokenView, build_action_menu, config_rows, fallback_hint, has_sub_focus, herdr_config_writable,
+    keyboard_owner,
 };
 use super::super::theme;
 use super::format::spinner_frame;
 
 const TAB_NAV: (&str, &str) = ("←→", "tabs");
 
+/// A typed field's whole grammar: `q` is data there, so it gets no hint.
+const TYPED_FIELD: &[(&str, &str)] = &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")];
+
+/// The `+ new` form's typed field: esc ends the edit and keeps the typed value.
+const NEW_ACCOUNT_FIELD: &[(&str, &str)] = &[("↵", "save"), ("←→", "caret"), ("esc", "done")];
+
 pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // 1-col breathing room on each side; the alert row (which replaces this in
     // place) shares the same inset so the left margin never jumps.
     let area = inset_x(area, 1);
 
+    let owner = keyboard_owner(app);
+
     // A login in flight owns the footer, independent of `footer_alert` so key
     // handling that clears alerts can't hide it.
     if let Some(session) = &app.login {
-        // Any open modal owns esc/q (the login modal collapses, others handle
-        // their own keys), so the hint flips to `q back` for the whole stack;
-        // the login modal's open code field is the exception, where `q` is
-        // data and ↵ submits.
-        let keys = match app.modals.last() {
-            Some(Modal::Login) if session.paste_field.is_some() => LoginKeys::Paste,
-            Some(_) => LoginKeys::Back,
-            None => LoginKeys::Cancel,
+        // An open editor takes esc/q before the login's cancel does, so its own
+        // grammar is the hint. Any open modal owns esc/q too (the login modal
+        // collapses, others handle their own keys), so the hint flips to
+        // `q back` for the whole stack; the login modal's open code field is
+        // the exception, where `q` is data and ↵ submits.
+        let keys = match owner.and_then(owner_hints) {
+            Some(hints) => LoginKeys::Owner(hints),
+            None => match app.modals.last() {
+                Some(Modal::Login) if session.paste_field.is_some() => LoginKeys::Paste,
+                Some(_) => LoginKeys::Back,
+                None => LoginKeys::Cancel,
+            },
         };
         draw_login(frame, area, session, keys, app.tick_count);
         return;
@@ -43,6 +56,74 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
+    // An editor owns every key, `←→` included, so its own grammar is the whole
+    // row: `q` only where the editor itself binds it. Every owner takes the
+    // arrows, so `←→ tabs` rides only while nothing owns the keyboard.
+    let mut hints: Vec<(&str, &str)> = match owner.and_then(owner_hints) {
+        Some(hints) => hints.to_vec(),
+        None => owner
+            .is_none()
+            .then_some(TAB_NAV)
+            .into_iter()
+            .chain(tab_hints(app))
+            .collect(),
+    };
+
+    // `a` opens nothing where the context carries no action of its own (the
+    // whole Fallback tab, a Setup text row). Reading the real menu keeps the
+    // hint honest per row instead of leaving each arm's literal to drift.
+    if build_action_menu(app).items.is_empty() {
+        hints.retain(|(key, _)| *key != "a");
+    }
+
+    shed_to_width(&mut hints, area.width as usize);
+
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    for (i, (key, label)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", theme::faint()));
+        }
+        spans.push(Span::styled(*key, theme::accent().bold()));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(*label, theme::dim()));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(theme::base())
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+/// An owner's own grammar, the whole hint row while it holds the keyboard.
+/// `None` for the modal stack, which has no hint set of its own: the screen's
+/// hints stay under it.
+fn owner_hints(owner: KeyOwner) -> Option<&'static [(&'static str, &'static str)]> {
+    match owner {
+        KeyOwner::Modal => None,
+        KeyOwner::SetupField
+        | KeyOwner::MemberField
+        | KeyOwner::RefreshInterval
+        | KeyOwner::ContextNudge
+        | KeyOwner::WeeklyThreshold
+        | KeyOwner::HerdrTag => Some(TYPED_FIELD),
+        KeyOwner::NewAccountField => Some(NEW_ACCOUNT_FIELD),
+        // `←→` walk the chips and each space saves, so nothing reads as a
+        // commit; `q` leaves the picker.
+        KeyOwner::DayPicker => Some(&[
+            ("←→", "day"),
+            ("space", "toggle"),
+            ("↵", "done"),
+            ("↑↓", "row"),
+            ("q", "back"),
+        ]),
+    }
+}
+
+/// The screen's own keys, then `q`: the row under `←→ tabs` while nothing owns
+/// the keyboard, and under a modal.
+fn tab_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     // `q` label: "back" in a sub-focus, "quit" at top level.
     // (While armed the alert row shows instead, so this label stays "quit".)
     let q_label: &str = if has_sub_focus(app) { "back" } else { "quit" };
@@ -122,12 +203,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             }
         },
         Tab::Config => {
-            if app.refresh_interval_draft.is_some()
-                || app.context_nudge_draft.is_some()
-                || app.weekly_threshold_draft.is_some()
-            {
-                &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")]
-            } else if GLOBAL_CONFIG_ROWS
+            if GLOBAL_CONFIG_ROWS
                 .get(app.global_config_cursor)
                 .is_some_and(|r| {
                     matches!(
@@ -177,9 +253,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ("a", "actions"),
                 ("?", "help"),
             ],
-            FallbackHint::DetailThresholdEdit => {
-                &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")]
-            }
             FallbackHint::DetailWeeklyAt => &[
                 ("↑↓", "row"),
                 ("+", "raise"),
@@ -188,9 +261,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ("a", "actions"),
                 ("?", "help"),
             ],
-            FallbackHint::DetailWeeklyAtEdit => {
-                &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")]
-            }
             FallbackHint::DetailCheckWeekly
             | FallbackHint::DetailCheckScoped
             | FallbackHint::DetailLastResort
@@ -209,23 +279,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ("a", "actions"),
                 ("?", "help"),
             ],
-            // The chip picker: `←→` walk the chips here, so no `tabs` rides in
-            // front (below), and each space saves, so nothing reads as a commit.
-            FallbackHint::DetailPreferredDaysEdit => &[
-                ("←→", "day"),
-                ("space", "toggle"),
-                ("↵", "done"),
-                ("↑↓", "row"),
-            ],
             FallbackHint::DetailMaxSpend => &[
                 ("↑↓", "row"),
                 ("↵", "type"),
                 ("a", "actions"),
                 ("?", "help"),
             ],
-            FallbackHint::DetailMaxSpendEdit => {
-                &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")]
-            }
             FallbackHint::DetailRemove => &[
                 ("↑↓", "row"),
                 ("↵", "remove"),
@@ -239,47 +298,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         },
     };
 
-    // Suppress the trailing `q` hint only where `q` is fully captured by the
-    // screen (threshold edit / max-spend edit / armed-remove /
-    // refresh-interval edit own the keyboard entirely). Every other sub-focus
-    // shows `q back` via `q_label`; the day picker is one, since its `q` leaves
-    // the picker.
-    let show_q = !((app.tab == Tab::Fallback
-        && matches!(
-            fallback_hint(app),
-            FallbackHint::DetailThresholdEdit
-                | FallbackHint::DetailMaxSpendEdit
-                | FallbackHint::DetailWeeklyAtEdit
-                | FallbackHint::DetailRemoveArmed
-        ))
-        || (app.tab == Tab::Config
-            && (app.refresh_interval_draft.is_some() || app.context_nudge_draft.is_some()))
-        || (app.tab == Tab::Plugin && app.plugin.herdr_tag_draft.is_some()));
-
-    // The day picker claims `←→` for its chip caret, so the tab hint would
-    // name a switch those keys never make there.
-    let picking_days =
-        app.tab == Tab::Fallback && fallback_hint(app) == FallbackHint::DetailPreferredDaysEdit;
-    let mut hints: Vec<(&str, &str)> = std::iter::once(TAB_NAV)
-        .filter(|_| !picking_days)
-        .chain(tail.iter().copied())
-        .collect();
-
-    if show_q {
+    let mut hints = tail.to_vec();
+    // The armed remove's way out is its `esc cancel`: `q` ascends out of the
+    // card the same way there, so `q back` would be a second name for it.
+    if !(app.tab == Tab::Fallback && fallback_hint(app) == FallbackHint::DetailRemoveArmed) {
         hints.push(("q", q_label));
     }
+    hints
+}
 
-    // `a` opens nothing where the context carries no action of its own (the
-    // whole Fallback tab, a Setup text row). Reading the real menu keeps the
-    // hint honest per row instead of leaving each arm's literal to drift.
-    if build_action_menu(app).items.is_empty() {
-        hints.retain(|(key, _)| *key != "a");
-    }
-
-    // Measured degradation for narrow terminals: while the row overflows, drop
-    // the rightmost non-essential hint. Navigation (`←→`), discoverability
-    // (`? help`), exits (`q`/`esc`) and armed confirms always survive; on a
-    // desktop-width terminal everything fits and nothing changes.
+/// Measured degradation for narrow terminals: while the row of `hints`, each
+/// `key label` group 3 spaces from the next, overflows `width` cells, drop the
+/// rightmost non-essential hint. Navigation the screen offers no other way
+/// (`←→ tabs`, the picker's `←→ day`), discoverability (`? help`), exits
+/// (`q`/`esc`) and armed confirms always survive; a field's `←→ caret` sheds,
+/// since inside a text field those keys are self-evident. On a desktop-width
+/// terminal everything fits and nothing changes.
+fn shed_to_width(hints: &mut Vec<(&str, &str)>, width: usize) {
     let row_width = |hints: &[(&str, &str)]| -> usize {
         let cells: usize = hints
             .iter()
@@ -288,9 +323,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         cells + hints.len().saturating_sub(1) * 3
     };
     let essential = |(key, label): &(&str, &str)| {
-        matches!(*key, "←→" | "?" | "q" | "esc") || label.starts_with("confirm")
+        matches!(
+            (*key, *label),
+            ("←→", "tabs" | "day") | ("?" | "q" | "esc", _)
+        ) || label.starts_with("confirm")
     };
-    while row_width(&hints) > area.width as usize {
+    while row_width(hints) > width {
         match hints.iter().rposition(|h| !essential(h)) {
             Some(i) => {
                 hints.remove(i);
@@ -298,23 +336,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             None => break,
         }
     }
-
-    let mut spans: Vec<Span<'_>> = Vec::new();
-    for (i, (key, label)) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("   ", theme::faint()));
-        }
-        spans.push(Span::styled(*key, theme::accent().bold()));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(*label, theme::dim()));
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(theme::base())
-            .alignment(Alignment::Left),
-        area,
-    );
 }
 
 /// Plugin tab hints. `f` only fixes a row that actually offers one — never
@@ -344,15 +365,11 @@ fn plugin_hints(app: &App) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// Plugin detail hints, row-aware for the herdr options section: the tag
-/// editor owns the keyboard while open (⏎ saves, ⎋ discards), the
+/// Plugin detail hints, row-aware for the herdr options section: the
 /// tag-refresh row advertises its stepper keys, the delegate-row row its
 /// confirm — and an inert delegate-row row advertises no activation key at
 /// all, since the key is a no-op there.
 fn plugin_detail_hints(app: &App) -> &'static [(&'static str, &'static str)] {
-    if app.plugin.herdr_tag_draft.is_some() {
-        return &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")];
-    }
     let fix = app.plugin.selected_fix().is_some();
     if !app
         .plugin
@@ -478,14 +495,17 @@ enum LoginKeys {
     /// The login modal's code field is open: `↵` submits, `esc` restores the
     /// `p  paste code` row; `q` is data.
     Paste,
+    /// An open editor takes the keys first: its own grammar.
+    Owner(&'static [(&'static str, &'static str)]),
 }
 
 /// Login-in-progress line. Independent of `footer_alert` so key handling that
 /// clears alerts never hides it. The live stage renders in the login modal;
 /// this row is the collapsed view and carries the name alone. The trailing
-/// hint tracks what esc/q actually do this frame: with any modal open they go
-/// to the modal (`q back`; the open code field takes `↵ submit   esc back`);
-/// collapsed, both cancel the login (`esc cancel`).
+/// hint tracks what esc/q actually do this frame: an open editor takes them
+/// first (its own row); with any modal open they go to the modal (`q back`;
+/// the open code field takes `↵ submit   esc back`); collapsed, both cancel
+/// the login (`esc cancel`).
 fn draw_login(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -494,17 +514,23 @@ fn draw_login(
     tick: u64,
 ) {
     let hints: &[(&str, &str)] = match keys {
-        LoginKeys::Back => &[("   q ", "back")],
-        LoginKeys::Cancel => &[("   esc ", "cancel")],
-        LoginKeys::Paste => &[("   ↵ ", "submit"), ("   esc ", "back")],
+        LoginKeys::Back => &[("q", "back")],
+        LoginKeys::Cancel => &[("esc", "cancel")],
+        LoginKeys::Paste => &[("↵", "submit"), ("esc", "back")],
+        LoginKeys::Owner(hints) => hints,
     };
     let mut spans = vec![
         Span::styled(format!("{} ", spinner_frame(tick)), theme::accent()),
         Span::styled(format!("logging in '{}'", session.name), theme::dim()),
     ];
+    // Each hint here carries a 3-space lead, while `shed_to_width` counts a gap
+    // only between groups: the name and one lead come off its budget.
+    let lead = spans.iter().map(Span::width).sum::<usize>() + 3;
+    let mut hints = hints.to_vec();
+    shed_to_width(&mut hints, (area.width as usize).saturating_sub(lead));
     for (key, action) in hints {
-        spans.push(Span::styled(*key, theme::accent().bold()));
-        spans.push(Span::styled(*action, theme::dim()));
+        spans.push(Span::styled(format!("   {key} "), theme::accent().bold()));
+        spans.push(Span::styled(action, theme::dim()));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans))

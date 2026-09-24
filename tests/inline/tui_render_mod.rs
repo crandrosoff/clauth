@@ -485,7 +485,7 @@ fn config_context_nudge_custom_editor_renders() {
 #[test]
 fn fallback_threshold_editor_shows_range_tooltip() {
     let _home = crate::testutil::HomeSandbox::new();
-    use crate::tui::app::{FallbackFocus, InputState, Tab};
+    use crate::tui::app::{CardEdit, FallbackFocus, InputState, MemberEdit, Tab};
     let profiles = vec![oauth("uwuclxdy", 42.0, 18.0, true)];
     let config = AppConfig {
         state: AppState {
@@ -503,7 +503,10 @@ fn fallback_threshold_editor_shows_range_tooltip() {
     app.fallback_detail_cursor = 0; // FALLBACK_ROWS[0] == `rotate at`
 
     // A valid in-range buffer shows the range tooltip (mirrors the refresh editor).
-    app.fallback_threshold_draft = Some(InputState::new("70"));
+    app.fallback_edit = Some(MemberEdit {
+        member: "uwuclxdy".into(),
+        state: CardEdit::Threshold(InputState::new("70")),
+    });
     let valid = dump(&app, 90, 20);
     assert!(valid.contains("rotate at"), "threshold row label renders");
     assert!(
@@ -513,7 +516,10 @@ fn fallback_threshold_editor_shows_range_tooltip() {
     assert!(valid.contains("0-100 %"), "valid-range tooltip renders");
 
     // An out-of-range buffer still renders (DANGER) with the same range tooltip.
-    app.fallback_threshold_draft = Some(InputState::new("150"));
+    app.fallback_edit = Some(MemberEdit {
+        member: "uwuclxdy".into(),
+        state: CardEdit::Threshold(InputState::new("150")),
+    });
     let invalid = dump(&app, 90, 20);
     assert!(invalid.contains("150"));
     assert!(invalid.contains("0-100 %"));
@@ -1333,7 +1339,10 @@ fn fallback_edit_caret_follows_the_blocked_reason_pill() {
         app.chain_cursor = 0; // member a
         app.fallback_focus = crate::tui::app::FallbackFocus::Detail;
         app.fallback_detail_cursor = 0; // FallbackRow::Threshold
-        app.fallback_threshold_draft = Some(crate::tui::app::InputState::new("90"));
+        app.fallback_edit = Some(crate::tui::app::MemberEdit {
+            member: "a".into(),
+            state: crate::tui::app::CardEdit::Threshold(crate::tui::app::InputState::new("90")),
+        });
         let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
         term.draw(|f| super::draw(f, &app)).unwrap();
         let caret = term.get_cursor_position().unwrap();
@@ -2184,6 +2193,294 @@ fn fallback_preferred_days_footer_hints() {
         footer_of(&out),
         "←→ day   space toggle   ↵ done   q back",
         "the picker's hints at phone width"
+    );
+}
+
+/// Every editor that owns the keyboard owns `←→` with it, so while one is open
+/// the hint bar carries exactly one arrow group, naming that editor's own use
+/// of the arrows; the same screen a key before, at rest, carries `←→ tabs`.
+/// Whole footer rows, every editor checked before any assertion fires.
+#[test]
+fn an_editor_owning_the_arrows_names_them_and_drops_the_tab_hint() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use crate::tui::app::{FALLBACK_ROWS, FallbackRow, InputState, PluginFocus, Tab, handle_key};
+    use ratatui::crossterm::event::KeyCode;
+    const TYPED: &str = "↵ save   ←→ caret   esc cancel";
+
+    let card = |row: FallbackRow| {
+        let mut app = preferred_days_card(Vec::new());
+        app.config().state.spend_budget_switching = true;
+        app.fallback_detail_cursor = FALLBACK_ROWS
+            .iter()
+            .position(|r| *r == row)
+            .expect("the row exists");
+        app
+    };
+    let on_tab = |tab: Tab| {
+        let mut app = preferred_days_card(Vec::new());
+        app.tab = tab;
+        app
+    };
+    let setup = || {
+        let mut app = setup_app();
+        handle_key(&mut app, key(KeyCode::Enter));
+        app
+    };
+    let press_enter = |app: &mut App| handle_key(app, key(KeyCode::Enter));
+    let mut plugin = on_tab(Tab::Plugin);
+    plugin.plugin.focus = PluginFocus::Detail;
+
+    type Open = Box<dyn Fn(&mut App)>;
+    let cases: Vec<(&str, App, Open, &str)> = vec![
+        (
+            "rotate at",
+            card(FallbackRow::Threshold),
+            Box::new(press_enter),
+            TYPED,
+        ),
+        (
+            "weekly at",
+            card(FallbackRow::WeeklyAt),
+            Box::new(press_enter),
+            TYPED,
+        ),
+        (
+            "max spend",
+            card(FallbackRow::MaxSpend),
+            Box::new(press_enter),
+            TYPED,
+        ),
+        (
+            "preferred days",
+            card(FallbackRow::PreferredDays),
+            Box::new(press_enter),
+            "←→ day   space toggle   ↵ done   ↑↓ row   q back",
+        ),
+        (
+            "refresh",
+            on_tab(Tab::Config),
+            Box::new(|app| app.refresh_interval_draft = Some(InputState::new("60"))),
+            TYPED,
+        ),
+        (
+            "context nudge",
+            on_tab(Tab::Config),
+            Box::new(|app| app.context_nudge_draft = Some(InputState::new("300k"))),
+            TYPED,
+        ),
+        (
+            "weekly limit",
+            on_tab(Tab::Config),
+            Box::new(|app| app.weekly_threshold_draft = Some(InputState::new("95"))),
+            TYPED,
+        ),
+        (
+            "herdr tag refresh",
+            plugin,
+            Box::new(|app| app.plugin.herdr_tag_draft = Some(InputState::new("5"))),
+            TYPED,
+        ),
+        ("setup name", setup(), Box::new(press_enter), TYPED),
+    ];
+
+    let mut wrong = Vec::new();
+    for (label, mut app, open, want) in cases {
+        let rest = footer_of(&dump(&app, 120, 30)).to_string();
+        if !rest.starts_with("←→ tabs") || rest.matches("←→").count() != 1 {
+            wrong.push(format!("[{label}] at rest: {rest:?}"));
+        }
+        open(&mut app);
+        let editing = footer_of(&dump(&app, 120, 30)).to_string();
+        if editing != want {
+            wrong.push(format!("[{label}] editing: {editing:?}, want {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "footers:\n{}", wrong.join("\n"));
+}
+
+/// One account, `acct`, on the Setup tab's account list.
+fn setup_app() -> App {
+    let mut app = App::new(AppConfig {
+        state: AppState {
+            profiles: vec![ProfileName::from("acct")],
+            ..AppState::default()
+        },
+        profiles: vec![crate::testutil::blank_profile(&ProfileName::from("acct"))],
+    });
+    app.tab = crate::tui::app::Tab::Setup;
+    app
+}
+
+/// A modal owns every key, so `←`/`→` never switch the tab under one and the
+/// hint bar drops `←→ tabs` while it is open: the help sheet, a confirm (whose
+/// `←→` flip its choice) and a name prompt (whose `←→` walk its caret). Every
+/// modal checked before any assertion fires.
+#[test]
+fn a_modal_owns_the_arrows_so_the_footer_drops_the_tab_hint() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use crate::tui::app::{InputState, Modal, NamePromptAction, NamePromptForm, Tab, handle_key};
+    use ratatui::crossterm::event::KeyCode;
+
+    type Open = Box<dyn Fn(&mut App)>;
+    let cases: Vec<(&str, Open)> = vec![
+        (
+            "help",
+            Box::new(|app| handle_key(app, key(KeyCode::Char('?')))),
+        ),
+        (
+            "rotate-all confirm",
+            Box::new(|app| handle_key(app, key(KeyCode::Char('t')))),
+        ),
+        (
+            "name prompt",
+            Box::new(|app| {
+                app.modals.push(Modal::NamePrompt(NamePromptForm {
+                    input: InputState::new("ab"),
+                    action: NamePromptAction::DuplicateProfile("acct".into()),
+                }))
+            }),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (label, open) in cases {
+        let mut app = setup_app();
+        let rest = footer_of(&dump(&app, 120, 30)).to_string();
+        if !rest.starts_with("←→ tabs") {
+            wrong.push(format!("[{label}] at rest: {rest:?}"));
+        }
+        open(&mut app);
+        if app.modals.is_empty() {
+            wrong.push(format!("[{label}] opened no modal"));
+            continue;
+        }
+        let under = footer_of(&dump(&app, 120, 30)).to_string();
+        if under.contains("←→") {
+            wrong.push(format!("[{label}] under the modal: {under:?}"));
+        }
+        handle_key(&mut app, key(KeyCode::Right));
+        if app.tab != Tab::Setup {
+            wrong.push(format!("[{label}] → switched the tab to {:?}", app.tab));
+        }
+    }
+    assert!(wrong.is_empty(), "footers:\n{}", wrong.join("\n"));
+}
+
+/// With a login in flight and an editor open, esc goes to the editor, so the
+/// login line's trailing hint is the editor's own row and esc leaves the login
+/// running; with no editor the same line offers the login's `esc cancel`, and
+/// esc cancels it.
+#[test]
+fn the_login_line_names_the_keys_an_open_editor_takes_first() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use crate::tui::app::{InputState, Tab, handle_key};
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = App::new(AppConfig {
+        state: AppState::default(),
+        profiles: vec![],
+    });
+    app.tab = Tab::Config;
+    let (session, _rx) = paste_session();
+    app.login = Some(session);
+    let spinner = super::format::spinner_frame(app.tick_count);
+
+    app.refresh_interval_draft = Some(InputState::new("60"));
+    assert_eq!(
+        footer_of(&dump(&app, 100, 30)),
+        format!("{spinner} logging in 'fresh'   ↵ save   ←→ caret   esc cancel"),
+        "the field's own keys"
+    );
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(
+        app.refresh_interval_draft.is_none() && app.login.is_some(),
+        "esc closed the field and left the login running"
+    );
+
+    assert_eq!(
+        footer_of(&dump(&app, 100, 30)),
+        format!("{spinner} logging in 'fresh'   esc cancel"),
+        "no editor: the login's own cancel"
+    );
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(app.login.is_none(), "esc cancelled the login");
+}
+
+/// A narrow login line sheds an open editor's hints the way the plain footer
+/// sheds its row, rightmost non-essential first, so the editor's exit hint
+/// stays whole beside `logging in '<name>'` at 45 columns: a typed field sheds
+/// its caret keys and keeps `↵ save`, the day picker keeps its `←→ day`.
+#[test]
+fn a_narrow_login_line_keeps_the_open_editors_exit_hint() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use crate::tui::app::{InputState, Tab, handle_key};
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut field = App::new(AppConfig {
+        state: AppState::default(),
+        profiles: vec![],
+    });
+    field.tab = Tab::Config;
+    let (session, _field_rx) = paste_session();
+    field.login = Some(session);
+    field.refresh_interval_draft = Some(InputState::new("60"));
+    let spinner = super::format::spinner_frame(field.tick_count);
+
+    let mut picker = preferred_days_card(Vec::new());
+    let (session, _picker_rx) = paste_session();
+    picker.login = Some(session);
+    handle_key(&mut picker, key(KeyCode::Enter));
+
+    assert_eq!(
+        [
+            footer_of(&dump(&field, 45, 30)).to_string(),
+            footer_of(&dump(&picker, 45, 30)).to_string(),
+        ],
+        [
+            format!("{spinner} logging in 'fresh'   ↵ save   esc cancel"),
+            format!("{spinner} logging in 'fresh'   ←→ day   q back"),
+        ],
+        "[typed field, day picker] at 45"
+    );
+}
+
+/// Esc keeps a typed value on the `+ new` form, so its field's footer reads
+/// `esc done`; an existing account's field reverts on esc and keeps
+/// `esc cancel`. Both rows whole, and the kept value checked.
+#[test]
+fn the_new_account_form_labels_esc_done_and_keeps_the_typed_value() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use crate::testutil::key;
+    use crate::tui::app::handle_key;
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = setup_app();
+
+    handle_key(&mut app, key(KeyCode::Enter));
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        footer_of(&dump(&app, 120, 30)),
+        "↵ save   ←→ caret   esc cancel",
+        "an existing account's `name` field"
+    );
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    handle_key(&mut app, key(KeyCode::Char('n')));
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        footer_of(&dump(&app, 120, 30)),
+        "↵ save   ←→ caret   esc done",
+        "the `+ new` form's `name` field"
+    );
+    for c in ['a', 'b'] {
+        handle_key(&mut app, key(KeyCode::Char(c)));
+    }
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert_eq!(
+        app.config_draft.as_ref().map(|d| d.name.value.as_str()),
+        Some("ab"),
+        "esc kept the typed name"
     );
 }
 

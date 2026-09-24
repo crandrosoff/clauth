@@ -202,7 +202,7 @@ pub(crate) enum FallbackRow {
     Preferred,
     /// The weekdays this member is home (`Profile::preferred_days`): a cycle row
     /// over `PREFERRED_DAY_PRESETS` at rest, a multi-select chip row once ⏎
-    /// descends into it (`App::fallback_day_picker`). A hand-written list
+    /// descends into it (`CardEdit::Days`). A hand-written list
     /// matching no preset renders in its canonical spelling and steps to
     /// `never`, the ladder's first rung: a set has no order, so there is no next
     /// rung above it to step to.
@@ -1868,21 +1868,9 @@ pub(crate) struct App {
     pub(crate) fallback_focus: FallbackFocus,
     /// Cursor into the Fallback right pane (member rows or add-candidate list).
     pub(crate) fallback_detail_cursor: usize,
-    /// First ⏎ on remove arms it; second confirms. Cursor move or focus change disarms.
-    pub(crate) fallback_armed_remove: bool,
-    /// `Some` while the threshold field is open (⏎ opens, owns keyboard).
-    /// `+`/`-` still step the value when `None`.
-    pub(crate) fallback_threshold_draft: Option<InputState>,
-    /// In-flight value for the member's `max auto-spend` field (`None` = not
-    /// editing). Same lifecycle as `fallback_threshold_draft`.
-    pub(crate) fallback_max_spend_draft: Option<InputState>,
-    /// The `weekly at` override editor's buffer, or None (not editing). Same
-    /// lifecycle as `fallback_threshold_draft`; an EMPTY commit clears the
-    /// member's override.
-    pub(crate) fallback_weekly_draft: Option<InputState>,
-    /// The `preferred days` chip picker, `Some` while ⏎ has descended into it
-    /// (owns the keyboard). No draft: each space saves the toggled list at once.
-    pub(crate) fallback_day_picker: Option<MemberEdit<DayPicker>>,
+    /// The member card's one open edit, pinned to the member it opened on, or
+    /// `None` at rest.
+    pub(crate) fallback_edit: Option<MemberEdit<CardEdit>>,
     /// Cursor into [`GLOBAL_CONFIG_ROWS`] on the program-wide Config tab.
     pub(crate) global_config_cursor: usize,
     /// `Some` while the refresh-interval custom-value field is open (⏎ opens,
@@ -2366,11 +2354,7 @@ impl App {
             config_action_cursor: 0,
             fallback_focus: FallbackFocus::Chain,
             fallback_detail_cursor: 0,
-            fallback_armed_remove: false,
-            fallback_threshold_draft: None,
-            fallback_max_spend_draft: None,
-            fallback_weekly_draft: None,
-            fallback_day_picker: None,
+            fallback_edit: None,
             global_config_cursor: 0,
             refresh_interval_draft: None,
             context_nudge_draft: None,
@@ -3199,6 +3183,73 @@ pub(crate) fn has_sub_focus(app: &App) -> bool {
         || (app.tab == Tab::Tokens && app.token_view == TokenView::Models)
 }
 
+/// What owns the keyboard this frame: every key, `←`/`→` included, reaches it
+/// before any tab switch or global binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOwner {
+    /// The modal stack: its top modal takes every key.
+    Modal,
+    /// A Setup detail row's inline field on an existing account.
+    SetupField,
+    /// A Setup detail row's inline field on the `+ new` form, where esc keeps
+    /// the typed value (`cancel_config_edit` only reverts a saved account).
+    NewAccountField,
+    /// A typed field on the Fallback member card: `rotate at`, `weekly at`
+    /// or `max spend`.
+    MemberField,
+    /// The Fallback card's `preferred days` chip picker.
+    DayPicker,
+    /// The Config tab's `refresh` custom-value field.
+    RefreshInterval,
+    /// The Config tab's `context nudge` custom-value field.
+    ContextNudge,
+    /// The Config tab's `weekly limit` custom-value field.
+    WeeklyThreshold,
+    /// The Plugin tab's herdr tag-refresh field.
+    HerdrTag,
+}
+
+/// What owns the keyboard this frame, or `None` when keys take their tab and
+/// global senses. The one answer both [`handle_key`] routes by and the footer
+/// draws from, so the two cannot disagree about who holds `←`/`→`.
+pub(crate) fn keyboard_owner(app: &App) -> Option<KeyOwner> {
+    if !app.modals.is_empty() {
+        return Some(KeyOwner::Modal);
+    }
+    match app.tab {
+        Tab::Setup => {
+            let draft = app
+                .config_draft
+                .as_ref()
+                .filter(|d| app.config_focus == ConfigFocus::Actions && d.active.is_some())?;
+            Some(match draft.editing_name {
+                Some(_) => KeyOwner::SetupField,
+                None => KeyOwner::NewAccountField,
+            })
+        }
+        Tab::Fallback if app.fallback_focus == FallbackFocus::Detail => {
+            match app.fallback_edit.as_ref().map(|e| &e.state) {
+                Some(CardEdit::Threshold(_) | CardEdit::Weekly(_) | CardEdit::MaxSpend(_)) => {
+                    Some(KeyOwner::MemberField)
+                }
+                Some(CardEdit::Days(_)) => Some(KeyOwner::DayPicker),
+                Some(CardEdit::ArmedRemove) | None => None,
+            }
+        }
+        Tab::Config if app.refresh_interval_draft.is_some() => Some(KeyOwner::RefreshInterval),
+        Tab::Config if app.context_nudge_draft.is_some() => Some(KeyOwner::ContextNudge),
+        Tab::Config if app.weekly_threshold_draft.is_some() => Some(KeyOwner::WeeklyThreshold),
+        Tab::Plugin if app.plugin.herdr_tag_draft.is_some() => Some(KeyOwner::HerdrTag),
+        Tab::Overview
+        | Tab::Usage
+        | Tab::Tokens
+        | Tab::Fallback
+        | Tab::Config
+        | Tab::Status
+        | Tab::Plugin => None,
+    }
+}
+
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     if key.kind != KeyEventKind::Press {
         return;
@@ -3210,84 +3261,19 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if !app.modals.is_empty() {
-        handle_modal_key(app, key);
-        return;
-    }
-
-    // Config text field capturing keystrokes owns keyboard (like a modal)
-    // so typing into a name can't fire global shortcuts.
-    if app.tab == Tab::Setup
-        && app.config_focus == ConfigFocus::Actions
-        && app
-            .config_draft
-            .as_ref()
-            .is_some_and(|d| d.active.is_some())
-    {
-        handle_config_edit_key(app, key);
-        return;
-    }
-
-    // Same for the threshold editor: owns keyboard so digits can't trip globals.
-    if app.tab == Tab::Fallback
-        && app.fallback_focus == FallbackFocus::Detail
-        && app.fallback_threshold_draft.is_some()
-    {
-        handle_fallback_threshold_edit_key(app, key);
-        return;
-    }
-
-    // Same for the `max auto-spend` editor.
-    if app.tab == Tab::Fallback
-        && app.fallback_focus == FallbackFocus::Detail
-        && app.fallback_max_spend_draft.is_some()
-    {
-        handle_fallback_max_spend_edit_key(app, key);
-        return;
-    }
-
-    // Same for the per-member `weekly at` override editor.
-    if app.tab == Tab::Fallback
-        && app.fallback_focus == FallbackFocus::Detail
-        && app.fallback_weekly_draft.is_some()
-    {
-        handle_fallback_weekly_edit_key(app, key);
-        return;
-    }
-
-    // Same for the per-member `preferred days` chip picker: it claims ←/→
-    // (chip caret) before tab switching does, and `q`/`?`/`a`/`x` before their
-    // global senses.
-    if app.tab == Tab::Fallback
-        && app.fallback_focus == FallbackFocus::Detail
-        && app.fallback_day_picker.is_some()
-    {
-        handle_day_picker_key(app, key);
-        return;
-    }
-
-    // Same for the Config-tab refresh-interval custom-value editor.
-    if app.tab == Tab::Config && app.refresh_interval_draft.is_some() {
-        handle_refresh_interval_edit_key(app, key);
-        return;
-    }
-
-    // Same for the Config-tab context-nudge custom-value editor.
-    if app.tab == Tab::Config && app.context_nudge_draft.is_some() {
-        handle_context_nudge_edit_key(app, key);
-        return;
-    }
-
-    // And the Config-tab weekly-threshold custom-value editor.
-    if app.tab == Tab::Config && app.weekly_threshold_draft.is_some() {
-        handle_weekly_threshold_edit_key(app, key);
-        return;
-    }
-
-    // And the Plugin-tab herdr tag-refresh editor (same capture shape: typing
-    // owns the keyboard so digits can't trip global shortcuts).
-    if app.tab == Tab::Plugin && app.plugin.herdr_tag_draft.is_some() {
-        handle_herdr_tag_edit_key(app, key);
+    // A modal, then an open editor, owns the keyboard: typed digits and
+    // letters can't trip global shortcuts, and ←/→ never switch the tab.
+    if let Some(owner) = keyboard_owner(app) {
+        match owner {
+            KeyOwner::Modal => handle_modal_key(app, key),
+            KeyOwner::SetupField | KeyOwner::NewAccountField => handle_config_edit_key(app, key),
+            KeyOwner::MemberField => handle_member_field_key(app, key),
+            KeyOwner::DayPicker => handle_day_picker_key(app, key),
+            KeyOwner::RefreshInterval => handle_refresh_interval_edit_key(app, key),
+            KeyOwner::ContextNudge => handle_context_nudge_edit_key(app, key),
+            KeyOwner::WeeklyThreshold => handle_weekly_threshold_edit_key(app, key),
+            KeyOwner::HerdrTag => handle_herdr_tag_edit_key(app, key),
+        }
         return;
     }
 
@@ -3598,9 +3584,7 @@ fn switch_tab(app: &mut App, tab: Tab) {
             sync_profile_from_chain(app);
             app.fallback_focus = FallbackFocus::Chain;
             app.fallback_detail_cursor = 0;
-            app.fallback_armed_remove = false;
-            app.fallback_threshold_draft = None;
-            app.fallback_day_picker = None;
+            app.fallback_edit = None;
         }
         Tab::Config => {
             app.global_config_cursor = 0;
@@ -5196,11 +5180,55 @@ fn cycle_theme(app: &mut App) {
 /// write resolved through `chain_cursor` lands on whichever member took the
 /// slot; every write goes to `member` instead, and [`repin_member_edit`] moves
 /// `chain_cursor` after it, or closes the edit and returns focus to the chain
-/// list once it left the chain.
+/// list once it left the chain or its account left the roster.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MemberEdit<T> {
     pub(crate) member: ProfileName,
     pub(crate) state: T,
+}
+
+/// What is open on the member card. One at a time: every typed field and the
+/// picker own the keyboard, and the armed remove disarms on any row move.
+#[derive(Debug, Clone)]
+pub(crate) enum CardEdit {
+    /// The `rotate at` field. `+`/`-` still step the value while closed.
+    Threshold(InputState),
+    /// The `weekly at` override field; an EMPTY commit clears the override.
+    Weekly(InputState),
+    /// The `max spend` ceiling field.
+    MaxSpend(InputState),
+    /// The `preferred days` chip picker. No draft: each space saves at once.
+    Days(DayPicker),
+    /// The first ⏎ on `remove`; the second removes this member.
+    ArmedRemove,
+}
+
+impl CardEdit {
+    /// The row this edit is open on.
+    pub(crate) fn row(&self) -> FallbackRow {
+        match self {
+            Self::Threshold(_) => FallbackRow::Threshold,
+            Self::Weekly(_) => FallbackRow::WeeklyAt,
+            Self::MaxSpend(_) => FallbackRow::MaxSpend,
+            Self::Days(_) => FallbackRow::PreferredDays,
+            Self::ArmedRemove => FallbackRow::Remove,
+        }
+    }
+
+    /// The typed buffer, when this edit is a typed field.
+    pub(crate) fn input(&self) -> Option<&InputState> {
+        match self {
+            Self::Threshold(input) | Self::Weekly(input) | Self::MaxSpend(input) => Some(input),
+            Self::Days(_) | Self::ArmedRemove => None,
+        }
+    }
+
+    fn input_mut(&mut self) -> Option<&mut InputState> {
+        match self {
+            Self::Threshold(input) | Self::Weekly(input) | Self::MaxSpend(input) => Some(input),
+            Self::Days(_) | Self::ArmedRemove => None,
+        }
+    }
 }
 
 /// The `preferred days` chip picker: the chip under the caret (a
@@ -5219,23 +5247,20 @@ pub(crate) enum FallbackHint {
     ChainMember,
     ChainAdd,
     DetailThreshold,
-    DetailThresholdEdit,
     DetailWeeklyAt,
-    DetailWeeklyAtEdit,
     DetailCheckWeekly,
     DetailCheckScoped,
     DetailLastResort,
     DetailPreferred,
     DetailPreferredDays,
-    DetailPreferredDaysEdit,
     DetailMaxSpend,
-    DetailMaxSpendEdit,
     DetailRemove,
     DetailRemoveArmed,
     DetailAdd,
 }
 
-/// Resolve the Fallback tab's footer hint.
+/// Resolve the Fallback tab's footer hint while no editor owns the keyboard
+/// ([`keyboard_owner`]); an open editor's hints are its own.
 pub(crate) fn fallback_hint(app: &App) -> FallbackHint {
     if chain_items(app).is_empty() {
         return FallbackHint::Empty;
@@ -5246,22 +5271,8 @@ pub(crate) fn fallback_hint(app: &App) -> FallbackHint {
             None => FallbackHint::ChainAdd,
         },
         FallbackFocus::Detail => {
-            // First, on the same test `handle_key`'s picker guard runs: while it
-            // claims the keys, only its grammar is true.
-            if app.fallback_day_picker.is_some() {
-                return FallbackHint::DetailPreferredDaysEdit;
-            }
             if selected_chain_member(app).is_none() {
                 return FallbackHint::DetailAdd;
-            }
-            if app.fallback_threshold_draft.is_some() {
-                return FallbackHint::DetailThresholdEdit;
-            }
-            if app.fallback_max_spend_draft.is_some() {
-                return FallbackHint::DetailMaxSpendEdit;
-            }
-            if app.fallback_weekly_draft.is_some() {
-                return FallbackHint::DetailWeeklyAtEdit;
             }
             let cursor = app.fallback_detail_cursor.min(FALLBACK_ROWS.len() - 1);
             match FALLBACK_ROWS[cursor] {
@@ -5273,7 +5284,14 @@ pub(crate) fn fallback_hint(app: &App) -> FallbackHint {
                 FallbackRow::Preferred => FallbackHint::DetailPreferred,
                 FallbackRow::PreferredDays => FallbackHint::DetailPreferredDays,
                 FallbackRow::MaxSpend => FallbackHint::DetailMaxSpend,
-                FallbackRow::Remove if app.fallback_armed_remove => FallbackHint::DetailRemoveArmed,
+                FallbackRow::Remove
+                    if app
+                        .fallback_edit
+                        .as_ref()
+                        .is_some_and(|e| matches!(e.state, CardEdit::ArmedRemove)) =>
+                {
+                    FallbackHint::DetailRemoveArmed
+                }
                 FallbackRow::Remove => FallbackHint::DetailRemove,
             }
         }
@@ -5827,7 +5845,7 @@ fn handle_fallback_detail_key(app: &mut App, key: KeyEvent) {
     let row = FALLBACK_ROWS[app.fallback_detail_cursor];
     match key.code {
         KeyCode::Up => {
-            app.fallback_armed_remove = false;
+            app.fallback_edit = None;
             app.fallback_detail_cursor = if app.fallback_detail_cursor == 0 {
                 last
             } else {
@@ -5835,7 +5853,7 @@ fn handle_fallback_detail_key(app: &mut App, key: KeyEvent) {
             };
         }
         KeyCode::Down => {
-            app.fallback_armed_remove = false;
+            app.fallback_edit = None;
             app.fallback_detail_cursor = if app.fallback_detail_cursor >= last {
                 0
             } else {
@@ -5974,19 +5992,15 @@ fn enter_fallback_detail(app: &mut App) {
         _ => return,
     }
     app.fallback_detail_cursor = 0;
-    app.fallback_armed_remove = false;
+    app.fallback_edit = None;
     app.fallback_focus = FallbackFocus::Detail;
 }
 
 /// Return focus to the chain list, clearing any armed remove or live edit.
 fn leave_fallback_detail(app: &mut App) {
     app.fallback_focus = FallbackFocus::Chain;
-    app.fallback_armed_remove = false;
     app.fallback_detail_cursor = 0;
-    app.fallback_threshold_draft = None;
-    app.fallback_max_spend_draft = None;
-    app.fallback_weekly_draft = None;
-    app.fallback_day_picker = None;
+    app.fallback_edit = None;
 }
 
 /// ⇧↑↓: move the selected member up/down, cursor follows. No-op on `+ add`
@@ -6018,13 +6032,15 @@ fn reorder_chain_member(app: &mut App, delta: i32) {
     }
 }
 
-/// ⏎/space on a member detail row: threshold opens inline editor; remove arms
-/// then deletes on second press.
+/// ⏎/space on a member detail row: a typed row opens its field and `preferred
+/// days` its picker; remove arms, then removes on the second press. Each one
+/// pins the member under the cursor.
 fn run_fallback_row(app: &mut App, row: FallbackRow) {
     match row {
         FallbackRow::Threshold => {
             if let Some(current) = selected_threshold(app) {
-                app.fallback_threshold_draft = Some(InputState::new(&format!("{current:.0}")));
+                let field = InputState::new(&format!("{current:.0}"));
+                open_card_edit(app, CardEdit::Threshold(field));
             }
         }
         FallbackRow::WeeklyAt => {
@@ -6035,7 +6051,7 @@ fn run_fallback_row(app: &mut App, row: FallbackRow) {
                 && check_weekly
             {
                 let seed = override_pct.map(|v| format!("{v:.0}")).unwrap_or_default();
-                app.fallback_weekly_draft = Some(InputState::new(&seed));
+                open_card_edit(app, CardEdit::Weekly(InputState::new(&seed)));
             }
         }
         FallbackRow::CheckWeekly => toggle_member_flag(app, MemberFlag::CheckWeekly),
@@ -6049,71 +6065,72 @@ fn run_fallback_row(app: &mut App, row: FallbackRow) {
             // would let a ceiling be typed that does nothing, so no-op.
             let armed = app.config().state.spend_budget_switching;
             if armed && let Some(current) = selected_max_spend(app) {
-                app.fallback_max_spend_draft = Some(InputState::new(&format!("{current:.2}")));
+                let field = InputState::new(&format!("{current:.2}"));
+                open_card_edit(app, CardEdit::MaxSpend(field));
             }
         }
-        FallbackRow::Remove => {
-            if app.fallback_armed_remove {
-                remove_chain_member(app);
-            } else {
-                app.fallback_armed_remove = true;
-            }
-        }
+        FallbackRow::Remove => match app.fallback_edit.take() {
+            Some(MemberEdit {
+                member,
+                state: CardEdit::ArmedRemove,
+            }) => remove_chain_member(app, &member),
+            _ => open_card_edit(app, CardEdit::ArmedRemove),
+        },
     }
 }
 
-/// Keystrokes while the threshold field is open: ⏎ saves, ⎋ discards.
-fn handle_fallback_threshold_edit_key(app: &mut App, key: KeyEvent) {
+/// Open `edit` on the card, pinned to the member under the cursor.
+fn open_card_edit(app: &mut App, edit: CardEdit) {
+    app.fallback_edit = selected_member_name(app).map(|member| MemberEdit {
+        member,
+        state: edit,
+    });
+}
+
+/// Keystrokes while a typed card field is open: ⏎ saves, ⎋ discards.
+fn handle_member_field_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc => app.fallback_threshold_draft = None,
-        KeyCode::Enter => commit_threshold_edit(app),
+        KeyCode::Esc => app.fallback_edit = None,
+        KeyCode::Enter => commit_member_field(app),
         _ => {
-            if let Some(input) = app.fallback_threshold_draft.as_mut() {
+            if let Some(input) = app.fallback_edit.as_mut().and_then(|e| e.state.input_mut()) {
                 apply_input_edit(input, key);
             }
         }
     }
 }
 
-/// Parse and persist the typed threshold (0..=100). Invalid input keeps the
-/// draft open so the inline Invalid-input treatment (DANGER value + `└ max is N`
-/// tooltip, rendered by the detail card) stays on screen until corrected — no toast.
-fn commit_threshold_edit(app: &mut App) {
-    let Some(raw) = app.fallback_threshold_draft.as_ref().map(|i| i.trimmed()) else {
+/// Parse the open field and persist it on the member it is pinned to, whatever
+/// sits under the cursor now. Invalid input keeps the field open so the card's
+/// inline Invalid-input treatment (DANGER value + range tooltip) stays on
+/// screen until corrected — no toast.
+fn commit_member_field(app: &mut App) {
+    let Some(MemberEdit { member, state }) = app.fallback_edit.clone() else {
         return;
     };
-    let Some(value) = parse_threshold(raw) else {
-        return;
-    };
-    write_threshold(app, value);
-    app.fallback_threshold_draft = None;
-}
-
-/// Keystrokes while the `weekly at` override field is open: ⏎ saves, ⎋ discards.
-fn handle_fallback_weekly_edit_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => app.fallback_weekly_draft = None,
-        KeyCode::Enter => commit_weekly_edit(app),
-        _ => {
-            if let Some(input) = app.fallback_weekly_draft.as_mut() {
-                apply_input_edit(input, key);
-            }
+    match state {
+        CardEdit::Threshold(input) => {
+            let Some(value) = parse_threshold(input.trimmed()) else {
+                return;
+            };
+            write_threshold(app, &member, value);
         }
+        // An EMPTY commit clears the override back to the chain-wide default.
+        CardEdit::Weekly(input) => {
+            let Some(value) = parse_weekly_override(input.trimmed()) else {
+                return;
+            };
+            write_weekly_override(app, &member, value);
+        }
+        CardEdit::MaxSpend(input) => {
+            let Some(value) = parse_max_spend(input.trimmed()) else {
+                return;
+            };
+            write_max_spend(app, &member, value);
+        }
+        CardEdit::Days(_) | CardEdit::ArmedRemove => return,
     }
-}
-
-/// Parse and persist the typed override. Invalid input keeps the draft open
-/// (same no-toast treatment as the threshold editor); an EMPTY commit clears
-/// the override back to the chain-wide default.
-fn commit_weekly_edit(app: &mut App) {
-    let Some(raw) = app.fallback_weekly_draft.as_ref().map(|i| i.trimmed()) else {
-        return;
-    };
-    let Some(value) = parse_weekly_override(raw) else {
-        return;
-    };
-    write_weekly_override(app, value);
-    app.fallback_weekly_draft = None;
+    app.fallback_edit = None;
 }
 
 /// A typed override is a number in `0..=100`, or EMPTY — the explicit
@@ -6136,17 +6153,11 @@ fn selected_weekly_override(app: &App) -> Option<(Option<f64>, bool)> {
     cfg.find(name).map(|p| (p.weekly_threshold, p.check_weekly))
 }
 
-/// Write (or clear) the selected member's weekly-line override and persist.
-fn write_weekly_override(app: &mut App, value: Option<f64>) {
-    let Some(pos) = selected_chain_member(app) else {
-        return;
-    };
+/// Write (or clear) `name`'s weekly-line override and persist.
+fn write_weekly_override(app: &mut App, name: &ProfileName, value: Option<f64>) {
     let save_err = {
         let mut cfg = app.config();
-        let Some(name) = cfg.state.fallback_chain.get(pos).cloned() else {
-            return;
-        };
-        match cfg.find_mut(&name) {
+        match cfg.find_mut(name) {
             Some(profile) => {
                 profile.weekly_threshold = value;
                 save_profile(profile).err()
@@ -6157,32 +6168,6 @@ fn write_weekly_override(app: &mut App, value: Option<f64>) {
     if let Some(e) = save_err {
         app.toast(ToastKind::Danger, format!("save failed\n{e}"));
     }
-}
-
-/// Keystrokes while the `max auto-spend` field is open: ⏎ saves, ⎋ discards.
-fn handle_fallback_max_spend_edit_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => app.fallback_max_spend_draft = None,
-        KeyCode::Enter => commit_max_spend_edit(app),
-        _ => {
-            if let Some(input) = app.fallback_max_spend_draft.as_mut() {
-                apply_input_edit(input, key);
-            }
-        }
-    }
-}
-
-/// Parse and persist the typed ceiling. Invalid input keeps the draft open, the
-/// same no-toast treatment the threshold editor uses.
-fn commit_max_spend_edit(app: &mut App) {
-    let Some(raw) = app.fallback_max_spend_draft.as_ref().map(|i| i.trimmed()) else {
-        return;
-    };
-    let Some(value) = parse_max_spend(raw) else {
-        return;
-    };
-    write_max_spend(app, value);
-    app.fallback_max_spend_draft = None;
 }
 
 /// A typed ceiling is valid only as a finite, non-negative number of dollars.
@@ -6205,17 +6190,11 @@ fn selected_max_spend(app: &App) -> Option<f64> {
     Some(cfg.find(name).and_then(|p| p.max_auto_spend).unwrap_or(0.0))
 }
 
-/// Write the ceiling for the selected member and persist.
-fn write_max_spend(app: &mut App, value: f64) {
-    let Some(pos) = selected_chain_member(app) else {
-        return;
-    };
+/// Write `name`'s ceiling and persist.
+fn write_max_spend(app: &mut App, name: &ProfileName, value: f64) {
     let save_err = {
         let mut cfg = app.config();
-        let Some(name) = cfg.state.fallback_chain.get(pos).cloned() else {
-            return;
-        };
-        match cfg.find_mut(&name) {
+        match cfg.find_mut(name) {
             Some(profile) => {
                 profile.max_auto_spend = Some(value);
                 save_profile(profile).err()
@@ -6239,20 +6218,20 @@ pub(crate) fn member_days(app: &App, name: &ProfileName) -> Option<Vec<Weekday>>
     app.config().find(name).map(|p| p.preferred_days.clone())
 }
 
-/// After a config reload: point `chain_cursor` back at the member an open
-/// [`MemberEdit`] is pinned to. When the reload took that member off the
-/// chain, close the edit and hand focus back to the chain list, so no key meant
-/// for the edit lands on the member that moved into its slot.
+/// After a config reload: point `chain_cursor` back at the member the open
+/// [`MemberEdit`] is pinned to. When the reload took that member off the chain
+/// or its account off the roster, close the edit and hand focus back to the
+/// chain list, so no key meant for the edit lands on the member that moved into
+/// its slot, and none writes to an account that is gone.
 fn repin_member_edit(app: &mut App) {
-    let Some(member) = app.fallback_day_picker.as_ref().map(|e| e.member.clone()) else {
+    let Some(member) = app.fallback_edit.as_ref().map(|e| e.member.clone()) else {
         return;
     };
-    let slot = app
-        .config()
-        .state
-        .fallback_chain
-        .iter()
-        .position(|n| *n == member);
+    let slot = {
+        let cfg = app.config();
+        cfg.find(&member)
+            .and_then(|_| cfg.state.fallback_chain.iter().position(|n| *n == member))
+    };
     match slot {
         Some(i) => app.chain_cursor = i,
         None => leave_fallback_detail(app),
@@ -6289,9 +6268,9 @@ fn open_day_picker(app: &mut App) {
     if let Some(member) = selected_member_name(app)
         && member_days(app, &member).is_some()
     {
-        app.fallback_day_picker = Some(MemberEdit {
+        app.fallback_edit = Some(MemberEdit {
             member,
-            state: DayPicker::default(),
+            state: CardEdit::Days(DayPicker::default()),
         });
     }
 }
@@ -6304,19 +6283,23 @@ fn handle_day_picker_key(app: &mut App, key: KeyEvent) {
     let days = WEEKDAYS_ALL.len();
     match key.code {
         KeyCode::Left | KeyCode::Right => {
-            if let Some(picker) = app.fallback_day_picker.as_mut() {
+            if let Some(MemberEdit {
+                state: CardEdit::Days(picker),
+                ..
+            }) = app.fallback_edit.as_mut()
+            {
                 let step = if key.code == KeyCode::Left {
                     days - 1
                 } else {
                     1
                 };
-                picker.state.cursor = (picker.state.cursor + step) % days;
+                picker.cursor = (picker.cursor + step) % days;
             }
         }
         KeyCode::Char(' ') => toggle_picked_day(app),
-        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.fallback_day_picker = None,
+        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.fallback_edit = None,
         KeyCode::Up | KeyCode::Down => {
-            app.fallback_day_picker = None;
+            app.fallback_edit = None;
             handle_fallback_detail_key(app, key);
         }
         _ => {}
@@ -6327,7 +6310,11 @@ fn handle_day_picker_key(app: &mut App, key: KeyEvent) {
 /// list and save the result in `WEEKDAYS_ALL` order. A dead account's list
 /// still saves; its claims-nothing warning is raised once per descend.
 fn toggle_picked_day(app: &mut App) {
-    let Some(MemberEdit { member, state }) = app.fallback_day_picker.clone() else {
+    let Some(MemberEdit {
+        member,
+        state: CardEdit::Days(state),
+    }) = app.fallback_edit.clone()
+    else {
         return;
     };
     let (Some(&day), Some(shown)) = (WEEKDAYS_ALL.get(state.cursor), member_days(app, &member))
@@ -6348,8 +6335,12 @@ fn toggle_picked_day(app: &mut App) {
         && !state.warned
     {
         warn_list_claims_nothing(app, reason);
-        if let Some(picker) = app.fallback_day_picker.as_mut() {
-            picker.state.warned = true;
+        if let Some(MemberEdit {
+            state: CardEdit::Days(picker),
+            ..
+        }) = app.fallback_edit.as_mut()
+        {
+            picker.warned = true;
         }
     }
 }
@@ -6403,17 +6394,11 @@ fn selected_threshold(app: &App) -> Option<f64> {
     cfg.find(name).map(threshold_for)
 }
 
-/// Write threshold for the selected member and persist.
-fn write_threshold(app: &mut App, value: f64) {
-    let Some(pos) = selected_chain_member(app) else {
-        return;
-    };
+/// Write `name`'s threshold and persist.
+fn write_threshold(app: &mut App, name: &ProfileName, value: f64) {
     let save_err = {
         let mut cfg = app.config();
-        let Some(name) = cfg.state.fallback_chain.get(pos).cloned() else {
-            return;
-        };
-        set_member_threshold(&mut cfg, &name, value).err()
+        set_member_threshold(&mut cfg, name, value).err()
     };
     let Some(e) = save_err else {
         return;
@@ -6433,8 +6418,14 @@ fn write_threshold(app: &mut App, value: f64) {
 
 /// Step the threshold by `delta`, clamped to 0..=100, and persist.
 fn adjust_threshold(app: &mut App, delta: f64) {
-    if let Some(current) = selected_threshold(app) {
-        write_threshold(app, (current + delta).clamp(MIN_THRESHOLD, MAX_THRESHOLD));
+    if let Some(name) = selected_member_name(app)
+        && let Some(current) = selected_threshold(app)
+    {
+        write_threshold(
+            app,
+            &name,
+            (current + delta).clamp(MIN_THRESHOLD, MAX_THRESHOLD),
+        );
     }
 }
 
@@ -6445,7 +6436,9 @@ fn adjust_threshold(app: &mut App, delta: f64) {
 /// An unset override bases the nudge on the chain-wide resolved default so
 /// the value visibly moves off what the dimmed-default row already shows.
 fn adjust_weekly(app: &mut App, delta: f64) {
-    let Some((override_pct, check_weekly)) = selected_weekly_override(app) else {
+    let (Some(name), Some((override_pct, check_weekly))) =
+        (selected_member_name(app), selected_weekly_override(app))
+    else {
         return;
     };
     if !check_weekly {
@@ -6453,7 +6446,7 @@ fn adjust_weekly(app: &mut App, delta: f64) {
     }
     let base = override_pct.unwrap_or_else(|| app.config().state.weekly_switch_threshold_pct());
     let next = (base + delta).clamp(MIN_WEEKLY_SWITCH_PCT, MAX_WEEKLY_SWITCH_PCT);
-    write_weekly_override(app, Some(next));
+    write_weekly_override(app, &name, Some(next));
 }
 
 /// ⏎/space on the `last resort` row: flip `Profile::last_resort` and persist.
@@ -6670,20 +6663,16 @@ fn add_chain_candidate(app: &mut App, name: &ProfileName) {
     let _ = save_app_state(&cfg.state);
 }
 
-/// Remove the selected member, persist, and return focus to the list.
-fn remove_chain_member(app: &mut App) {
-    let Some(pos) = selected_chain_member(app) else {
-        return;
-    };
-    let name = {
+/// Remove `name` from the chain, persist, and return focus to the list.
+fn remove_chain_member(app: &mut App, name: &ProfileName) {
+    {
         let mut cfg = app.config();
-        let Some(name) = cfg.state.fallback_chain.get(pos).cloned() else {
+        if !cfg.state.fallback_chain.contains(name) {
             return;
-        };
-        cfg.state.fallback_chain.retain(|n| n != &name);
+        }
+        cfg.state.fallback_chain.retain(|n| n != name);
         let _ = save_app_state(&cfg.state);
-        name
-    };
+    }
     leave_fallback_detail(app);
     let items_len = chain_items(app).len();
     if app.chain_cursor >= items_len {
