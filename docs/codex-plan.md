@@ -136,7 +136,7 @@ Also in this bucket, both from the contributor's review of the previous revision
 
 ## Refactors landing in parallel (maintainer-side, on `mommy`)
 
-A `clean-rust` sweep on 2026-07-27 found a set of patterns that this series would otherwise duplicate across two harnesses. They are NOT a gate on the fork and they are not scope on the series: they land on `mommy` while the series is in flight, each as its own commit, sequenced so they arrive before the phase whose diff they shrink. Seven of the eight landed 2026-08-27 (shas in the table); only `AccountId` remains. Listed here so a rebase is never a surprise.
+A sweep on 2026-07-27 found a set of patterns that this series would otherwise duplicate across two harnesses. They are NOT a gate on the fork and they are not scope on the series: they land on `mommy` while the series is in flight, each as its own commit, sequenced so they arrive before the phase whose diff they shrink. Seven of the eight landed 2026-08-27 (shas in the table); only `AccountId` remains. Listed here so a rebase is never a surprise.
 
 | refactor | landed / lands before | why it matters to this series |
 |---|---|---|
@@ -189,7 +189,7 @@ Both fail closed already: `load_config` builds `AppConfig.profiles` from `profil
 
 ## Gotchas
 
-- The gate is `cargo.sh` (fmt -> clippy `-D warnings` -> nextest -> doctests -> deny/audit). Green predicts CI.
+- CI (`.github/workflows/ci.yml`) runs `fmt --check`, `cargo-deny` and `cargo-audit` as parallel jobs beside a per-OS check job: release clippy `-D warnings` + nextest, then debug clippy + nextest, the only leg where the `cfg(debug_assertions)` lock-rank checks run.
 - Do not reintroduce codex fields into `AppState`. The file split is what dissolves the mixed-version write-hole class.
 - Lock order: the codex-state mutex reuses existing `RankedMutex` ranks. No new rank, no inversion. Both files sit under `with_state_lock`.
 - `gc_runtime_trees`, `shared_runtime_dirs`, and the GC pairing rule are STRICT by design: they act only on names matching `runtime*`/`sessions*` predicates, so a codex home falls through untouched. Do not loosen them into membership lookups. A dead codex marker dir with no paired runtime sibling is collected by the existing orphan branch (`runtime.rs:679-694`), which is the behavior you want.
