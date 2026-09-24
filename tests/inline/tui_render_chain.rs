@@ -659,7 +659,7 @@ fn max_spend_row_renders_off_at_zero_and_dollars_when_set() {
 // ── disabled chain member (feature: per-account disable toggle) ─────────────
 
 /// `Disabled` and `Canceled` share the `⊖` shape and split on hue alone — the
-/// one deliberate departure from cloudy-tui's shape-names-the-state rule (see
+/// one deliberate departure from the shape-names-the-state rule (see
 /// `reason_marker`). Pinned here because giving either arm its own shape puts
 /// the same account under two glyphs across the Overview's two panels: the
 /// account row picks the canceled arm where this ladder picks the disabled one.
@@ -1754,7 +1754,7 @@ fn a_swap_this_very_second_reads_as_just_now() {
     );
 }
 
-/// The age line follows the cloudy-tui Time-formatting contract: ONE unit, the
+/// The age line follows the time-formatting rule: ONE unit, the
 /// largest that is at least 1, and the local prose stamp at 30 days and beyond.
 /// The two-unit `humanize_duration` the countdowns use would render `1d 4h ago`
 /// here and never reach a date at all — it stays on the countdowns, where a
@@ -2166,7 +2166,7 @@ fn preferred_days_row_hint_names_the_blocker_then_the_list_state() {
     );
 }
 
-// The descended row is the cloudy-tui multi-select chip row: `✎` in the gutter,
+// The descended row is a multi-select chip row: `✎` in the gutter,
 // a `[x]`/`[ ]` mark per day read off the saved list (brackets TEXT_DIM, `x`
 // ACCENT), the day ACCENT picked / TEXT_FAINT unpicked, and the caret a bold
 // ACCENT `❯` in a slot every chip reserves — never a background fill.

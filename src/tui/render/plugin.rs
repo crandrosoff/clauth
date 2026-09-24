@@ -667,8 +667,8 @@ fn draw_delegates(frame: &mut Frame<'_>, area: Rect, rows: &[DelegateCells]) {
 
 /// The rows that fit, plus a `+N more` line naming what did not.
 ///
-/// **House deviation**: the cloudy-tui contract makes a scrollbar the only legal
-/// overflow signal. This pane binds no key, so a scrollbar here would advertise
+/// **House deviation**: everywhere else a scrollbar is the only legal overflow
+/// signal. This pane binds no key, so a scrollbar here would advertise
 /// a scroll that cannot happen; a count says the same thing and promises
 /// nothing. The reason lives here because it is the only written home it has —
 /// the design-doc entry recording it is owed and not yet written.

@@ -749,7 +749,7 @@ pub(crate) struct DivergenceNotice {
 impl DivergenceNotice {
     /// Banner copy for the one system banner: names the live login's owner when
     /// known, else the generic mismatch, ending in the `d` affordance. Lowercase
-    /// fragments, mid-dot separators (cloudy-tui banner copy).
+    /// fragments, mid-dot separators.
     pub(crate) fn banner_message(&self) -> String {
         match &self.sibling {
             Some(owner) => format!(
@@ -6296,7 +6296,7 @@ fn open_day_picker(app: &mut App) {
     }
 }
 
-/// Keystrokes while the chip picker is open (cloudy-tui multi-select chip row):
+/// Keystrokes while the chip picker is open (a multi-select chip row):
 /// ←/→ walk the caret with wrap, space toggles the day under it and saves at
 /// once, ⏎/esc/q leave the mode, ↑/↓ leave the mode and the row together. Every
 /// other key is claimed and does nothing, so no global binding fires mid-pick.
@@ -9342,11 +9342,11 @@ fn duplicate_profile_into(app: &mut App, source: &ProfileName, new_name: &Profil
 /// Flip `name`'s `Profile::disabled` flag (Setup `disabled` row). Inert while
 /// `name` is the active profile or holds a live `clauth start` session — the
 /// same gate `actions::disable_profile` itself enforces, checked here TOO so
-/// the row stays truly inert (silent no-op, matching the dimmed-row cloudy-
-/// tui contract): `disable_profile`'s own refusal is a real `bail!`, and
-/// without this early return every press would surface a red danger toast
-/// instead of doing nothing, which is what a dimmed/disabled row is supposed
-/// to mean. `disable_profile`/`enable_profile` persist into the live shared
+/// the row stays truly inert (silent no-op, matching the dimmed-row rule):
+/// `disable_profile`'s own refusal is a real `bail!`, and without this early
+/// return every press would surface a red danger toast instead of doing
+/// nothing, which is what a dimmed/disabled row is supposed to mean.
+/// `disable_profile`/`enable_profile` persist into the live shared
 /// `AppConfig` directly (`app.config()`), so the flip renders next frame with
 /// no reload round-trip; `refresh_tokens` rebuilds the scheduler's per-profile
 /// work lists (`collect_tokens`/`collect_third_party_entries` both filter on

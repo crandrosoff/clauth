@@ -879,8 +879,8 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
 /// HTTP-date branch is deterministic under test.
 ///
 /// Both branches clamp the returned delay to [`MAX_RETRY_AFTER_MS`]: a server
-/// hint past the cap becomes the cap (cloudy's 2026-09-07 ruling), and the
-/// bound keeps every consumer's `as_millis() as u64` cast from wrapping — an
+/// hint past the cap becomes the cap (the maintainer's 2026-09-07 ruling), and
+/// the bound keeps every consumer's `as_millis() as u64` cast from wrapping — an
 /// unbounded 2^61-second hint would otherwise cast to exactly 0 ms, i.e.
 /// "retry now". `Duration::ZERO` survives the clamp; the deferral sites'
 /// own `.min(MAX_RETRY_AFTER_MS)` stays as defense in depth.

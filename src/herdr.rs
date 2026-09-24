@@ -195,7 +195,7 @@ fn install_err(line: &str) {
 }
 
 // Per-thread rather than a process-global for the same reason `logline`'s
-// capture is: under `cargo.sh`'s `cargo test` fallback every inline test file
+// capture is: under a plain `cargo test` run every inline test file
 // compiles into one binary whose tests are THREADS, so a global buffer would
 // hand one test its neighbour's lines. Unix-only, like the install tests that
 // drive the seam: the windows cross-lint compiles the test target without

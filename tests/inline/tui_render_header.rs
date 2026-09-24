@@ -83,23 +83,6 @@ fn app_with(profiles: Vec<Profile>, active: Option<&str>) -> App {
     App::new(config)
 }
 
-/// Writes a codex roster into the sandboxed `~/.clauth` — the roster
-/// `App::new` reads into `App::codex_rows`.
-fn write_codex_roster(names: &[&str]) {
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    let list = names
-        .iter()
-        .map(|n| format!("\"{n}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        format!("profiles = [{list}]\n"),
-    )
-    .expect("write codex state");
-}
-
 /// Renders only the header block (sized by `header_height`).
 fn render_header_rows(app: &App, width: u16) -> Vec<String> {
     let height = header_height(app);
@@ -515,7 +498,7 @@ fn the_status_indicator_drops_rather_than_clipping_when_the_row_runs_short() {
 fn no_header_row_counts_accounts_at_any_width_tab_or_filter() {
     use crate::tui::app::HarnessFilter;
     let _home = crate::testutil::HomeSandbox::new();
-    write_codex_roster(&["cx1", "cx2", "cx3"]);
+    crate::testutil::write_codex_roster(&["cx1", "cx2", "cx3"]);
     let mut app = app_with(
         vec![oauth_profile("uwuclxdy", 42.0), provider_profile("z.ai")],
         Some("uwuclxdy"),
@@ -566,7 +549,7 @@ fn no_header_row_counts_accounts_at_any_width_tab_or_filter() {
 #[test]
 fn the_word_accounts_renders_on_the_panel_title_alone() {
     let _home = crate::testutil::HomeSandbox::new();
-    write_codex_roster(&["cx1"]);
+    crate::testutil::write_codex_roster(&["cx1"]);
     let mut app = app_with(
         vec![oauth_profile("uwuclxdy", 42.0), provider_profile("z.ai")],
         None,

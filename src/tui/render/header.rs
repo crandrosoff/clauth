@@ -193,6 +193,8 @@ pub(super) fn header_height(_app: &App) -> u16 {
 
 // ── Draw ─────────────────────────────────────────────────────────────────
 
+const CONTENT_GAP: usize = 3;
+
 pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let cols: [Rect; 2] =
         Layout::horizontal([Constraint::Length(10), Constraint::Min(20)]).areas(area);
@@ -224,7 +226,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     const CHIP_OPEN: &str = "[ ";
     const CHIP_WORD: &str = "daemon";
     const CHIP_CLOSE: &str = " ]";
-    const CONTENT_GAP: usize = 3;
     let chip_w = CHIP_OPEN.chars().count() + CHIP_WORD.chars().count() + CHIP_CLOSE.chars().count();
     // `[ herdr ]` context tag, between the brand and the version. It is the
     // first span this row sheds, so it renders only while it still leaves room
@@ -268,13 +269,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status_head = "● ";
     let status_w = status_head.chars().count() + feed.chars().count();
     // Right-aligned columns keep a minimum 3-cell gap from the content to
-    // their left (the Spacing rule, row 0's CONTENT_GAP): the indicator sheds
+    // their left (`CONTENT_GAP`, the same gap row 0 keeps): the indicator sheds
     // before it would render closer than that, never at a 1-2 cell squeeze.
-    let reserve: usize = 3;
-
     let mut left_spans: Vec<Span<'static>> = Vec::new();
     if let Some(ref g) = gauge {
-        let gauge_budget = row1_width.saturating_sub(status_w + reserve);
+        let gauge_budget = row1_width.saturating_sub(status_w + CONTENT_GAP);
         let fit = gauge_fit(gauge_budget, g.name.chars().count(), g.pct.is_some());
         if fit.visible {
             left_spans.extend(gauge_spans(fit, &g.name, g.pct, app.anim_ms()));
@@ -282,7 +281,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     let left_w: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
     let mut row1_spans = left_spans;
-    if row1_width >= left_w + status_w + reserve {
+    if row1_width >= left_w + status_w + CONTENT_GAP {
         let gap = row1_width - left_w - status_w;
         row1_spans.push(Span::raw(" ".repeat(gap)));
         row1_spans.push(Span::styled(

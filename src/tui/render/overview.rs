@@ -533,7 +533,7 @@ fn render_overview_row(
     let mut spans = vec![cursor];
     // A disabled row flattens every semantic hue to dim — the whole row reads as
     // one inert unit rather than a live row wearing a dim name. The GLYPHS stay:
-    // cloudy-tui never lets state ride on hue alone, so `⊖`/`×`/`⊘`/`!`/`●`/`▲`
+    // this row never lets state ride on hue alone, so `⊖`/`×`/`⊘`/`!`/`●`/`▲`
     // still distinguish themselves without the color.
     let hue = |s: Style| if disabled { theme::dim() } else { s };
     // Marker precedence: canceled subscription (⊖) > broken login (×) > token
@@ -695,7 +695,7 @@ fn render_overview_row(
 
 /// The row's live-session cell: how many `clauth start` sessions are running as
 /// this account, with `⇄` when at least one of them follows the fallback chain.
-/// Blank for an account hosting none — cloudy-tui hides a zero count.
+/// Blank for an account hosting none: a zero count is hidden.
 ///
 /// Distinct from the row's leading `●`, which marks the one profile a bare
 /// `claude` authenticates as; an account can carry either, both, or neither.
@@ -859,7 +859,7 @@ fn fallback_flow_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         .unwrap_or(8)
         .clamp(6, if narrow { 12 } else { 18 });
     // Threshold digits vary across members (`95%` vs `100%`), so left-pad them to
-    // the widest so the `%` signs line up (cloudy-tui numeric-column alignment).
+    // the widest so the `%` signs line up.
     // It also makes every row's content the same width, which is what lets the
     // trailer column below sit flush against the content.
     let thr_w = chain

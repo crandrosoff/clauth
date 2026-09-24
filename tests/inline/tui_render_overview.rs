@@ -1004,7 +1004,7 @@ fn oauth_creds() -> ClaudeCredentials {
 
 /// A disabled row goes inert END TO END, not just its name: the marker glyph,
 /// the type cell, and both window bars all flatten to `theme::dim()`. The
-/// glyphs and numbers stay — cloudy-tui never lets state ride on hue alone, and
+/// glyphs and numbers stay — the row never lets state ride on hue alone, and
 /// the figures are the last real reading — it is only the semantic color that
 /// lies once the data is frozen. An enabled sibling in the same config keeps
 /// every hue, which is what proves the flattening is per-row.
@@ -1568,9 +1568,8 @@ fn fallback_panel_parks_trailers_next_to_the_content() {
     );
 }
 
-/// Thresholds of differing digit counts left-pad so the `%` signs stack
-/// (cloudy-tui numeric-column alignment), instead of leaving a ragged edge
-/// between a `95%` row and a `100%` row.
+/// Thresholds of differing digit counts left-pad so the `%` signs stack,
+/// instead of leaving a ragged edge between a `95%` row and a `100%` row.
 #[test]
 fn chain_rows_align_the_threshold_percent_column() {
     let _home = crate::testutil::HomeSandbox::new();
@@ -1784,8 +1783,8 @@ fn live_cell_stays_under_header_when_7d_reset_is_two_digit_hours() {
     );
 }
 
-/// Zero renders as nothing — cloudy-tui hides a zero count rather than printing
-/// it, and a table full of `0`s would drown the accounts that do host something.
+/// Zero renders as nothing — a zero count is hidden rather than printed, and a
+/// table full of `0`s would drown the accounts that do host something.
 #[test]
 fn an_account_with_no_live_sessions_renders_a_blank_live_cell() {
     let _home = crate::testutil::HomeSandbox::new();
@@ -2269,23 +2268,6 @@ fn accounts_title_row(app: &App, width: u16) -> String {
     crate::testutil::buffer_rows(term.backend().buffer())[0].clone()
 }
 
-/// Writes a codex roster into the sandboxed `~/.clauth` — the roster `App::new`
-/// reads into `App::codex_rows`.
-fn write_codex_roster(names: &[&str]) {
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    let list = names
-        .iter()
-        .map(|n| format!("\"{n}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        format!("profiles = [{list}]\n"),
-    )
-    .expect("write codex state");
-}
-
 /// The accounts panel's title carries the harness filter: the plain eyebrow
 /// unfiltered, the harness name after it under the filter. The border rule
 /// supplies the trailing dashes, and the name keeps its own case — only the
@@ -2335,7 +2317,7 @@ fn the_accounts_title_carries_the_harness_filter() {
 fn the_accounts_meta_slot_counts_both_harnesses_whatever_the_filter_shows() {
     use crate::tui::app::HarnessFilter;
     let _home = crate::testutil::HomeSandbox::new();
-    write_codex_roster(&["cx1", "cx2"]);
+    crate::testutil::write_codex_roster(&["cx1", "cx2"]);
     let mut app = App::new(config_with(
         vec![
             profile("cl1", 80.0, 10.0, 3_600),
@@ -2391,7 +2373,7 @@ fn the_accounts_meta_slot_omits_a_roster_with_no_accounts() {
         "╭ ACCOUNTS ─────────────────────────── 2 claude ─╮"
     );
 
-    write_codex_roster(&["cx1", "cx2"]);
+    crate::testutil::write_codex_roster(&["cx1", "cx2"]);
     let codex_only = App::new(config_with(Vec::new(), None, vec![]));
     assert_eq!(
         codex_only.codex_rows.len(),
@@ -2423,7 +2405,7 @@ fn an_empty_roster_pair_renders_no_meta_slot() {
 #[test]
 fn the_accounts_meta_slot_sheds_before_the_title_loses_its_rule() {
     let _home = crate::testutil::HomeSandbox::new();
-    write_codex_roster(&["cx1", "cx2"]);
+    crate::testutil::write_codex_roster(&["cx1", "cx2"]);
     let app = App::new(config_with(
         vec![
             profile("cl1", 80.0, 10.0, 3_600),
@@ -2499,14 +2481,8 @@ fn codex_rows_read_the_roster_and_its_own_cache() {
 /// `wham/usage` plan wins the moment a poll has answered.
 #[test]
 fn codex_rows_plan_falls_back_to_the_id_token_claim() {
-    let home = crate::testutil::HomeSandbox::new();
-    let dir = home.home().join(".clauth");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        "profiles = [\"cx1\", \"cx2\"]\n",
-    )
-    .expect("write codex state");
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::write_codex_roster(&["cx1", "cx2"]);
 
     let id_token = crate::testutil::codex_jwt(
         r#"{"https://api.openai.com/auth":{"chatgpt_plan_type":"plus"}}"#,
@@ -2953,13 +2929,7 @@ fn the_accounts_scrollbar_counts_the_codex_rows() {
         "two claude rows fit a 5-row list: no track"
     );
 
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        "profiles = [\"cx1\", \"cx2\", \"cx3\"]\n",
-    )
-    .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx1", "cx2", "cx3"]);
     let with_codex = App::new(config_with(claude(), None, vec![]));
     assert_eq!(
         with_codex.codex_rows.len(),

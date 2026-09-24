@@ -549,8 +549,7 @@ fn a_codex_profiles_config_is_never_read_here() {
     write_config(home.home(), "p1", "[env]\nA_KEY = \"1\"\n");
 
     let clauth = home.home().join(".clauth");
-    fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex roster");
+    crate::testutil::write_codex_roster(&["cx"]);
     let cx = clauth.join("profiles").join("cx");
     fs::create_dir_all(&cx).expect("mkdir codex profile");
     fs::write(cx.join("config.toml"), "[env\nBROKEN = ").expect("write broken codex config");
@@ -580,11 +579,7 @@ fn a_dual_claimed_name_stays_claude_first_here() {
     let clauth = home.home().join(".clauth");
     fs::write(clauth.join("profiles.toml"), "profiles = [\"shared\"]\n")
         .expect("write claude roster");
-    fs::write(
-        clauth.join("codex-profiles.toml"),
-        "profiles = [\"shared\"]\n",
-    )
-    .expect("write codex roster claiming the same name");
+    crate::testutil::write_codex_roster(&["shared"]);
 
     let keys = per_profile_env_keys().expect("every config.toml parses");
     assert!(
@@ -620,7 +615,7 @@ fn an_unreadable_codex_roster_reads_as_no_codex_arm_and_never_pauses() {
 
     // A valid roster naming a codex dir whose own config.toml does not parse:
     // the dir is skipped by membership, the claude keys still arrive.
-    fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n").expect("write roster");
+    crate::testutil::write_codex_roster(&["cx"]);
     let cx = clauth.join("profiles").join("cx");
     fs::create_dir_all(&cx).expect("mkdir codex profile");
     fs::write(cx.join("config.toml"), "[env\nBROKEN = ").expect("write broken codex config");

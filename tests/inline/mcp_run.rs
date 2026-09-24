@@ -4911,10 +4911,9 @@ fn the_delegate_description_keeps_its_load_bearing_warnings() {
     // measured false, NOT the class of claim it belongs to. `bill less`,
     // `costs less`, `uses less input` and `lighter on tokens` all pass this
     // check. Widening the list does not fix that: a ban list transfers only to
-    // the tokens it names (`prompt-writing`, "constraining style"), so more
-    // literals buy confidence rather than coverage. Read a pass here as "the
-    // known-false sentence has not returned", never as "no cost claim about
-    // `isolated` can ship".
+    // the tokens it names, so more literals buy confidence rather than
+    // coverage. Read a pass here as "the known-false sentence has not
+    // returned", never as "no cost claim about `isolated` can ship".
     for banned in ["fewer tokens", "cheaper", "bills less"] {
         assert!(
             !text.contains(banned),
@@ -8921,11 +8920,8 @@ fn the_profile_not_found_builder_names_the_fix() {
 /// mistake.
 #[test]
 fn the_refusal_tells_a_codex_name_apart_from_an_unknown_one() {
-    let home = crate::testutil::HomeSandbox::new();
-    let dir = home.home().join(".clauth");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::write_codex_roster(&["cx"]);
 
     let real = profile_not_found_cross_harness("cx", ProfileNotFoundFix::CallProfiles);
     assert!(real.contains("CODEX account"), "{real}");
@@ -8967,11 +8963,8 @@ fn the_profile_not_found_sentence_is_composed_in_one_place() {
 /// spelling.
 #[test]
 fn switch_profile_refuses_a_codex_name_as_a_codex_account() {
-    let home = crate::testutil::HomeSandbox::new();
-    let dir = home.home().join(".clauth");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::write_codex_roster(&["cx"]);
 
     let server = ClauthServer::new();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -9013,10 +9006,7 @@ fn switch_profile_refuses_a_codex_name_as_a_codex_account() {
 #[test]
 fn resolve_fanout_refuses_a_codex_member_as_a_codex_account() {
     let _home = HomeSandbox::new();
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     let mut config = crate::profile::AppConfig {
         state: crate::profile::AppState::default(),
         profiles: Vec::new(),

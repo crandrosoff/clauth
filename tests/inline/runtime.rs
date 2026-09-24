@@ -3880,8 +3880,9 @@ fn a_start_behind_a_rotation_that_releases_in_time_proceeds() {
 /// A drop moved between it and the closure passes here and is caught by
 /// `refuse_if_unconfigured`'s rank `debug_assert` — which lives on the DEBUG leg
 /// alone, since the rank stack is `cfg(debug_assertions)`-only. That leg is gated
-/// (`cargo.sh` and CI both run it), so the floor is covered; it is not covered by
-/// anything a release run can see, and this test is not what covers it.
+/// (CI runs it in its `debug clippy + test` step), so the floor is covered; it
+/// is not covered by anything a release run can see, and this test is not what
+/// covers it.
 ///
 /// All three count themselves, because a probe that lives inside an injected
 /// closure asserts nothing at all if the closure stops being called — and a
@@ -8973,11 +8974,7 @@ fn live_isolated_stores_skip_codex_profiles_by_roster() {
         lock.lock().expect("lock pid");
         locks.push(lock);
     }
-    fs::write(
-        home.home().join(".clauth/codex-profiles.toml"),
-        "profiles = [\"cx\"]\n",
-    )
-    .expect("write codex roster");
+    crate::testutil::write_codex_roster(&["cx"]);
 
     let stores = live_isolated_stores();
 

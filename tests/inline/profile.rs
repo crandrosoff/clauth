@@ -2453,7 +2453,7 @@ fn reload_fingerprint_covers_the_codex_state_file() {
     std::fs::create_dir_all(&dir).expect("mkdir .clauth");
     let before = reload_fingerprint();
     let path = dir.join("codex-profiles.toml");
-    std::fs::write(&path, "profiles = []\n").expect("write codex state");
+    crate::testutil::write_codex_roster(&[]);
     let appeared = reload_fingerprint();
     assert_ne!(before, appeared, "the file appearing must shift it");
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);

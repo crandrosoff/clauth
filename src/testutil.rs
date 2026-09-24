@@ -1066,6 +1066,23 @@ pub(crate) fn read_codex_store(name: &str) -> String {
     .expect("read store")
 }
 
+/// Writes `body` verbatim as the sandboxed `~/.clauth/codex-profiles.toml`.
+pub(crate) fn write_codex_state(body: &str) {
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
+    std::fs::write(dir.join("codex-profiles.toml"), body).expect("write codex state");
+}
+
+/// Writes a roster-only `codex-profiles.toml` into the sandboxed `~/.clauth`.
+pub(crate) fn write_codex_roster(names: &[&str]) {
+    let list = names
+        .iter()
+        .map(|n| format!("\"{n}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    write_codex_state(&format!("profiles = [{list}]\n"));
+}
+
 /// A locked handle on `name`'s rotation lock from a separate fd, standing in
 /// for another process mid-rotation (`flock(2)` binds to the open file
 /// description, so this genuinely contends with `try_acquire`'s own). Creates

@@ -1475,14 +1475,8 @@ fn the_codex_surface_is_additive_and_appended() {
 /// `broken` off the quarantine record ahead of the cache-derived grades.
 #[test]
 fn codex_entries_fall_back_to_the_id_token_plan_and_publish_broken() {
-    let home = crate::testutil::HomeSandbox::new();
-    let dir = home.home().join(".clauth");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(
-        dir.join("codex-profiles.toml"),
-        "profiles = [\"claimed\", \"polled\", \"bare\", \"dead\"]\n",
-    )
-    .expect("write codex state");
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::write_codex_roster(&["claimed", "polled", "bare", "dead"]);
     let with_plan = |plan: &str| {
         let id_token = crate::testutil::codex_jwt(&format!(
             r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"acc","chatgpt_plan_type":"{plan}"}}}}"#

@@ -848,9 +848,9 @@ fn kick_text(profile: &Profile, header: &HeaderState) -> String {
 }
 
 /// Spans putting `text` flush against the pane's right edge on the `plan` row,
-/// keeping the house 3-cell minimum gap from the row's left content (cloudy-tui
-/// spacing). Truncates with `…` when the row can't hold both; drops the kick
-/// when not even a countdown hint fits.
+/// keeping the house 3-cell minimum gap from the row's left content. Truncates
+/// with `…` when the row can't hold both; drops the kick when not even a
+/// countdown hint fits.
 fn kick_spans(text: &str, left_w: usize, inner_w: usize) -> Vec<Span<'static>> {
     let avail = inner_w.saturating_sub(left_w);
     if avail < 3 {
@@ -870,7 +870,7 @@ fn kick_spans(text: &str, left_w: usize, inner_w: usize) -> Vec<Span<'static>> {
 /// One row of the `status` block paired with its optional `└`/`├` fix hint.
 /// Collected before render so [`render_status_rows`] can see the total hint
 /// count up front and connect 2+ into one rail instead of floating each `└`
-/// detached (cloudy-tui Stacked hints).
+/// detached.
 struct DiagRow {
     /// Row content AFTER the key/rail column — `render_status_rows` decides
     /// that column once every row's hint state is known.
@@ -1160,8 +1160,8 @@ fn status_lines(profile: &Profile, header: &HeaderState, inner_w: u16) -> Vec<Li
             ]);
         }
         _ => match countdown {
-            // A scheduled refresh is work lined up — the cloudy-tui `queued`
-            // dot (`◌` in ACCENT), not a spinner: nothing is running yet.
+            // A scheduled refresh is work lined up — the `queued` dot (`◌` in
+            // ACCENT), not a spinner: nothing is running yet.
             Some(c) => spans.extend([
                 Span::styled("◌ ", theme::accent()),
                 Span::styled(format!("refresh in {c}"), theme::dim()),
@@ -1232,8 +1232,7 @@ fn status_lines(profile: &Profile, header: &HeaderState, inner_w: u16) -> Vec<Li
 /// blank-pad to the value column — unless 2+ rows carry a fix hint, in which
 /// case every row between the first and last hint takes the rail's `│` at
 /// col 0 instead of blank padding, and each hint renders `├`/`└` + text at
-/// col 2. A single hint stays the plain `└` form: nothing to connect (cloudy-tui
-/// Stacked hints).
+/// col 2. A single hint stays the plain `└` form: nothing to connect.
 fn render_status_rows(rows: Vec<DiagRow>, width: usize) -> Vec<Line<'static>> {
     let hint_count = rows.iter().filter(|r| r.hint.is_some()).count();
     let mut lines = Vec::with_capacity(rows.len() * 2);

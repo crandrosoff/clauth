@@ -487,7 +487,7 @@ pub(crate) fn refresh_transient_cli(
 /// TUI, never a bare "the TUI" (which reads as some other UI).
 pub(crate) const RESOLVE_IN_TUI: &str = "resolve the divergence in the clauth TUI";
 
-/// The `s` a count needs, per cloudy-tui's counts rule: singular at one.
+/// The `s` a count needs: singular at one.
 pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }

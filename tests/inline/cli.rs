@@ -1466,8 +1466,7 @@ fn per_subcommand_help_carries_that_commands_prose() {
 /// The third needle is the HEDGE, and it is pinned as hard as the promise. The
 /// lift runs in `start::run`'s teardown after `child.wait()` returns, so a hard
 /// kill of `clauth start` itself skips it and the store goes with the runtime.
-/// A help that promises the lift without that clause is the flat overclaim this
-/// entry's reviewzy constraint was filed against.
+/// A help that promises the lift without that clause is a flat overclaim.
 #[test]
 fn the_isolated_help_says_the_session_outlives_the_runtime() {
     let mut start = Cli::command();
@@ -3323,10 +3322,7 @@ fn cli_delete_refuses_while_a_rotation_holds_the_lock() {
 #[test]
 fn the_not_found_listing_names_both_rosters() {
     let _home = crate::testutil::HomeSandbox::new();
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx1\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx1"]);
     let config = crate::profile::AppConfig {
         state: crate::profile::AppState {
             profiles: vec!["cl1".into()],
@@ -3362,10 +3358,7 @@ fn the_not_found_listing_names_both_rosters() {
 #[test]
 fn codex_start_refuses_with_fallback_by_name() {
     let _home = crate::testutil::HomeSandbox::new();
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
 
     let err = cmd_start(
         &crate::cli::StartTarget::Named("cx".to_owned()),
@@ -3431,10 +3424,7 @@ fn cli_codex_delete_refuses_while_a_rotation_holds_the_lock() {
 #[test]
 fn codex_start_refuses_a_quarantined_chain_by_name() {
     let _home = crate::testutil::HomeSandbox::new();
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     crate::testutil::write_codex_store(
         "cx",
         &crate::testutil::codex_auth_body(&crate::testutil::jwt_with_exp(1_700_000_060), "rt.a"),
@@ -3744,10 +3734,7 @@ fn cmd_start_explain_auto_runs_the_with_fallback_refusals() {
 #[test]
 fn the_claude_only_verbs_refuse_a_codex_name_and_list_the_claude_roster_alone() {
     let _home = crate::testutil::HomeSandbox::new();
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     let config = AppConfig {
         state: crate::profile::AppState {
             profiles: vec!["cl1".into()],
@@ -3792,10 +3779,7 @@ fn the_claude_only_verbs_refuse_a_codex_name_and_list_the_claude_roster_alone() 
 #[test]
 fn each_claude_only_verb_names_itself_in_the_codex_refusal() {
     let _home = crate::testutil::HomeSandbox::new();
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
 
     let cases = [
         ("disable", cmd_disable("cx", true)),

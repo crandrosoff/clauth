@@ -311,7 +311,7 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// full). Absent when the member has headroom.
 ///
 /// `Disabled` and `Canceled` deliberately SHARE `⊖` and split on hue alone
-/// (faint vs danger), the one place this app departs from cloudy-tui's
+/// (faint vs danger), the one place this app departs from the
 /// shape-names-the-state rule: the two co-occur on nearly every real account
 /// (an operator disables a subscription once it's canceled), and the Overview
 /// account row picks the canceled arm where this ladder picks the disabled one,
@@ -336,11 +336,11 @@ pub(super) fn reason_marker(reason: &BlockedReason) -> Span<'static> {
 }
 
 /// Blocked-reason status pill for the detail card: `[ label ]`, label bold in the
-/// reason's semantic color (neutral dim for stale), brackets dim — the cloudy-tui
-/// status pill. Window resets run through `reset_pill`, so they follow the
-/// operator's `reset display` setting; the kick-block lift stays a bare
-/// countdown — the limiter relents on its own schedule, so a wall-clock time
-/// there would claim a precision the estimate doesn't have.
+/// reason's semantic color (neutral dim for stale), brackets dim. Window resets
+/// run through `reset_pill`, so they follow the operator's `reset display`
+/// setting; the kick-block lift stays a bare countdown — the limiter relents on
+/// its own schedule, so a wall-clock time there would claim a precision the
+/// estimate doesn't have.
 fn reason_pill_spans(reason: &BlockedReason, fmt: ResetFmt) -> Vec<Span<'static>> {
     // Every pill is `[ label ]` with an optional qualifier trailing as a faint
     // suffix OUTSIDE the brackets (a reset countdown, a lift ETA, "still
@@ -483,9 +483,9 @@ fn live_session_lines(
 }
 
 /// The blocked-reason pill block: each pill on its own row with its `└` fix
-/// line, connected into one `├│└` rail when 2+ stack (cloudy-tui Stacked
-/// hints). The first row carries the `status` key so the rail has a column to
-/// anchor against; later rows bridge with `│` at col 0 while the rail is open.
+/// line, connected into one `├│└` rail when 2+ stack. The first row carries
+/// the `status` key so the rail has a column to anchor against; later rows
+/// bridge with `│` at col 0 while the rail is open.
 ///
 /// Mirrors `usage.rs::status_lines`'s shape but keys off THIS card's `DETAIL_KEY_W`,
 /// so the pill's value column lines up with `5h usage` / `rotate at` beneath
@@ -614,7 +614,7 @@ fn member_detail(
     // grammar), headroom figure indented beneath it. Two lines, not three:
     // the standalone eyebrow is folded into the key. The gauge takes what the
     // key and the figure leave, up to `GAUGE_W`, so on a narrow pane the bar
-    // gives and the figure reads whole (cloudy-tui in-row bars).
+    // gives and the figure reads whole.
     let (figure, figure_style) = match pct {
         Some(v) => (format!("  {v:.0}% used"), theme::util(v)),
         None => ("  no data yet".to_string(), theme::faint()),
@@ -1122,7 +1122,7 @@ fn detail_row(
         }
         FallbackRow::MaxSpend => {
             // Inert until the chain-wide `spend budget` is on: render the whole row
-            // faint (cloudy-tui disabled row) so a ceiling never reads as armed
+            // faint (a disabled row) so a ceiling never reads as armed
             // while nothing can spend, and the key handler no-ops it. The
             // `max_spend_hint` names the holding half.
             let dimmed = !spend_budget && editing.is_none();
@@ -1284,7 +1284,7 @@ fn day_picker_rows(width: usize) -> Vec<std::ops::Range<usize>> {
     rows
 }
 
-/// The `preferred days` row descended (cloudy-tui multi-select chip row): `✎`
+/// The `preferred days` row descended (a multi-select chip row): `✎`
 /// in the gutter, then one `[x]`/`[ ]` chip per weekday, picked as the member's
 /// saved `days` say. Every chip reserves a 1-cell caret slot, `❯` on the chip
 /// under `caret`, so nothing shifts as it walks; lines past the first indent to

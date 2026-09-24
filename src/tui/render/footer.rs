@@ -242,8 +242,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // Suppress the trailing `q` hint only where `q` is fully captured by the
     // screen (threshold edit / max-spend edit / armed-remove /
     // refresh-interval edit own the keyboard entirely). Every other sub-focus
-    // shows `q back` via `q_label` per the cloudy-tui contract; the day picker
-    // is one, since its `q` leaves the picker.
+    // shows `q back` via `q_label`; the day picker is one, since its `q` leaves
+    // the picker.
     let show_q = !((app.tab == Tab::Fallback
         && matches!(
             fallback_hint(app),

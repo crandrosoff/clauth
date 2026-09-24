@@ -1125,25 +1125,6 @@ fn narrow_footer_degrades_to_essential_hints() {
 }
 
 #[test]
-fn narrow_header_hides_the_gauge_without_a_dangling_separator() {
-    let _home = crate::testutil::HomeSandbox::new();
-    let mut app = narrow_app();
-    app.tab = Tab::Usage;
-    // The count and its separator left the header for the accounts panel's
-    // title: no header row names the accounts or carries a separator middot
-    // at any width — the rows are the gauge and the indicator alone.
-    for width in [45, 120] {
-        let out = dump(&app, width, 38);
-        for (i, line) in out.lines().enumerate().take(3) {
-            assert!(
-                !line.contains("accounts") && !line.contains('·'),
-                "header row {i} at {width} names accounts or carries a separator:\n{line}"
-            );
-        }
-    }
-}
-
-#[test]
 fn narrow_status_detail_duration_drops_to_its_own_line() {
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = narrow_app();

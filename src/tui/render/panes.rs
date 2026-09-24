@@ -13,7 +13,7 @@ use super::super::theme;
 use crate::profile::AppConfig;
 
 /// Account-picker column width for a master-detail tab: ~30% of the body,
-/// clamped 20-40 cells (cloudy-tui master-detail contract).
+/// clamped 20-40 cells.
 pub(super) fn selector_width(body_w: u16) -> u16 {
     (body_w.saturating_mul(3) / 10).clamp(20, 40)
 }
@@ -149,9 +149,9 @@ pub(super) fn select_line(
 }
 
 /// Orange for the active profile, plain text otherwise. This is the app's only
-/// active-account marker: cloudy-tui takes the `ACCENT_2` name and the
-/// `[ active ]` pill as two spellings of one signal, so the detail panes carry
-/// neither, and the selector's orange name speaks for the whole screen.
+/// active-account marker: the `ACCENT_2` name and the `[ active ]` pill are
+/// two spellings of one signal, so the detail panes carry neither, and the
+/// selector's orange name speaks for the whole screen.
 pub(super) fn name_color(active: bool) -> Style {
     if active {
         Style::default().fg(theme::accent_2_color())
@@ -230,7 +230,7 @@ pub(super) use crate::format::{
     DIAG_WEEKLY_SOFT, DIAG_WEEKLY_SPENT,
 };
 
-/// cloudy-tui status pill `[ label ]`: brackets in `TEXT_DIM`, the label in the
+/// Status pill `[ label ]`: brackets in `TEXT_DIM`, the label in the
 /// caller's semantic style (bold for a charged state). Returns the three spans
 /// so a caller can compose them after a key cell; wrap in a `Line` for a
 /// standalone pill.
@@ -325,7 +325,7 @@ pub(super) fn draw_scrollbar(
 }
 
 /// Rows of context the form scroll keeps past the focused line while content
-/// remains (cloudy-tui: the cursor never rests against the viewport edge).
+/// remains (the cursor never rests against the viewport edge).
 const SCROLL_PAD: usize = 3;
 
 /// Render a form pane's assembled lines into `inner`, scrolled so the focused
@@ -413,7 +413,7 @@ pub(super) fn draw_selector_list(
 /// (another hint follows in the same rail) vs `└` (closes it, or the lone-hint
 /// case with nothing to connect); wrapped continuation lines keep the text at
 /// col 2 and carry `│` at col 0 while the rail is still open, blank once it has
-/// closed (cloudy-tui Stacked hints).
+/// closed.
 ///
 /// The one rail drawer: the Usage tab's `status` block and the Fallback card's
 /// blocked-reason pills both render through it, so the two can't drift apart.
@@ -486,7 +486,7 @@ pub(super) fn help_tooltip_lines(text: &str, width: usize) -> Vec<Line<'static>>
 }
 
 /// Invalid-input twin of [`help_tooltip_lines`]: both the leader and the
-/// reason render in `DANGER` (cloudy-tui Invalid-input tooltip).
+/// reason render in `DANGER`.
 pub(super) fn invalid_tooltip_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     tooltip_lines(text, width, theme::danger(), theme::danger())
 }

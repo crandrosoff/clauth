@@ -41,7 +41,7 @@ use super::panes::{
 /// Width of the key column: the longest keys (`allow extra usage` /
 /// `extra usage spent`, 17). Keys pad to it, then [`KEY_GUTTER`] separates them
 /// from the value — so every row's value starts at the same column (the Config
-/// tab is a cloudy-tui tight chip group).
+/// tab is a tight chip group).
 const KEY_W: usize = 17;
 /// Fixed gap between the padded key and the value column.
 const KEY_GUTTER: usize = 2;
@@ -815,7 +815,7 @@ fn burn_horizon_line(
     line
 }
 
-/// A cloudy-tui cycle row: `key  label  [active]  other`. Options are bare
+/// A cycle row: `key  label  [active]  other`. Options are bare
 /// labels separated by 2-space gaps; the active option is `ACCENT` and wraps in
 /// `[]` only while the row holds the cursor, the rest stay `TEXT_FAINT`. `space`
 /// cycles the value in place. Reads as the segmented control it is, instead of
@@ -884,7 +884,7 @@ fn home_tab_lines(
     out
 }
 
-/// A cloudy-tui Disabled row for a cycle setting another toggle makes inert: the
+/// A disabled row for a cycle setting another toggle makes inert: the
 /// whole row (caret, key, current value) renders `TEXT_FAINT`, no bracket
 /// highlight — just the current value. Focusable but inert (the key handler
 /// no-ops it), so `TEXT_FAINT` keeps meaning "can't touch this". The `draw` loop
@@ -929,9 +929,9 @@ fn dimmed_toggle_row(key: &str, on: bool, selected: bool) -> Line<'static> {
     ])
 }
 
-/// A cloudy-tui toggle row: `key  ─●` / `key  ○─`. A pure on/off boolean is a
+/// A toggle row: `key  ─●` / `key  ○─`. A pure on/off boolean is a
 /// toggle, not a 2-option cycle — `on`/`off` labels in brackets read as a cycle,
-/// not the switch the contract draws. Knob `ACCENT` when on, `TEXT_FAINT` off.
+/// not a switch. Knob `ACCENT` when on, `TEXT_FAINT` off.
 fn toggle_row(arrow: Span<'static>, key: &str, on: bool, row_selected: bool) -> Line<'static> {
     let (glyph, style) = if on {
         (theme::toggle_on(), theme::accent())

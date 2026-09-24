@@ -738,7 +738,7 @@ fn detail_row(
         // ("press again to disable"). Enabling is harmless and immediate, so
         // it takes the accent, bold-on-select treatment shared with
         // `Login`/`Create` instead. Dimmed/inert while active or a live session
-        // is open — cloudy-tui disabled row (mirrors the Fallback tab's `max
+        // is open — a disabled row (mirrors the Fallback tab's `max
         // spend`): the whole row renders faint and the key handler no-ops
         // (`run_config_row`'s gate in `app.rs`).
         ConfigRow::Disabled => {

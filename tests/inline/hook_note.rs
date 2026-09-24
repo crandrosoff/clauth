@@ -77,7 +77,7 @@ const SWITCHED: &str =
     "clauth note: the active profile for this session switched from `kerry` to `cld`.";
 
 /// The shipped copy, byte for byte. All three spellings counted against
-/// opus-4-8 via cloudify's `token-count.mjs` on their placeholder spellings —
+/// opus-4-8 on their placeholder spellings —
 /// `old`/`new`/`100` standing in for the names and figure, the `%` literal:
 /// ``clauth note: session resumed under `new`; earlier turns ran under `old`.``
 /// counts 25, ``clauth note: the active profile for this session switched from

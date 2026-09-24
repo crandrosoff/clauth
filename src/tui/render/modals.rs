@@ -161,11 +161,11 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, title: &str, lines: Vec<Line<'_
 ///
 /// A terminal too short for the whole modal used to drop the tail with nothing
 /// on screen saying so. The rows now go through the shared scrolled-lines
-/// helper, which draws the overflow scrollbar the cloudy-tui contract makes the
-/// only legal overflow signal. The focus block handed to it is the viewport
-/// window itself — "keep rows `scroll..scroll + viewport` on screen" — which
-/// resolves to exactly `scroll` once clamped. A modal that fits scrolls by 0 and
-/// draws no bar, so it renders as before.
+/// helper, which draws the overflow scrollbar, the one legal overflow signal on
+/// a surface that scrolls. The focus block handed to it is the viewport window
+/// itself — "keep rows `scroll..scroll + viewport` on screen" — which resolves
+/// to exactly `scroll` once clamped. A modal that fits scrolls by 0 and draws
+/// no bar, so it renders as before.
 fn draw_modal_scrolled(
     frame: &mut Frame<'_>,
     area: Rect,

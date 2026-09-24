@@ -7,6 +7,7 @@ use crate::profile::AppState;
 use crate::testutil::HomeSandbox;
 use crate::testutil::hold_rotation_lock;
 use crate::testutil::through_handle;
+use crate::testutil::write_codex_state;
 
 const SWITCH_PUBLISH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1301,10 +1302,7 @@ fn validate_profile_name_accepts_email_rejects_path_chars() {
 #[test]
 fn a_name_the_other_harness_holds_is_refused_naming_the_holder() {
     let _home = HomeSandbox::new();
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    std::fs::create_dir_all(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     save_app_state(&crate::profile::AppState {
         profiles: vec!["cl".into()],
         ..Default::default()
@@ -1334,10 +1332,7 @@ fn a_name_the_other_harness_holds_is_refused_naming_the_holder() {
 #[test]
 fn the_own_roster_duplicate_keeps_the_rename_exemption() {
     let _home = HomeSandbox::new();
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    std::fs::create_dir_all(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     save_app_state(&crate::profile::AppState {
         profiles: vec!["cl".into()],
         ..Default::default()
@@ -1359,10 +1354,7 @@ fn the_own_roster_duplicate_keeps_the_rename_exemption() {
 #[test]
 fn the_cross_harness_half_stands_alone_for_the_capture_flow() {
     let _home = HomeSandbox::new();
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    std::fs::create_dir_all(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
     save_app_state(&crate::profile::AppState {
         profiles: vec!["cl".into()],
         ..Default::default()
@@ -1377,12 +1369,6 @@ fn the_cross_harness_half_stands_alone_for_the_capture_flow() {
 }
 
 // ── codex CRUD: switch + delete against codex-profiles.toml ────────────────
-
-fn write_codex_state(body: &str) {
-    let dir = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&dir).expect("mkdir .clauth");
-    std::fs::write(dir.join("codex-profiles.toml"), body).expect("write codex state");
-}
 
 /// A codex switch writes the codex file's active slot and nothing anywhere
 /// else — decision 4's per-harness independence, observed rather than assumed.
@@ -1470,7 +1456,7 @@ fn a_failed_codex_dir_removal_keeps_the_record() {
     use std::os::unix::fs::PermissionsExt;
 
     let _home = HomeSandbox::new();
-    write_codex_state("profiles = [\"cx\"]\n");
+    crate::testutil::write_codex_roster(&["cx"]);
     let dir = profile_dir(&crate::profile::ProfileName::from("cx")).expect("profile dir");
     crate::profile::mkdir_700(&dir).expect("mkdir profile");
     let profiles_root = dir.parent().expect("profiles root").to_path_buf();
@@ -1504,7 +1490,7 @@ fn a_failed_codex_dir_removal_keeps_the_record() {
 #[test]
 fn delete_codex_refuses_a_dir_the_roster_no_longer_owns() {
     let _home = HomeSandbox::new();
-    write_codex_state("profiles = [\"other\"]\n");
+    crate::testutil::write_codex_roster(&["other"]);
     let dir = profile_dir(&crate::profile::ProfileName::from("cx")).expect("profile dir");
     crate::profile::mkdir_700(&dir).expect("mkdir profile");
     std::fs::write(dir.join("credentials.json"), b"{}").expect("write foreign login");
@@ -1554,7 +1540,7 @@ fn a_noop_codex_switch_leaves_the_file_untouched() {
 #[test]
 fn delete_codex_refuses_a_live_session_unforced() {
     let home = HomeSandbox::new();
-    write_codex_state("profiles = [\"busy\"]\n");
+    crate::testutil::write_codex_roster(&["busy"]);
     let sessions = home
         .home()
         .join(".clauth")
@@ -6189,9 +6175,7 @@ fn codex_browser_login_preflight_refuses_only_a_cross_harness_clash() {
     .expect("save claude state");
 
     // A codex roster holding "cx" (a re-auth target).
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    std::fs::write(clauth.join("codex-profiles.toml"), "profiles = [\"cx\"]\n")
-        .expect("write codex state");
+    crate::testutil::write_codex_roster(&["cx"]);
 
     // A claude-held name refuses at the pre-flight (no browser).
     let err = codex_browser_preflight("cl").expect_err("cross-harness clash refuses");

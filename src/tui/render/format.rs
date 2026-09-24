@@ -428,10 +428,9 @@ fn month_label(month: u32) -> &'static str {
         .unwrap_or("jan")
 }
 
-/// Relative age of an epoch-ms timestamp per the cloudy-tui Time-formatting
-/// contract: single largest unit under 30 days (`4m ago`, `2h ago`, `3d ago`,
-/// `2w ago`); the local prose stamp (`2026-04-12 14:03:07`) at 30 days and
-/// beyond. `< 1 minute` reads `just now`.
+/// Relative age of an epoch-ms timestamp: single largest unit under 30 days
+/// (`4m ago`, `2h ago`, `3d ago`, `2w ago`); the local prose stamp
+/// (`2026-04-12 14:03:07`) at 30 days and beyond. `< 1 minute` reads `just now`.
 pub(super) fn relative_age(epoch_ms: u64) -> String {
     let now = crate::usage::now_ms();
     let age_secs = (now.saturating_sub(epoch_ms) / 1000) as i64;

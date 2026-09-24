@@ -11412,9 +11412,7 @@ fn seed_codex_walk(
     toml: &str,
     readings: &[(&str, &str)],
 ) -> crate::codex_profiles::CodexState {
-    let clauth = crate::profile::clauth_dir().expect("clauth dir");
-    crate::profile::mkdir_700(&clauth).expect("mkdir .clauth");
-    std::fs::write(clauth.join("codex-profiles.toml"), toml).expect("write codex state");
+    crate::testutil::write_codex_state(toml);
     for (name, body) in readings {
         let info = crate::usage::map_codex_usage(body, now_epoch_secs()).expect("maps");
         state

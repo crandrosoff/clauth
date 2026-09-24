@@ -1622,11 +1622,10 @@ fn the_block_leads_its_own_line_and_never_abuts_the_fetch_state() {
 }
 
 /// Two or more fix hints in the same status block connect into one rail
-/// (`├`/`│`/`└`, cloudy-tui Stacked hints) instead of floating as separate
-/// detached `└` lines: a pill row sitting strictly between the first and last
-/// hint bridges the rail at col 0 (`│` + blank padding to the value column),
-/// every hint but the last branches off with `├`, and only the last closes
-/// the rail with `└`.
+/// (`├`/`│`/`└`) instead of floating as separate detached `└` lines: a pill
+/// row sitting strictly between the first and last hint bridges the rail at
+/// col 0 (`│` + blank padding to the value column), every hint but the last
+/// branches off with `├`, and only the last closes the rail with `└`.
 #[test]
 fn status_lines_connects_two_plus_hints_into_one_rail() {
     use crate::usage::KickBlock;
@@ -1736,7 +1735,7 @@ fn status_lines_single_hint_has_no_rail() {
 }
 
 /// A wrapped non-last hint carries the rail `│` on its continuation lines, so a
-/// multi-line diagnostic reads as one unbroken stroke (cloudy-tui Stacked hints).
+/// multi-line diagnostic reads as one unbroken stroke.
 /// Guards `rail_hint_lines`' `cont = "│ "` branch — the width-120 rail test never
 /// wraps into it, so a mutation to blank continuations otherwise stays green.
 #[test]
@@ -1788,7 +1787,7 @@ fn status_lines_wrapped_non_last_hint_bridges_its_continuation() {
 }
 
 /// A no-hint row sitting AFTER the rail has closed keeps its blank value-column
-/// pad, never a stray `│` below the closing `└` (cloudy-tui Stacked hints).
+/// pad, never a stray `│` below the closing `└`.
 /// Guards `render_status_rows`' `seen < hint_count` upper bound on the bridge.
 #[test]
 fn status_lines_no_hint_row_after_closed_rail_stays_unbridged() {

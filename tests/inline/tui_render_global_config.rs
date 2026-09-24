@@ -1,5 +1,5 @@
 //! Config-tab row geometry. Every blurred row's value starts at the same
-//! column (the Config tab is a cloudy-tui tight chip group); cycle options are
+//! column (the Config tab is a tight chip group); cycle options are
 //! bare labels on 2-space gaps with the active option bracketed only on focus;
 //! an on/off boolean renders as a toggle, not a 2-option cycle.
 
@@ -264,7 +264,7 @@ fn auto_start_queue_renders_as_a_toggle_with_both_hints_pinned() {
     );
 }
 
-/// `refresh spent` is a pure on/off boolean — a cloudy-tui toggle (`─●` / `○─`),
+/// `refresh spent` is a pure on/off boolean — a toggle (`─●` / `○─`),
 /// not a 2-option cycle row (`[on]  off`).
 #[test]
 fn refresh_spent_renders_as_a_toggle_not_a_cycle() {
@@ -302,7 +302,7 @@ fn refresh_spent_renders_as_a_toggle_not_a_cycle() {
 }
 
 /// With no account opted into `auto_start` there is nothing to space, so the
-/// queue row renders as a cloudy-tui disabled row (whole content faint, knob
+/// queue row renders as a disabled row (whole content faint, knob
 /// included) — it must never read as an armed setting. One opted-in account
 /// makes it a live toggle again.
 #[test]
@@ -343,7 +343,7 @@ fn auto_start_queue_dims_when_no_account_opts_in() {
 // ── `money spent` dims while inert (spend budget off) ────────────────────────
 
 /// With `spend budget` off nothing spends, so `money spent` decides no halt.
-/// It renders as a cloudy-tui disabled row (whole content faint) so it never
+/// It renders as a disabled row (whole content faint) so it never
 /// reads as an armed setting; flip the toggle on and it becomes a live cycle.
 #[test]
 fn money_spent_dims_when_spend_budget_is_off() {
@@ -679,7 +679,7 @@ fn value_rows_interpolate_the_live_value_into_their_hint() {
 // ── burn floor / horizon dim while inert (burn-aware off) ─────────────────────
 
 /// Both burn-aware tunables gate a projection that never runs under static
-/// switch mode, so they render as cloudy-tui disabled rows (whole content faint)
+/// switch mode, so they render as disabled rows (whole content faint)
 /// while burn-aware is off, and become live cycles once it is on.
 #[test]
 fn burn_tunables_dim_when_burn_aware_is_off() {
@@ -893,7 +893,7 @@ fn reset_display_row_shows_all_three_shapes() {
 }
 
 /// The notation decides nothing while resets render as a bare countdown, so the
-/// row is a cloudy-tui disabled row until a clock shows — and live after.
+/// row is a disabled row until a clock shows — and live after.
 #[test]
 fn clock_row_dims_until_a_reset_renders_a_clock() {
     let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
