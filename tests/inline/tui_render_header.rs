@@ -202,8 +202,8 @@ fn header_height_is_always_three() {
 // columns wide offers it `W - 10`. The indicator `● status.claude.ai` is 18
 // cells (dot, space, 16-char feed) plus a 3-cell reserve, so the gauge is
 // fitted to `W - 31` and the indicator is gated on the gauge as rendered. No
-// account count and no `ACCOUNTS ─ …` label takes part: both live on the
-// accounts panel's title.
+// account count and no harness filter name takes part: both live on the
+// accounts panel's title row.
 
 #[test]
 fn row1_is_the_gauge_and_the_status_indicator_alone_when_wide() {
@@ -488,8 +488,8 @@ fn the_status_indicator_drops_rather_than_clipping_when_the_row_runs_short() {
 //
 // The by-harness counts moved onto the accounts panel's title, which carries
 // them as its title-right meta slot (`tui_render_overview.rs` pins that slot's
-// own shed). These two pins are the guard against a count or an `ACCOUNTS ─ …`
-// label coming back to a header row.
+// own shed). These two pins are the guard against a count, an `ACCOUNTS`
+// label or a harness filter name coming back to a header row.
 
 /// No header row names the accounts at any width, tab or harness filter: the
 /// sweep walks every seam the old count line had — the label, the count, each
@@ -543,9 +543,9 @@ fn no_header_row_counts_accounts_at_any_width_tab_or_filter() {
 }
 
 /// The word `ACCOUNTS` belongs to the accounts panel's title alone: a full
-/// Overview frame carries it once, on the panel's top border. A count or a
-/// second `ACCOUNTS ─ …` label one row above that border — where the header
-/// used to carry both — reds this.
+/// Overview frame carries it once, on the panel's top border. A second
+/// `ACCOUNTS` label one row above that border, where the header used to carry
+/// the account count, reds this.
 #[test]
 fn the_word_accounts_renders_on_the_panel_title_alone() {
     let _home = crate::testutil::HomeSandbox::new();

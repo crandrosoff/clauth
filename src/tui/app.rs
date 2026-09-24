@@ -1633,8 +1633,8 @@ impl HarnessFilter {
     pub(crate) fn shows_codex(self) -> bool {
         !matches!(self, HarnessFilter::Claude)
     }
-    /// Harness name for the accounts panel's title; `None` while both harnesses
-    /// show, so the unfiltered title carries no name.
+    /// Harness name for the accounts panel's left meta slot; `None` while both
+    /// harnesses show, so the unfiltered panel renders no left slot.
     pub(crate) fn label_name(self) -> Option<&'static str> {
         match self {
             HarnessFilter::All => None,

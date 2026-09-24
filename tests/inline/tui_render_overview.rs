@@ -2231,9 +2231,10 @@ fn deepseek_amount_w_spans_all_currencies() {
     );
 }
 
-/// `c` cycles the Overview's harness filter, and the accounts panel's title
-/// names the harness the panel is showing. Nameless while both show, so the
-/// unfiltered title carries only the eyebrow and the border rule.
+/// `c` cycles the Overview's harness filter, and `label_name` names the
+/// harness the panel is showing for the left meta slot beside the bare
+/// `ACCOUNTS` title. Nameless while both show, so the unfiltered panel renders
+/// no left slot.
 #[test]
 fn the_harness_filter_cycles_and_names_itself() {
     use crate::tui::app::HarnessFilter;
@@ -2258,8 +2259,9 @@ fn the_harness_filter_cycles_and_names_itself() {
     assert!(HarnessFilter::All.shows_claude() && HarnessFilter::All.shows_codex());
 }
 
-/// The accounts panel's top border row, which carries the panel title and its
-/// title-right meta slot.
+/// The accounts panel's top border row, which carries the panel title, its
+/// left meta slot (the harness filter) and its title-right meta slot (the
+/// counts).
 fn accounts_title_row(app: &App, width: u16) -> String {
     let mut term =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 8)).expect("terminal");
@@ -2268,19 +2270,18 @@ fn accounts_title_row(app: &App, width: u16) -> String {
     crate::testutil::buffer_rows(term.backend().buffer())[0].clone()
 }
 
-/// The accounts panel's title carries the harness filter: the plain eyebrow
-/// unfiltered, the harness name after it under the filter. The border rule
-/// supplies the trailing dashes, and the name keeps its own case — only the
-/// eyebrow is uppercased.
+/// The accounts panel's title row carries the harness filter: the bare
+/// eyebrow unfiltered, the harness name one space after it under the filter,
+/// as a left meta slot with no border dash between the two. The name keeps its
+/// own case; only the eyebrow is uppercased.
 ///
-/// The panel's row is `╭` + ` TITLE ` + rule + ` meta ` + `─` + `╮`, so the
-/// one-claude fixture's 8-cell meta needs `rule = width - title - 8 - 7 >= 3`
-/// with the title 8 cells unfiltered and 17 filtered: at width 25 the
-/// unfiltered rule is 2 and the filtered one has none at all, so the slot
-/// sheds a fortiori — which is what keeps these three rows the title and its
-/// rule alone.
+/// The panel's row is `╭` + ` TITLE ` + `left ` + rule + ` meta ` + `─` + `╮`,
+/// so the one-claude fixture's 8-cell meta needs `rule = width - 8 - left -
+/// 8 - 7 >= 3`: at width 25 the unfiltered rule is 2 and a filtered one is
+/// shorter still, so the counts slot sheds in all three rows and they read as
+/// the title, its left slot and the rule alone.
 #[test]
-fn the_accounts_title_carries_the_harness_filter() {
+fn the_accounts_title_row_carries_the_harness_filter() {
     use crate::tui::app::HarnessFilter;
     let _home = crate::testutil::HomeSandbox::new();
     let mut app = App::new(config_with(
@@ -2298,16 +2299,154 @@ fn the_accounts_title_carries_the_harness_filter() {
     app.harness_filter = HarnessFilter::Claude;
     assert_eq!(
         accounts_title_row(&app, 25),
-        "╭ ACCOUNTS ─ claude ────╮",
+        "╭ ACCOUNTS claude ──────╮",
         "the claude filter names the harness it shows"
     );
 
     app.harness_filter = HarnessFilter::Codex;
     assert_eq!(
         accounts_title_row(&app, 25),
-        "╭ ACCOUNTS ─ codex ─────╮",
+        "╭ ACCOUNTS codex ───────╮",
         "the codex filter names the harness it shows"
     );
+}
+
+/// The counts slot gives way before the filter slot: its give-way arithmetic
+/// counts the filter's cells, so a filtered panel needs `rule = width - 8 -
+/// left - 18 - 7 >= 3` under the `3 claude · 2 codex` meta, where `left` is the
+/// name plus its trailing space. That holds the counts at 43 under `claude `
+/// and 42 under `codex `; one column narrower the counts drop whole and the
+/// filter stays, since a filtered list under a bare title would misread it.
+/// The 36 and 35 rows are the unfiltered shed test's widths: the unfiltered
+/// panel holds its counts at 36, and a filtered one has shed them at both.
+#[test]
+fn the_counts_slot_sheds_before_the_filter_slot() {
+    use crate::tui::app::HarnessFilter;
+    let _home = crate::testutil::HomeSandbox::new();
+    crate::testutil::write_codex_roster(&["cx1", "cx2"]);
+    let mut app = App::new(config_with(
+        vec![
+            profile("cl1", 80.0, 10.0, 3_600),
+            profile("cl2", 80.0, 20.0, 3_600),
+            profile("cl3", 80.0, 30.0, 3_600),
+        ],
+        None,
+        vec![],
+    ));
+    assert_eq!(
+        app.codex_rows.len(),
+        2,
+        "fixture control: the roster loaded"
+    );
+
+    app.harness_filter = HarnessFilter::Claude;
+    assert_eq!(
+        accounts_title_row(&app, 43),
+        "╭ ACCOUNTS claude ─── 3 claude · 2 codex ─╮",
+        "at 43 the counts keep their three rule cells after the claude slot"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 42),
+        "╭ ACCOUNTS claude ───────────────────────╮",
+        "one column narrower the counts are gone and the claude slot stays"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 36),
+        "╭ ACCOUNTS claude ─────────────────╮",
+        "at 36 the claude slot stays without the counts"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 35),
+        "╭ ACCOUNTS claude ────────────────╮",
+        "at 35 the claude slot stays without the counts"
+    );
+
+    app.harness_filter = HarnessFilter::Codex;
+    assert_eq!(
+        accounts_title_row(&app, 42),
+        "╭ ACCOUNTS codex ─── 3 claude · 2 codex ─╮",
+        "at 42 the counts keep their three rule cells after the codex slot"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 41),
+        "╭ ACCOUNTS codex ───────────────────────╮",
+        "one column narrower the counts are gone and the codex slot stays"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 36),
+        "╭ ACCOUNTS codex ──────────────────╮",
+        "at 36 the codex slot stays without the counts"
+    );
+    assert_eq!(
+        accounts_title_row(&app, 35),
+        "╭ ACCOUNTS codex ─────────────────╮",
+        "at 35 the codex slot stays without the counts"
+    );
+}
+
+/// The filter slot is data, styled like the title-right slot: `TEXT_DIM`,
+/// never bold, never italic. The eyebrow before it keeps the first panel's
+/// title treatment (`ACCENT_2`, italic, bold while focused), so the two read
+/// as a title and a note about it rather than one run of title text.
+#[test]
+fn the_filter_slot_is_dim_data_and_the_eyebrow_keeps_its_title_style() {
+    use crate::tui::app::HarnessFilter;
+    let _home = crate::testutil::HomeSandbox::new();
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
+    let mut app = App::new(config_with(
+        vec![profile("cl1", 80.0, 10.0, 3_600)],
+        None,
+        vec![],
+    ));
+
+    for (filter, name) in [
+        (HarnessFilter::Claude, "claude"),
+        (HarnessFilter::Codex, "codex"),
+    ] {
+        app.harness_filter = filter;
+        let mut term =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 8)).expect("terminal");
+        term.draw(|f| draw_overview_accounts(f, f.area(), &app))
+            .expect("draw");
+        let buf = term.backend().buffer();
+        let row = crate::testutil::buffer_rows(buf)[0].clone();
+        assert!(
+            row.starts_with(&format!("╭ ACCOUNTS {name} ")),
+            "{filter:?}: the filter slot follows the eyebrow: {row:?}"
+        );
+        let eyebrow = "╭ ".chars().count();
+        let start = "╭ ACCOUNTS ".chars().count();
+
+        for x in start..start + name.len() {
+            let cell = &buf.content[x];
+            assert_eq!(
+                cell.fg,
+                theme::text_dim_color(),
+                "{filter:?}: filter cell {x} is TEXT_DIM in {row:?}"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "{filter:?}: filter cell {x} is not bold in {row:?}"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::ITALIC),
+                "{filter:?}: filter cell {x} is not italic in {row:?}"
+            );
+        }
+
+        for x in eyebrow..eyebrow + "ACCOUNTS".len() {
+            let cell = &buf.content[x];
+            assert_eq!(
+                cell.fg,
+                theme::accent_2_color(),
+                "{filter:?}: eyebrow cell {x} keeps the first panel's title color"
+            );
+            assert!(
+                cell.modifier.contains(Modifier::ITALIC | Modifier::BOLD),
+                "{filter:?}: eyebrow cell {x} stays italic and bold while focused"
+            );
+        }
+    }
 }
 
 /// The meta slot counts both harnesses whatever the filter shows — the counts
@@ -2336,20 +2475,20 @@ fn the_accounts_meta_slot_counts_both_harnesses_whatever_the_filter_shows() {
     assert_eq!(
         accounts_title_row(&app, 50),
         "╭ ACCOUNTS ───────────────── 3 claude · 2 codex ─╮",
-        "unfiltered: both rosters, the shorter title leaving a longer rule"
+        "unfiltered: both rosters, no filter slot leaving a longer rule"
     );
 
     app.harness_filter = HarnessFilter::Claude;
     assert_eq!(
         accounts_title_row(&app, 50),
-        "╭ ACCOUNTS ─ claude ──────── 3 claude · 2 codex ─╮",
+        "╭ ACCOUNTS claude ────────── 3 claude · 2 codex ─╮",
         "the claude filter leaves the counts alone"
     );
 
     app.harness_filter = HarnessFilter::Codex;
     assert_eq!(
         accounts_title_row(&app, 50),
-        "╭ ACCOUNTS ─ codex ───────── 3 claude · 2 codex ─╮",
+        "╭ ACCOUNTS codex ─────────── 3 claude · 2 codex ─╮",
         "the codex filter leaves the counts alone"
     );
 }

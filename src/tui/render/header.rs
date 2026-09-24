@@ -5,9 +5,9 @@
 //! Row 0 reads `clauth vX.Y.Z` on the left with the herdr tag between them,
 //! and the `[ daemon ]` health chip on the right edge; it sheds the tag first,
 //! then the chip. Row 1 carries the active-profile usage gauge and the status
-//! indicator, nothing else: the account counts and the harness filter live in
-//! the accounts panel's title. The collapse ladder drops the usage bar before
-//! the name.
+//! indicator, nothing else: the account counts and the harness filter live on
+//! the accounts panel's title row, as meta slots beside the bare `ACCOUNTS`
+//! title. The collapse ladder drops the usage bar before the name.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -257,13 +257,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // ── Row 1: [gauge] ...... ● feed ─────────────────────────────────────
     // The active profile's gauge, left-aligned, and the status indicator, the
     // only thing right-aligned, across an elastic gap. The account counts and
-    // the harness filter left this row for the accounts panel's own title,
-    // which carries the filter name and counts the rosters as its title-right
-    // meta slot: this row stays counts-free at every width. The indicator
-    // drops whole, head and feed together, since a dot left to render clips
-    // the feed mid-word and a half-spelled source says less than none. Its
-    // gate is charged the gauge as rendered, so the gauge's own ladder gives
-    // way before the indicator does.
+    // the harness filter left this row for the accounts panel's title row,
+    // whose meta slots carry them beside the bare `ACCOUNTS` title (the filter
+    // name left, the roster counts right): this row stays counts-free at every
+    // width. The indicator drops whole, head and feed together, since a dot
+    // left to render clips the feed mid-word and a half-spelled source says
+    // less than none. Its gate is charged the gauge as rendered, so the gauge's
+    // own ladder gives way before the indicator does.
     let row1_width = rows[1].width as usize;
     let feed = "status.claude.ai";
     let status_head = "● ";

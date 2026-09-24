@@ -85,15 +85,16 @@ fn harness_counts(app: &App) -> String {
 fn draw_overview_accounts(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // Sole interactive content panel on this screen — always focused.
     let focused = true;
-    // The title carries the harness filter and the meta slot the counts. The
-    // eyebrow is pre-cased because the verbatim builder skips the central
-    // uppercase: the harness name is a name and keeps its own case, so the
-    // title reads `ACCOUNTS ─ codex`.
-    let title = match app.harness_filter.label_name() {
-        Some(name) => format!("ACCOUNTS ─ {name}"),
-        None => "ACCOUNTS".to_string(),
-    };
-    let block = section_box_verbatim_meta(&title, &harness_counts(app), focused, true, area.width);
+    // The eyebrow is pre-cased because the verbatim builder skips the central
+    // uppercase.
+    let block = section_box_verbatim_meta(
+        "ACCOUNTS",
+        app.harness_filter.label_name(),
+        &harness_counts(app),
+        focused,
+        true,
+        area.width,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

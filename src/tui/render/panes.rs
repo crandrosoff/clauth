@@ -640,27 +640,38 @@ pub(super) fn section_box_verbatim(title: &str, focused: bool, first: bool) -> B
 /// single dash between the two reads as part of the title's own rule run.
 const META_RULE_MIN: usize = 3;
 
-/// [`section_box_verbatim`] with a title-right meta slot: a short count/state
-/// label in the border break just before the top-right corner, rendered
-/// `… meta ─╮`. The slot is data — `TEXT_DIM`, never bold, never italic — and
-/// the dashes either side keep the border token.
+/// [`section_box_verbatim`] with two meta slots: `left` inside the title
+/// inset one space after the title (`╭ TITLE left ───`), `meta` in the border
+/// break just before the top-right corner (`… meta ─╮`). Both are data styled
+/// alike, `TEXT_DIM` and never bold or italic, and the dashes around them keep
+/// the border token.
 ///
-/// The slot gives way rather than colliding with the title: it renders only
-/// while `width` leaves it at least [`META_RULE_MIN`] border cells of rule
-/// after the title's own inset, since the title names the panel and the meta
-/// only describes what is in it. An empty `meta` renders the plain box too.
+/// Only the right slot gives way: it renders while `width` leaves it at least
+/// [`META_RULE_MIN`] border cells of rule after the title and the left slot,
+/// since the title names the panel and the meta only describes what is in it.
+/// The left slot never gives way to the right one, because it qualifies what
+/// the title names; only a panel too narrow for the title line itself clips
+/// that line from the right, the left slot first. An empty `meta` renders no
+/// right slot.
 pub(super) fn section_box_verbatim_meta(
     title: &str,
+    left: Option<&str>,
     meta: &str,
     focused: bool,
     first: bool,
     width: u16,
 ) -> Block<'static> {
-    // `╭` + ` title ` + rule + ` meta ` + the slot's closing dash + `╮`.
-    let insets = 2 + (title.chars().count() + 2) + (meta.chars().count() + 3);
+    let left: Vec<Span<'static>> = left
+        .map(|name| vec![Span::styled(format!("{name} "), theme::dim())])
+        .unwrap_or_default();
+    // `╭` + ` title ` + `left ` + rule + ` meta ` + the slot's closing dash + `╮`.
+    let insets = 2
+        + (title.chars().count() + 2)
+        + left.iter().map(Span::width).sum::<usize>()
+        + (meta.chars().count() + 3);
     let rule = (width as usize).saturating_sub(insets);
     let meta = (!meta.is_empty() && rule >= META_RULE_MIN).then_some(meta);
-    section_box_impl(title, focused, first, false, Vec::new(), meta)
+    section_box_impl(title, focused, first, false, left, meta)
 }
 
 /// [`section_box`] with a live braille spinner `frame` appended inside the title
