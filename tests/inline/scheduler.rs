@@ -2989,6 +2989,124 @@ fn run_fetch_consumes_the_weekly_reset_mark_only_on_a_fired_kick() {
     );
 }
 
+/// The scheduler's own record of a window exhaustion, wire to grade: `run_fetch`
+/// kicks, a real exhaustion 429 comes back (`testutil::window_exhaustion_429_headers`),
+/// and the block it records carries the limiter's `rejected` verdict and the
+/// window's reset; the next tick's kick re-tests the standing block, its 429
+/// makes the block switch-grade, and the fallback walk may move off the account.
+/// Covers the `note_kick_outcome` call site in `run_fetch`, the one place a kick
+/// block is recorded.
+#[test]
+fn run_fetch_records_a_window_exhaustion_429_as_a_switch_grade_block() {
+    use crate::profile::{AppConfig, AppState, ProfileName};
+    use crate::usage::{UsageInfo, UsageWindow, epoch_secs_to_iso};
+
+    let home = crate::testutil::HomeSandbox::new();
+    let now_before = crate::usage::now_epoch_secs();
+    let reset = now_before + 6_073;
+    let limiter = crate::testutil::window_exhaustion_429_headers(reset, now_before + 383_473);
+    let usage_body = format!(
+        r#"{{"five_hour":{{"utilization":100.0,"resets_at":"{}"}}}}"#,
+        epoch_secs_to_iso(reset),
+    );
+    // `max` sits above the two kicks plus their fetches, so a stray rotation or
+    // a third kick would be recorded rather than refused a socket.
+    let (base, server) = crate::testutil::serve_endpoints_raw_with_headers(8, move |path, _| {
+        if path.starts_with("/v1/messages") {
+            (429, limiter.clone(), String::new())
+        } else if path.starts_with("/api/oauth/usage") {
+            (200, Vec::new(), usage_body.clone())
+        } else if path.starts_with("/api/oauth/profile") {
+            (200, Vec::new(), "{}".to_string())
+        } else {
+            (404, Vec::new(), "{}".to_string())
+        }
+    });
+    let _endpoints = crate::testutil::EndpointSandbox::new(&home, &base);
+
+    let app_config = AppConfig {
+        state: AppState::default(),
+        profiles: vec![auto_start_queue_profile("a")],
+    };
+    let entry = super::collect_tokens(&app_config)
+        .into_iter()
+        .next()
+        .expect("queued token");
+    let config = Arc::new(RankedMutex::new(app_config));
+    let store: super::UsageStore = Arc::new(RankedMutex::new(HashMap::from([(
+        "a".to_string(),
+        UsageInfo {
+            five_hour: Some(UsageWindow {
+                utilization: 100.0,
+                resets_at: Some(epoch_secs_to_iso(reset)),
+            }),
+            ..UsageInfo::default()
+        },
+    )])));
+    let refetch = Arc::new(RankedMutex::new(HashSet::new()));
+    let activity = Arc::new(RankedMutex::new(HashMap::new()));
+    let streaks = Arc::new(RankedMutex::new(HashMap::new()));
+    let blocks: super::KickBlocks = Arc::new(RankedMutex::new(HashMap::new()));
+    // The weekly-reset mark makes the first tick kick on a live window; the
+    // block that kick records makes the second tick kick again.
+    let weekly_reset_kicks: super::WeeklyResetKicks =
+        Arc::new(RankedMutex::new(HashSet::from([ProfileName::from("a")])));
+    let queue = crate::usage::new_auto_start_queue_state();
+    let tick = |entry| {
+        let _ = super::run_fetch(
+            &config,
+            entry,
+            &store,
+            &refetch,
+            &activity,
+            &streaks,
+            &blocks,
+            &weekly_reset_kicks,
+            &HashSet::new(),
+            &queue,
+            REFRESH_INTERVAL_MS,
+        );
+    };
+    let a = ProfileName::from("a");
+
+    tick(entry.clone());
+    assert_eq!(
+        super::kick_block(&blocks, &a).map(|b| (b.streak, b.rejected, b.until)),
+        Some((1, true, Some(reset))),
+        "the first exhaustion 429 records the limiter's rejection and the window's reset"
+    );
+    assert!(
+        super::kick_rejected_names(&blocks, now_before).is_empty(),
+        "one exhaustion kick must not move the chain"
+    );
+
+    crate::usage::reset_request_slots(); // don't sleep out the 5s host spacing
+    tick(entry);
+    assert_eq!(
+        super::kick_block(&blocks, &a).map(|b| (b.streak, b.rejected, b.until)),
+        Some((2, true, Some(reset))),
+        "the re-test's 429 grows the same block"
+    );
+    assert_eq!(
+        super::kick_rejected_names(&blocks, crate::usage::now_epoch_secs()),
+        vec![a],
+        "the second exhaustion kick makes the block switch-grade"
+    );
+
+    let kicks: Vec<String> = server
+        .join()
+        .expect("listener")
+        .iter()
+        .map(|raw| crate::testutil::request_path(raw))
+        .filter(|path| path.starts_with("/v1/"))
+        .collect();
+    assert_eq!(
+        kicks,
+        vec!["/v1/messages?beta=true".to_string(); 2],
+        "one kick per tick and no token refresh"
+    );
+}
+
 /// The arming path production uses runs through the drain's config read: a
 /// FRESH rolled-over outcome arms the mark for the profile the CONFIG says is
 /// opted in. Guards the `(is_active, auto_start)` plumbing
@@ -3136,12 +3254,32 @@ fn kick_block_backoff_decays_toward_the_advertised_ceiling() {
 
 /// Only a switch-grade block moves the fallback chain: the limiter's own
 /// `rejected` verdict, ≥2 consecutive kicks, ceiling still ahead. Anything
-/// weaker gets the pill + backoff but never rotates accounts.
+/// weaker gets the pill + backoff but never rotates accounts. The block the
+/// scheduler folds from a window exhaustion's 429 metadata (what
+/// `a_captured_window_exhaustion_429_carries_the_limiters_rejection` hands
+/// back) crosses the line on its second kick, never its first.
 #[test]
 fn only_a_switch_grade_kick_block_rotates_the_chain() {
-    use super::{KickBlock, KickBlocks, kick_block_switch_grade, kick_rejected_names};
+    use super::{
+        KickBlock, KickBlocks, kick_block_after_429, kick_block_switch_grade, kick_rejected_names,
+    };
 
     let now = 3_000_000;
+    let exhausted = crate::oauth::KickRateLimit {
+        rejected: true,
+        until_epoch_secs: Some(now + 6_073),
+    };
+    let first = kick_block_after_429(None, &exhausted, now);
+    assert!(
+        !kick_block_switch_grade(&first, now),
+        "one exhaustion kick must not move the chain"
+    );
+    let second = kick_block_after_429(Some(first), &exhausted, now + 10);
+    assert!(
+        kick_block_switch_grade(&second, now + 10),
+        "a second exhaustion kick must be switch-grade"
+    );
+
     let grade = KickBlock {
         streak: 2,
         rejected: true,
@@ -3247,6 +3385,11 @@ fn kick_block_persists_and_clears_by_outcome() {
     assert_eq!(
         kick_block(&blocks, &crate::profile::ProfileName::from("kitty")).map(|b| b.streak),
         Some(2)
+    );
+    assert_eq!(
+        super::kick_rejected_names(&blocks, now + 30),
+        vec![crate::profile::ProfileName::from("kitty")],
+        "two 429s carrying the limiter's rejection make the block switch-grade"
     );
 
     // A fresh map (new process) resumes the persisted block…

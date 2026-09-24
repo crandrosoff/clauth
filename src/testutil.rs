@@ -403,13 +403,27 @@ pub(crate) fn request_header(raw: &str, name: &str) -> Option<String> {
         })
 }
 
-/// The listener under [`serve_endpoints_recording`]: hands back each request's
-/// RAW text, headers included, for a leg whose correctness is in a header it
-/// sent (a bearer token, an account id, a content type). Same deadlines as the
-/// projections above.
+/// The projection under [`serve_endpoints_recording`]: hands back each
+/// request's RAW text, headers included, for a leg whose correctness is in a
+/// header it sent (a bearer token, an account id, a content type). It is
+/// [`serve_endpoints_raw_with_headers`] replying with no extra headers, so the
+/// same listener and deadlines.
 pub(crate) fn serve_endpoints_raw(
     max: usize,
     reply: impl Fn(&str, usize) -> (u16, String) + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    serve_endpoints_raw_with_headers(max, move |path, i| {
+        let (status, body) = reply(path, i);
+        (status, Vec::new(), body)
+    })
+}
+
+/// [`serve_endpoints_raw`] whose replies also carry response headers, for a
+/// leg that reads what the server said beside the status (the limiter's
+/// rate-limit headers on a kick 429). Same listener, same deadlines.
+pub(crate) fn serve_endpoints_raw_with_headers(
+    max: usize,
+    reply: impl Fn(&str, usize) -> (u16, Vec<(String, String)>, String) + Send + 'static,
 ) -> (String, std::thread::JoinHandle<Vec<String>>) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -476,10 +490,14 @@ pub(crate) fn serve_endpoints_raw(
                 }
             }
             let text = String::from_utf8_lossy(&req).into_owned();
-            let (status, body) = reply(&request_path(&text), i);
+            let (status, headers, body) = reply(&request_path(&text), i);
+            let extra: String = headers
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}\r\n"))
+                .collect();
             let _ = sock.write_all(
                 format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra}\
                      Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 )
@@ -492,6 +510,49 @@ pub(crate) fn serve_endpoints_raw(
         seen
     });
     (format!("http://127.0.0.1:{port}"), handle)
+}
+
+/// The rate-limit header block of a real `/v1/messages` 429 from an exhausted
+/// 5h window, in its captured order (2026-09-24 on a Max 5x account:
+/// `5h-utilization` 1.0, `representative-claim` `five_hour`; a 2026-07-14 Pro
+/// capture agrees), with its two epochs supplied by the caller. The capture sent
+/// `reset` 6073 s and `weekly_reset` 383473 s past its `Date`, beside
+/// `retry-after: 6072`.
+pub(crate) fn window_exhaustion_429_headers(
+    reset: i64,
+    weekly_reset: i64,
+) -> Vec<(String, String)> {
+    let (reset, weekly_reset) = (reset.to_string(), weekly_reset.to_string());
+    [
+        ("x-should-retry", "true"),
+        (
+            "anthropic-ratelimit-unified-representative-claim",
+            "five_hour",
+        ),
+        ("anthropic-ratelimit-unified-upgrade-paths", "upgrade_plan"),
+        (
+            "anthropic-ratelimit-unified-7d-reset",
+            weekly_reset.as_str(),
+        ),
+        ("anthropic-ratelimit-unified-7d-status", "allowed"),
+        ("retry-after", "6072"),
+        ("anthropic-ratelimit-unified-overage-status", "rejected"),
+        ("anthropic-ratelimit-unified-5h-status", "rejected"),
+        ("anthropic-ratelimit-unified-reset", reset.as_str()),
+        ("anthropic-ratelimit-unified-5h-utilization", "1.0"),
+        ("anthropic-ratelimit-unified-5h-surpassed-threshold", "1.0"),
+        ("anthropic-ratelimit-unified-5h-reset", reset.as_str()),
+        (
+            "anthropic-ratelimit-unified-overage-disabled-reason",
+            "org_level_disabled",
+        ),
+        ("anthropic-ratelimit-unified-fallback-percentage", "0.5"),
+        ("anthropic-ratelimit-unified-7d-utilization", "0.62"),
+        ("anthropic-ratelimit-unified-status", "rejected"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
 
 pub(crate) fn rotation_fixture_config(
