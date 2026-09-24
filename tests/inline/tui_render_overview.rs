@@ -1439,7 +1439,7 @@ fn chain_panel_height_floors_at_three_without_panicking() {
     assert_eq!(chain_panel_height(0, 0), 3);
 }
 
-/// The projected switch target carries the compact `↩ ~eta` hint on its OWN row
+/// The projected switch target carries the compact `↲ ~eta` hint on its OWN row
 /// (not a trailing caption), parked at the shared trailer column just past the
 /// content — NOT flung out to the panel's right edge.
 #[test]
@@ -1465,8 +1465,8 @@ fn chain_row_switch_hint_rides_the_target_row() {
     let base = row.base_width();
     let line = row.into_line(base + TRAILER_GAP, 60);
     let text = line_text(&line);
-    assert!(text.contains("↩ ~"), "target row carries the hint: {text}");
-    let hint_w = Span::raw(format!("↩ ~{}", humanize_duration(7200))).width();
+    assert!(text.contains("↲ ~"), "target row carries the hint: {text}");
+    let hint_w = Span::raw(format!("↲ ~{}", humanize_duration(7200))).width();
     assert_eq!(
         line.width(),
         base + TRAILER_GAP + hint_w,
@@ -1478,9 +1478,9 @@ fn chain_row_switch_hint_rides_the_target_row() {
     );
 }
 
-/// Every projected hop carries the same `↩` glyph, the preferred (home) member
-/// included — the destination never changes the marker, and no `⌂` exists on
-/// this surface.
+/// Every projected hop carries the same `↲` glyph, the preferred (home) member
+/// included — the destination never changes the marker, and neither the old
+/// `↩` nor a `⌂` exists on this surface.
 #[test]
 fn chain_row_renders_every_projected_hop_with_the_return_glyph() {
     let _home = crate::testutil::HomeSandbox::new();
@@ -1511,12 +1511,12 @@ fn chain_row_renders_every_projected_hop_with_the_return_glyph() {
 
     let home_hint = hint("home");
     assert!(
-        home_hint.contains('↩') && !home_hint.contains('⌂'),
+        home_hint.contains('↲') && !home_hint.contains('↩') && !home_hint.contains('⌂'),
         "a switch onto the preferred member keeps the plain return glyph: {home_hint}",
     );
     let plain_hint = hint("plain");
     assert!(
-        plain_hint.contains('↩') && !plain_hint.contains('⌂'),
+        plain_hint.contains('↲') && !plain_hint.contains('↩') && !plain_hint.contains('⌂'),
         "a switch onto a non-preferred member keeps the plain glyph: {plain_hint}",
     );
 }
@@ -1619,7 +1619,7 @@ fn chain_row_shows_both_switch_hint_and_reason_marker_when_they_fit() {
     let col = row.base_width() + TRAILER_GAP;
     let text = line_text(&row.into_line(col, 60));
     assert!(text.contains('×'), "auth-broken shows the × marker: {text}");
-    assert!(text.contains("↩ ~"), "and the switch hint: {text}");
+    assert!(text.contains("↲ ~"), "and the switch hint: {text}");
 }
 
 /// Too narrow for the pair: the marker (the persistent block signal) survives
@@ -1652,7 +1652,7 @@ fn chain_row_drops_switch_hint_before_reason_marker_when_narrow() {
     };
     let col = build().base_width() + TRAILER_GAP;
     let marker_w = reason_marker(&BlockedReason::AuthBroken).width();
-    let hint_w = Span::raw(format!("↩ ~{}", humanize_duration(7200))).width();
+    let hint_w = Span::raw(format!("↲ ~{}", humanize_duration(7200))).width();
 
     // Room for the marker alone at the trailer column, but not the hint (+1 sep)
     // beside it.
@@ -1666,7 +1666,7 @@ fn chain_row_drops_switch_hint_before_reason_marker_when_narrow() {
         text.contains('×'),
         "marker survives at narrow width: {text}"
     );
-    assert!(!text.contains('↩'), "hint drops first: {text}");
+    assert!(!text.contains('↲'), "hint drops first: {text}");
 }
 
 /// End to end: an auth-broken chain member surfaces its × marker in the overview

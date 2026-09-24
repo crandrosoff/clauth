@@ -17,6 +17,7 @@ use super::super::app::{
 use super::super::theme;
 use super::chain::reason_marker;
 use super::format::spinner_frame;
+use super::overview::switch_mark;
 use super::panes::{
     DIAG_AUTH_BROKEN, DIAG_BUDGET_SPENT, DIAG_CANCELED, DIAG_DISABLED, DIAG_KICK, DIAG_STALE,
     DIAG_WEEKLY_SOFT, DIAG_WEEKLY_SPENT, bold_when, draw_scrolled_lines, head_cols, key_cell,
@@ -633,15 +634,15 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
         Tab::Overview => vec![(
             "accounts",
             &[
-                ("\u{2191}\u{2193}", "move cursor"),
+                ("\u{2191} \u{2193}", "move cursor"),
                 ("\u{21b5}", "switch to selected account (confirm)"),
-                ("shift \u{2191}\u{2193}", "reorder account up / down"),
+                ("shift \u{2191} \u{2193}", "reorder account up / down"),
             ][..],
         )],
         Tab::Usage => vec![(
             "usage",
             &[
-                ("\u{2191}\u{2193}", "pick account to inspect"),
+                ("\u{2191} \u{2193}", "pick account to inspect"),
                 ("r", "refresh account"),
                 ("e", "toggle estimates"),
                 ("p", "toggle pace marker"),
@@ -651,7 +652,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
             "tokens",
             &[
                 ("\u{21b5}", "open per-model breakdown"),
-                ("\u{2191}\u{2193}", "pick model (in breakdown)"),
+                ("\u{2191} \u{2193}", "pick model (in breakdown)"),
                 ("c", "count cache in token figures"),
                 (
                     "t",
@@ -664,7 +665,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
         Tab::Setup => vec![(
             "setup",
             &[
-                ("\u{2191}\u{2193}", "pick account / + new, then a row"),
+                ("\u{2191} \u{2193}", "pick account / + new, then a row"),
                 ("\u{21b5}", "open settings · edit field · flip toggle"),
                 ("\u{21b5} on a field", "edit inline; \u{21b5} again saves"),
                 ("space", "cycle the model preset (model row)"),
@@ -684,7 +685,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
         Tab::Config => vec![(
             "config",
             &[
-                ("\u{2191}\u{2193}", "move between settings"),
+                ("\u{2191} \u{2193}", "move between settings"),
                 ("space", "cycle the focused setting"),
                 (
                     "\u{21b5}",
@@ -695,7 +696,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
         Tab::Status => vec![(
             "status",
             &[
-                ("\u{2191}\u{2193}", "pick incident / scroll detail"),
+                ("\u{2191} \u{2193}", "pick incident / scroll detail"),
                 ("\u{21b5}", "open incident timeline"),
                 ("r", "refresh the feed"),
                 ("esc", "back to the list"),
@@ -705,7 +706,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
             "plugin",
             &[
                 (
-                    "\u{2191}\u{2193}",
+                    "\u{2191} \u{2193}",
                     "pick check · scroll detail · walk herdr options",
                 ),
                 ("\u{21b5}", "open detail · activate an option"),
@@ -719,8 +720,8 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
         Tab::Fallback => vec![(
             "fallback chain",
             &[
-                ("\u{2191}\u{2193}", "move cursor / detail row"),
-                ("shift \u{2191}\u{2193}", "reorder to set priority"),
+                ("\u{2191} \u{2193}", "move cursor / detail row"),
+                ("shift \u{2191} \u{2193}", "reorder to set priority"),
                 (
                     "\u{21b5}",
                     "open \u{00b7} edit threshold \u{00b7} edit weekly at \u{00b7} edit max spend \u{00b7} toggle gates / last resort \u{00b7} remove \u{00b7} add",
@@ -734,7 +735,7 @@ fn tab_specific_rows(tab: Tab) -> Vec<(&'static str, &'static [(&'static str, &'
                 ),
                 (
                     "\u{21b5} on preferred days",
-                    "pick days: \u{2190} \u{2192} walk \u{00b7} space toggles and saves \u{00b7} \u{21b5} esc q leave \u{00b7} \u{2191}\u{2193} leave and move",
+                    "pick days: \u{2190} \u{2192} walk \u{00b7} space toggles and saves \u{00b7} \u{21b5} esc q leave \u{00b7} \u{2191} \u{2193} leave and move",
                 ),
                 ("esc", "back / cancel edit"),
             ][..],
@@ -761,7 +762,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // "back / quit" and `esc` reads "back within a sub-view" — neither tells a
     // reader how to dismiss what they are looking at.
     let modal_keys: &[(&str, &str)] = &[
-        ("\u{2191}\u{2193}", "scroll"),
+        ("\u{2191} \u{2193}", "scroll"),
         ("esc \u{00b7} q \u{00b7} ?", "close"),
     ];
 
@@ -812,8 +813,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 /// Legend for the 1-cell marks the account surfaces carry, with no key of their
-/// own to document them: the Overview row's leading `●` and `⇄`, and every
-/// blocked-reason marker on the Fallback chain.
+/// own to document them: the Overview row's leading `●` and `⇄`, the Overview
+/// chain's projected-switch `↲`, and every blocked-reason marker on the
+/// Fallback chain.
 ///
 /// Each blocked-reason row takes its glyph AND its hue from [`reason_marker`]
 /// itself, so the legend cannot drift from what the chain renders. `⊖` and `⊘`
@@ -831,6 +833,7 @@ fn glyph_rows() -> Vec<(Span<'static>, &'static str)> {
             Span::styled("\u{21c4}", theme::dim()),
             "a live session here follows the fallback chain",
         ),
+        (switch_mark(), "the chain switches to this account next"),
         reason(BlockedReason::Disabled, DIAG_DISABLED),
         reason(BlockedReason::Canceled, DIAG_CANCELED),
         reason(BlockedReason::AuthBroken, DIAG_AUTH_BROKEN),

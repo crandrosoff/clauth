@@ -115,6 +115,90 @@ pub(super) fn cycle_option(label: &str, active: bool, row_selected: bool) -> Spa
     Span::styled(text, style)
 }
 
+/// Where a stacked cycle run's lines open: past the caret gutter, under the key.
+const STACK_INDENT: usize = 2;
+
+/// A cycle row as one or more lines: `lead` (the gutter glyph and the key
+/// cell), then each option as a [`cycle_option`] chip, 2 cells apart. A
+/// `custom` value matching no option trails the run the same 2 cells out,
+/// never bracketed (the refresh row's appended value): `ACCENT` while it is the
+/// row's value, `TEXT_FAINT` while it is only a stop the cycle can return to.
+///
+/// A run too wide for `width` breaks between chips onto continuation lines
+/// indented to the value column, never inside a chip. The custom value shares
+/// the run's last line only when it fits there whole, else opens a line of its
+/// own, breaking between its words where even that cannot hold it, so it never
+/// reads as one more word of the run. When the value column cannot hold the
+/// widest chip at all, the whole run drops under the key instead: stacked
+/// rather than clipped. The widest chip counts its brackets whether or not the
+/// row holds the cursor, so focus never flips a row between the two layouts.
+pub(super) fn cycle_row_lines(
+    lead: Vec<Span<'static>>,
+    options: &[(&str, bool)],
+    custom: Option<(&str, bool)>,
+    row_selected: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let value_col: usize = lead.iter().map(Span::width).sum();
+    // Each chip with the gap that opens it: the options 2 cells apart, the
+    // custom value's words 1 apart after its own 2-cell lead.
+    let mut chips: Vec<(usize, Span<'static>)> = options
+        .iter()
+        .map(|(label, active)| (2, cycle_option(label, *active, row_selected)))
+        .collect();
+    let run = chips.len();
+    let mut whole = 0;
+    if let Some((value, active)) = custom {
+        let style = if active {
+            theme::accent()
+        } else {
+            theme::faint()
+        };
+        whole = value.chars().count();
+        chips.extend(value.split_whitespace().enumerate().map(|(i, word)| {
+            let gap = if i == 0 { 2 } else { 1 };
+            (gap, Span::styled(word.to_string(), style))
+        }));
+    }
+    let widest = options
+        .iter()
+        .map(|(label, _)| label.chars().count() + 2)
+        .chain(chips[run..].iter().map(|(_, word)| word.width()))
+        .max()
+        .unwrap_or(0);
+    let stacked = value_col + widest > width;
+    let indent = if stacked { STACK_INDENT } else { value_col };
+    let blank = || Line::from(Span::raw(" ".repeat(indent)));
+
+    let mut out = vec![Line::from(lead)];
+    let mut used = value_col;
+    if stacked {
+        out.push(blank());
+        used = indent;
+    }
+    let mut fresh = true;
+    for (i, (gap, chip)) in chips.into_iter().enumerate() {
+        let w = chip.width();
+        // The custom value's first word asks room for the whole value.
+        let custom_wraps = i == run && used + gap + whole > width;
+        if !fresh && (custom_wraps || used + gap + w > width) {
+            out.push(blank());
+            used = indent;
+            fresh = true;
+        }
+        if let Some(line) = out.last_mut() {
+            if !fresh {
+                line.spans.push(Span::raw(" ".repeat(gap)));
+                used += gap;
+            }
+            line.spans.push(chip);
+        }
+        used += w;
+        fresh = false;
+    }
+    out
+}
+
 /// Full-width selection bar: bg tint and stretch. Callers handle per-row bold.
 pub(super) fn highlight_row(line: Line<'static>, width: usize) -> Line<'static> {
     let pad = width.saturating_sub(line.width());

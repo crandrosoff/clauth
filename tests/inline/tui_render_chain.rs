@@ -277,12 +277,11 @@ fn preferred_hint_names_the_day_list_when_one_is_set() {
         },
     )
     .0;
-    let hint = lines
-        .iter()
-        .map(line_text)
-        .find(|t| t.contains("└"))
-        .expect("hint renders");
-    assert!(hint.contains("home on sat, sun"), "{hint}");
+    assert_eq!(
+        hint_after(&lines, "preferred").as_deref(),
+        Some("home on sat, sun by its preferred days"),
+        "the list lives on the card now, not in a file"
+    );
 }
 
 // A list this account could not serve claims nothing, so the card must not
@@ -358,8 +357,8 @@ fn preferred_hint_says_which_days_are_left_when_another_account_claims() {
 }
 
 // A list AND the flag on one account is home on the listed days by the list
-// and on the rest by the flag, so naming only the list would read as standing
-// down for the other five.
+// and on the days no list claims by the flag, so naming only the list would
+// read as standing down for the other five.
 #[test]
 fn preferred_hint_adds_the_unclaimed_days_when_the_flag_is_also_on() {
     let mut a = profile("a", 95.0, 20.0, 3600);
@@ -382,15 +381,11 @@ fn preferred_hint_adds_the_unclaimed_days_when_the_flag_is_also_on() {
         },
     )
     .0;
-    let hint = lines
-        .iter()
-        .map(line_text)
-        .find(|t| t.contains("└"))
-        .expect("hint renders");
-    assert!(hint.contains("home on sat, sun"), "{hint}");
-    assert!(
-        hint.contains("on the rest by this toggle"),
-        "the tail has to survive 80 columns: {hint}"
+    // "The rest" would be false the moment another member's list names one of
+    // those days, so the toggle's half names the days it really decides.
+    assert_eq!(
+        hint_after(&lines, "preferred").as_deref(),
+        Some("home on sat, sun by its preferred days, and on days no list claims by this toggle")
     );
 }
 
@@ -1160,15 +1155,17 @@ fn typed_max_spend_caret_lands_on_its_row_under_a_wrapped_day_list() {
         .iter()
         .position(|r| r.contains("preferred days"))
         .expect("the day row renders");
-    assert!(
-        rows[day_row + 1].contains("thu, fri, sat"),
-        "precondition: the day list wraps onto a second line:\n{}",
-        rows.join("\n")
-    );
     let rendered_at = rows
         .iter()
         .position(|r| r.contains("max spend"))
         .expect("the max spend row renders");
+    assert!(
+        rows[day_row + 1..rendered_at]
+            .iter()
+            .any(|r| r.contains("thu, fri, sat")),
+        "precondition: the day row wraps onto lines of its own:\n{}",
+        rows.join("\n")
+    );
     let caret = term.get_cursor_position().unwrap();
     assert_eq!(
         caret.y as usize, rendered_at,
@@ -1178,8 +1175,8 @@ fn typed_max_spend_caret_lands_on_its_row_under_a_wrapped_day_list() {
 
 /// Finding shape from review round 2: a 40x24 terminal (~14 inner rows after
 /// borders and the left chain) with a blocked member fills the card past the
-/// pane, and the card has no scrollbar — the LAST rows must stay reachable by
-/// walking the cursor down, not fall off the bottom.
+/// pane — the LAST rows must stay reachable by walking the cursor down, not
+/// fall off the bottom.
 #[test]
 fn remove_row_stays_reachable_on_a_40x24_pane() {
     let _home = crate::testutil::HomeSandbox::new();
@@ -1564,6 +1561,7 @@ fn edit_glyph_is_bold_like_the_selection_caret() {
             preferred: false,
             preferred_days: &[],
             day_picker: None,
+            day_stop: None,
             max_spend: 0.0,
             spend_budget: false,
             armed_remove: false,
@@ -2070,50 +2068,79 @@ fn preferred_days_line(cfg: &AppConfig) -> Line<'static> {
         .expect("the preferred days row renders")
 }
 
+/// Every rung the row can hold, the preset run whole, the held one ACCENT and
+/// the rest TEXT_FAINT. `never` is a live value like any other rung, so it
+/// lights ACCENT too; a custom set trails the run in ACCENT with every preset
+/// faint.
 #[test]
-fn preferred_days_row_names_each_preset_and_spells_the_custom_set() {
+fn preferred_days_row_lights_the_held_rung_never_included() {
     let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
     use chrono::Weekday::*;
+    const RUN: &str = "  preferred days  never  weekdays  weekends  every day";
     // A hand-written list is read order-blind, so `sun, sat` is the `weekends`
     // rung whatever order the file wrote it in.
-    let cases: [(Vec<chrono::Weekday>, &str); 6] = [
-        (Vec::new(), "never"),
-        (vec![Mon, Tue, Wed, Thu, Fri], "weekdays"),
-        (vec![Sat, Sun], "weekends"),
-        (WEEKDAYS_ALL.to_vec(), "every day"),
-        (vec![Tue, Thu], "tue, thu"),
-        (vec![Sun, Sat], "weekends"),
+    let cases: [(Vec<chrono::Weekday>, &str, &[&str]); 6] = [
+        (Vec::new(), "", &["never"]),
+        (vec![Mon, Tue, Wed, Thu, Fri], "", &["weekdays"]),
+        (vec![Sat, Sun], "", &["weekends"]),
+        (WEEKDAYS_ALL.to_vec(), "", &["every day"]),
+        (vec![Tue, Thu], "  tue, thu", &["tue,", "thu"]),
+        (vec![Sun, Sat], "", &["weekends"]),
     ];
-    for (set, expected) in cases {
+    for (set, tail, held) in cases {
         let mut a = profile("a", 95.0, 20.0, 3600);
         a.preferred_days = set;
         let cfg = config_with(vec![a], Some("a"), vec!["a"]);
         let line = preferred_days_line(&cfg);
-        assert_eq!(
-            line_text(&line),
-            format!("  preferred days  {expected}"),
-            "the row names the set it holds"
-        );
-        let want = if expected == "never" {
-            theme::faint().fg
-        } else {
-            theme::accent().fg
-        };
-        assert_eq!(
-            line.spans.last().expect("a value span").style.fg,
-            want,
-            "`never` reads faint like an off toggle, any other set as a set value"
-        );
+        assert_eq!(line_text(&line), format!("{RUN}{tail}"), "{held:?}");
+        let styled: Vec<(&str, Option<ratatui::style::Color>)> = line
+            .spans
+            .iter()
+            .skip(2)
+            .filter(|s| !s.content.trim().is_empty())
+            .map(|s| (s.content.as_ref(), s.style.fg))
+            .collect();
+        let want: Vec<(&str, Option<ratatui::style::Color>)> = styled
+            .iter()
+            .map(|(text, _)| {
+                let fg = if held.contains(text) {
+                    theme::accent().fg
+                } else {
+                    theme::faint().fg
+                };
+                (*text, fg)
+            })
+            .collect();
+        assert_eq!(styled, want, "{held:?} is the one ACCENT value");
     }
 }
 
-/// The row's help line, one per state: blocker first (an empty list included,
-/// since the blocker is about the account, not the list), then the empty list,
-/// then a set list; descended, the picker's edit grammar instead. Whole-line
-/// equality, since each arm names a different fact.
+/// The `└` hint under the first row carrying `key`, its wrapped lines joined
+/// back into the one sentence it renders: `None` when no hint follows the row.
+fn hint_after(lines: &[Line<'static>], key: &str) -> Option<String> {
+    let at = lines
+        .iter()
+        .position(|l| line_text(l).contains(key))
+        .expect("the row renders");
+    let mut hint = lines[at + 1..]
+        .iter()
+        .map(line_text)
+        .take_while(|t| t.starts_with(" └ ") || t.starts_with("   "));
+    let first = hint.next()?.strip_prefix(" └ ")?.to_string();
+    Some(hint.fold(first, |acc, t| format!("{acc} {}", t.trim_start())))
+}
+
+/// The row's help line, one per state, whole-sentence equality since each arm
+/// names a different fact. At rest it says what the list does and that ↵ picks
+/// days: blocker first (an empty list included, since the blocker is about the
+/// account, not the list), then a list another member's list shares days with,
+/// else the plain statement, which holds for an empty list, a set one, and one
+/// sitting beside another member's list that names other days. Descended, the
+/// picker's whole edit grammar.
 #[test]
 fn preferred_days_row_hint_names_the_blocker_then_the_list_state() {
-    let hint_under = |cfg: &AppConfig, day_picker: Option<usize>| -> String {
+    use chrono::Weekday::{Fri, Sat, Sun};
+    let hint_under = |cfg: &AppConfig, day_picker: Option<usize>| -> Option<String> {
         let row = FALLBACK_ROWS
             .iter()
             .position(|r| *r == FallbackRow::PreferredDays)
@@ -2130,47 +2157,79 @@ fn preferred_days_row_hint_names_the_blocker_then_the_list_state() {
             },
         )
         .0;
-        let at = lines
-            .iter()
-            .position(|l| line_text(l).contains("preferred days"))
-            .expect("the preferred days row renders");
-        line_text(&lines[at + 1])
+        hint_after(&lines, "preferred days")
     };
+    const SAYS: &str =
+        "work returns to this account on the days set here · ↵ picks days one by one";
 
     let empty = config_with(vec![profile("a", 95.0, 20.0, 3600)], Some("a"), vec!["a"]);
-    assert_eq!(
-        hint_under(&empty, None),
-        " └ no home days; `preferred` holds every day"
-    );
+    assert_eq!(hint_under(&empty, None).as_deref(), Some(SAYS), "no list");
 
     let mut set = profile("a", 95.0, 20.0, 3600);
-    set.preferred_days = vec![chrono::Weekday::Sat, chrono::Weekday::Sun];
+    set.preferred_days = vec![Sat, Sun];
     let set = config_with(vec![set], Some("a"), vec!["a"]);
+    assert_eq!(hint_under(&set, None).as_deref(), Some(SAYS), "a list");
+
+    // Another member's list naming other days leaves this one's claim whole.
+    let mut beside = profile("a", 95.0, 20.0, 3600);
+    beside.preferred_days = vec![Sat, Sun];
+    let mut b = profile("b", 95.0, 20.0, 3600);
+    b.preferred_days = vec![Fri];
+    let beside = config_with(vec![beside, b], Some("a"), vec!["a", "b"]);
     assert_eq!(
-        hint_under(&set, None),
-        " └ home on these days; `preferred` decides the rest"
+        hint_under(&beside, None).as_deref(),
+        Some(SAYS),
+        "a list elsewhere on other days"
+    );
+
+    // A list on an account the walk skips claims nothing, so it shares no day.
+    let mut beside_dead = profile("a", 95.0, 20.0, 3600);
+    beside_dead.preferred_days = vec![Sat, Sun];
+    let mut b = profile("b", 95.0, 20.0, 3600);
+    b.disabled = true;
+    b.preferred_days = vec![Fri, Sat];
+    let beside_dead = config_with(vec![beside_dead, b], Some("a"), vec!["a", "b"]);
+    assert_eq!(
+        hint_under(&beside_dead, None).as_deref(),
+        Some(SAYS),
+        "a disabled member's list on a shared day"
+    );
+
+    // A day both lists name returns work to whichever claimant reads clear
+    // first, so the plain statement would promise this account those days.
+    let mut shared = profile("a", 95.0, 20.0, 3600);
+    shared.preferred_days = vec![Sat, Sun];
+    let mut b = profile("b", 95.0, 20.0, 3600);
+    b.preferred_days = vec![Fri, Sat];
+    let shared = config_with(vec![shared, b], Some("a"), vec!["a", "b"]);
+    assert_eq!(
+        hint_under(&shared, None).as_deref(),
+        Some(
+            "another list also names sat: work returns to whichever account reads clear first \
+             · ↵ picks days one by one"
+        ),
+        "a day another list shares"
     );
 
     let mut dead = profile("a", 95.0, 20.0, 3600);
     dead.disabled = true;
-    dead.preferred_days = vec![chrono::Weekday::Sat];
+    dead.preferred_days = vec![Sat];
     let dead = config_with(vec![dead], Some("other"), vec!["a"]);
-    assert_eq!(
-        hint_under(&dead, None),
-        " └ a day list here would claim nothing: the account is disabled"
-    );
+    const DEAD: &str =
+        "a day list here would claim nothing: the account is disabled · ↵ picks days one by one";
+    assert_eq!(hint_under(&dead, None).as_deref(), Some(DEAD));
 
     let mut dead_empty = profile("a", 95.0, 20.0, 3600);
     dead_empty.disabled = true;
     let dead_empty = config_with(vec![dead_empty], Some("other"), vec!["a"]);
     assert_eq!(
-        hint_under(&dead_empty, None),
-        " └ a day list here would claim nothing: the account is disabled",
+        hint_under(&dead_empty, None).as_deref(),
+        Some(DEAD),
         "the blocker leads on an empty list too"
     );
     assert_eq!(
-        hint_under(&dead_empty, Some(0)),
-        " └ space toggles and saves · ↵ done",
+        hint_under(&dead_empty, Some(0)).as_deref(),
+        Some("← → walk · space toggles and saves · ↵ esc done · ↑ ↓ leave"),
         "descended, the picker's grammar replaces the at-rest hint"
     );
 }
@@ -2261,6 +2320,7 @@ fn the_add_picker_names_a_carried_day_list_before_the_add() {
     // At 80 the blurb holds one line, so the candidates open on the fifth.
     let picker = |app: &App| -> Vec<String> {
         add_detail(app, true, 80)
+            .0
             .iter()
             .skip(4)
             .map(line_text)
@@ -2271,13 +2331,23 @@ fn the_add_picker_names_a_carried_day_list_before_the_add() {
     app.fallback_detail_cursor = 0;
     assert_eq!(
         picker(&app),
-        vec!["❯ b", " └ home on tue, thu", "  c", "  d"],
+        vec![
+            "❯ b",
+            " └ brings back its preferred days: tue, thu",
+            "  c",
+            "  d"
+        ],
         "a custom list is spelled out"
     );
     app.fallback_detail_cursor = 1;
     assert_eq!(
         picker(&app),
-        vec!["  b", "❯ c", " └ home on weekends", "  d"],
+        vec![
+            "  b",
+            "❯ c",
+            " └ brings back its preferred days: weekends",
+            "  d"
+        ],
         "a preset list takes the name the member row gives it"
     );
     app.fallback_detail_cursor = 2;
@@ -2304,6 +2374,7 @@ fn the_add_picker_names_the_blocker_before_a_carried_list() {
     let mut app = App::new(cfg);
     app.fallback_detail_cursor = 0;
     let picker: Vec<String> = add_detail(&app, true, 80)
+        .0
         .iter()
         .skip(4)
         .map(line_text)

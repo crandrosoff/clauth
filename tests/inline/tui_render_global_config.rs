@@ -606,6 +606,7 @@ fn context_nudge_edit_line_marks_invalid_buffer_danger() {
 /// shape. Both name the same range: `50k-2M tokens`.
 #[test]
 fn context_nudge_range_tooltip_marks_invalid_input_danger() {
+    let _tier = crate::testutil::TierSandbox::new(crate::tui::theme::Tier::Full);
     let invalid = InputState::new("49999");
     let lines = context_nudge_range_tooltip(&invalid, 40);
     for line in &lines {

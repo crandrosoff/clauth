@@ -12113,6 +12113,150 @@ fn fallback_preferred_days_space_steps_a_custom_set_to_never() {
     assert!(on_disk_days().is_empty(), "a custom set steps to `never`");
 }
 
+/// Space from `every day` onto `a`'s remembered custom stop, or onto `never`
+/// when there is none, each step read back off disk.
+fn step_days(app: &mut App, want: &[Vec<chrono::Weekday>], label: &str) {
+    for (i, days) in want.iter().enumerate() {
+        super::handle_key(app, key(KeyCode::Char(' ')));
+        assert_eq!(&on_disk_days(), days, "{label}: press {}", i + 1);
+    }
+}
+
+/// A custom list is one more stop in the cycle while the card stays open:
+/// `never → weekdays → weekends → every day → the list → never`, each press
+/// saved at once, so stepping past the list and around again restores it.
+#[test]
+fn space_keeps_a_custom_day_list_in_the_cycle_while_the_card_is_open() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = preferred_days_app(vec![Wed, Fri]);
+    assert_eq!(
+        on_disk_days(),
+        vec![Wed, Fri],
+        "precondition: the custom list"
+    );
+
+    step_days(
+        &mut app,
+        &[
+            Vec::new(),
+            vec![Mon, Tue, Wed, Thu, Fri],
+            vec![Sat, Sun],
+            super::WEEKDAYS_ALL.to_vec(),
+            vec![Wed, Fri],
+            Vec::new(),
+        ],
+        "around the cycle and back",
+    );
+}
+
+/// The remembered stop belongs to the open card: leaving it for the chain list
+/// forgets the stop, so the next trip round the cycle ends on `never`. The
+/// first leg proves the stop was held before the card was left.
+#[test]
+fn leaving_the_card_forgets_the_custom_stop() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let presets_then_never = [
+        vec![Mon, Tue, Wed, Thu, Fri],
+        vec![Sat, Sun],
+        super::WEEKDAYS_ALL.to_vec(),
+        Vec::new(),
+    ];
+    let mut app = preferred_days_app(vec![Wed, Fri]);
+    step_days(
+        &mut app,
+        &[
+            Vec::new(),
+            vec![Mon, Tue, Wed, Thu, Fri],
+            vec![Sat, Sun],
+            super::WEEKDAYS_ALL.to_vec(),
+            vec![Wed, Fri],
+            Vec::new(),
+        ],
+        "the stop is held while the card is open",
+    );
+
+    super::handle_key(&mut app, key(KeyCode::Esc));
+    assert_eq!(
+        app.fallback_focus,
+        super::FallbackFocus::Chain,
+        "esc left the card"
+    );
+    super::handle_key(&mut app, key(KeyCode::Enter));
+    for _ in 0..preferred_days_row() {
+        super::handle_key(&mut app, key(KeyCode::Down));
+    }
+    step_days(&mut app, &presets_then_never, "after leaving the card");
+
+    // A tab switch away and back leaves the card too.
+    seed_disk_days(&app, vec![Wed, Fri]);
+    step_days(&mut app, &[Vec::new()], "stepped off the custom list again");
+    super::handle_key(&mut app, key(KeyCode::Right));
+    assert_ne!(app.tab, Tab::Fallback, "→ left the tab");
+    super::handle_key(&mut app, key(KeyCode::Left));
+    assert_eq!(app.tab, Tab::Fallback, "← came back");
+    super::handle_key(&mut app, key(KeyCode::Enter));
+    for _ in 0..preferred_days_row() {
+        super::handle_key(&mut app, key(KeyCode::Down));
+    }
+    step_days(&mut app, &presets_then_never, "after a tab round trip");
+}
+
+/// A reload that takes the card off its member forgets the member's stop too:
+/// with no edit open the card stays on the slot, so it shows whoever took it,
+/// and coming back to the member is a new card. The first leg proves the stop
+/// was held before the reload.
+#[test]
+fn a_reload_that_moves_the_card_off_its_member_forgets_the_custom_stop() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use chrono::Weekday::*;
+    let mut app = two_member_app();
+    seed_disk_days(&app, vec![Wed, Fri]);
+    step_days(
+        &mut app,
+        &[
+            Vec::new(),
+            vec![Mon, Tue, Wed, Thu, Fri],
+            vec![Sat, Sun],
+            super::WEEKDAYS_ALL.to_vec(),
+            vec![Wed, Fri],
+            Vec::new(),
+        ],
+        "the stop is held while the card is open",
+    );
+
+    reload_with_chain(&mut app, &["b", "a"]);
+    assert_eq!(app.chain_cursor, 0, "the card stayed on the slot `b` took");
+    // The fingerprint reads mtimes alone, so the way back needs one of its own.
+    let mut state = crate::profile::load_app_state().expect("load the state");
+    state.fallback_chain = vec!["a".into(), "b".into()];
+    crate::profile::save_app_state(&state).expect("rewrite the state");
+    let path = crate::profile::clauth_dir()
+        .expect("clauth dir")
+        .join("profiles.toml");
+    crate::testutil::set_mtime(
+        &path,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(3_000_000),
+    );
+    assert!(app.reload_if_state_changed(), "the reload back ran");
+    assert_eq!(
+        app.chain_cursor, 0,
+        "precondition: the card is on `a` again"
+    );
+
+    step_days(
+        &mut app,
+        &[
+            vec![Mon, Tue, Wed, Thu, Fri],
+            vec![Sat, Sun],
+            super::WEEKDAYS_ALL.to_vec(),
+            Vec::new(),
+        ],
+        "after the card moved off `a`",
+    );
+}
+
 /// The picker's caret, `None` while it is closed.
 fn picker_caret(app: &App) -> Option<usize> {
     match app.fallback_edit.as_ref().map(|e| &e.state) {
@@ -12334,29 +12478,52 @@ fn the_day_picker_caret_wraps_both_ways() {
     assert_eq!(app.tab, Tab::Fallback, "neither arrow switched tabs");
 }
 
-// While descended the picker owns the keyboard: `?`, `a`, `x`, tab and
-// shift-tab reach none of their global senses, and the picker stays open.
+// While descended the picker binds neither `?` nor `x`, so both keep their
+// global senses mid-pick: `?` opens the help modal and `x` dismisses the
+// front toast, the picker's own claims-nothing warning included, and the
+// picker stays open through both. `a`, tab and shift-tab stay claimed.
 #[test]
-fn the_day_picker_claims_help_actions_dismiss_and_tab() {
+fn the_day_picker_passes_help_and_dismiss_and_claims_actions_and_tab() {
     let _home = crate::testutil::HomeSandbox::new();
-    let mut app = preferred_days_app(Vec::new());
-    app.toast(super::ToastKind::Info, "a toast `x` would dismiss");
+    let mut app = dead_member_app(Vec::new());
 
     super::handle_fallback_detail_key(&mut app, key(KeyCode::Enter));
-    for code in [
-        KeyCode::Char('?'),
-        KeyCode::Char('a'),
-        KeyCode::Char('x'),
-        KeyCode::Tab,
-        KeyCode::BackTab,
-    ] {
+    super::handle_key(&mut app, key(KeyCode::Char(' ')));
+    assert_eq!(
+        app.toasts.iter().map(|t| t.kind).collect::<Vec<_>>(),
+        vec![super::ToastKind::Warning],
+        "precondition: the save raised the claims-nothing warning"
+    );
+
+    super::handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(
+        matches!(app.modals.as_slice(), [super::Modal::Help]),
+        "`?` opened the help modal"
+    );
+    assert_eq!(
+        picker_caret(&app),
+        Some(0),
+        "the picker stayed open under it"
+    );
+    super::handle_key(&mut app, key(KeyCode::Esc));
+    assert!(app.modals.is_empty(), "esc closed the help modal");
+    assert_eq!(picker_caret(&app), Some(0), "and left the picker open");
+
+    super::handle_key(&mut app, key(KeyCode::Char('x')));
+    assert!(app.toasts.is_empty(), "`x` dismissed the warning");
+    assert_eq!(picker_caret(&app), Some(0), "the picker stayed open");
+
+    for code in [KeyCode::Char('a'), KeyCode::Tab, KeyCode::BackTab] {
         super::handle_key(&mut app, key(code));
         assert!(app.modals.is_empty(), "{code:?} opened no modal");
-        assert_eq!(app.toasts.len(), 1, "{code:?} dismissed nothing");
         assert_eq!(app.tab, Tab::Fallback, "{code:?} switched no tab");
         assert_eq!(picker_caret(&app), Some(0), "{code:?} left the picker open");
     }
-    assert!(on_disk_days().is_empty(), "nothing was written");
+    assert_eq!(
+        on_disk_days(),
+        vec![chrono::Weekday::Mon],
+        "only the one space wrote"
+    );
 }
 
 /// A dead account with a list on the Fallback card, cursor on the day row.

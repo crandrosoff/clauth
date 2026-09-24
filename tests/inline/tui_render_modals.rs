@@ -69,8 +69,8 @@ fn fallback_tab_key_grammar_rows_pin_exact_order_and_copy() {
     assert_tab_rows(
         Tab::Fallback,
         &[
-            ("↑↓", "move cursor / detail row"),
-            ("shift ↑↓", "reorder to set priority"),
+            ("↑ ↓", "move cursor / detail row"),
+            ("shift ↑ ↓", "reorder to set priority"),
             (
                 "↵",
                 "open · edit threshold · edit weekly at · edit max spend · toggle gates / last resort · remove · add",
@@ -84,7 +84,7 @@ fn fallback_tab_key_grammar_rows_pin_exact_order_and_copy() {
             ),
             (
                 "↵ on preferred days",
-                "pick days: ← → walk · space toggles and saves · ↵ esc q leave · ↑↓ leave and move",
+                "pick days: ← → walk · space toggles and saves · ↵ esc q leave · ↑ ↓ leave and move",
             ),
             ("esc", "back / cancel edit"),
         ],
@@ -246,7 +246,7 @@ fn a_help_modal_that_fits_renders_without_a_scrollbar() {
                 .to_string(),
             "│                                                                         │"
                 .to_string(),
-            "│    ↑↓                  scroll                                           │"
+            "│    ↑ ↓                 scroll                                           │"
                 .to_string(),
             "│    esc · q · ?         close                                            │"
                 .to_string(),
@@ -278,7 +278,7 @@ fn setup_tab_key_grammar_rows_pin_exact_order_and_copy() {
     assert_tab_rows(
         Tab::Setup,
         &[
-            ("↑↓", "pick account / + new, then a row"),
+            ("↑ ↓", "pick account / + new, then a row"),
             ("↵", "open settings · edit field · flip toggle"),
             ("↵ on a field", "edit inline; ↵ again saves"),
             ("space", "cycle the model preset (model row)"),
@@ -340,7 +340,7 @@ fn the_help_modal_legend_names_every_marker_and_its_hue() {
         .unwrap_or_else(|| panic!("the legend renders:\n{}", rows.join("\n")));
     // The section header, its blank, and one row per mark.
     assert_eq!(
-        rows[head..head + 14].iter().map(slice).collect::<Vec<_>>(),
+        rows[head..head + 15].iter().map(slice).collect::<Vec<_>>(),
         vec![
             "│  GLYPHS                                                                 │"
                 .to_string(),
@@ -349,6 +349,8 @@ fn the_help_modal_legend_names_every_marker_and_its_hue() {
             "│    ●                   the active account                               │"
                 .to_string(),
             "│    ⇄                   a live session here follows the fallback chain   │"
+                .to_string(),
+            "│    ↲                   the chain switches to this account next          │"
                 .to_string(),
             "│    ⊖                   disabled                                         │"
                 .to_string(),
@@ -375,9 +377,10 @@ fn the_help_modal_legend_names_every_marker_and_its_hue() {
 
     // Every mark's own hue, read off the rendered cell. The two repeated glyphs
     // are the whole point: same shape, different color, different meaning.
-    let expected: [Color; 12] = [
+    let expected: [Color; 13] = [
         crate::tui::theme::accent_2_color(),
         crate::tui::theme::text_dim_color(),
+        crate::tui::theme::text_faint_color(),
         crate::tui::theme::text_faint_color(),
         crate::tui::theme::danger_color(),
         crate::tui::theme::danger_color(),
@@ -393,10 +396,43 @@ fn the_help_modal_legend_names_every_marker_and_its_hue() {
     // 2-space gutter all sit ahead of the mark.
     let glyph_x = left + 5;
     let stride = buf.area.width as usize;
-    let got: Vec<Color> = (0..12)
+    let got: Vec<Color> = (0..13)
         .map(|i| buf.content[(head + 2 + i) * stride + glyph_x].fg)
         .collect();
     assert_eq!(got, expected.to_vec());
+}
+
+/// Every row of the help modal spells its arrow runs spaced, `← →` and `↑ ↓`:
+/// the compact `←→` / `↑↓` is a hint-bar-only concession. Read off the rendered
+/// modal on every tab, so a new row anywhere in it is held to the same rule.
+#[test]
+fn the_help_modal_spaces_every_arrow_run() {
+    let _home = crate::testutil::HomeSandbox::new();
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut compact = Vec::new();
+    for tab in Tab::ALL {
+        let app = empty_app(tab);
+        let mut term = Terminal::new(TestBackend::new(160, 120)).unwrap();
+        term.draw(|f| draw_help(f, f.area(), &app)).unwrap();
+        assert_eq!(
+            app.help_max_scroll.get(),
+            0,
+            "{tab:?}: the whole modal is on screen, so every row is read"
+        );
+        let rows = crate::testutil::buffer_rows(term.backend().buffer());
+        compact.extend(
+            rows.iter()
+                .filter(|r| r.contains("↑↓") || r.contains("←→"))
+                .map(|r| format!("{tab:?}: {}", r.trim())),
+        );
+    }
+    assert!(
+        compact.is_empty(),
+        "compact arrow runs:\n{}",
+        compact.join("\n")
+    );
 }
 
 // ── action menu ─────────────────────────────────────────────────────────────

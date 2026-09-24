@@ -1034,7 +1034,7 @@ const TRAILER_GAP: usize = 2;
 
 /// A chain row before its trailer lands. Split from the assembled `Line` so the
 /// panel can measure every row's content and start every trailer at one column.
-/// Only ONE row can carry the `↩ ~eta` hint (the single projected-switch
+/// Only ONE row can carry the `↲ ~eta` hint (the single projected-switch
 /// target), so at most that row's marker sits further right than its siblings'.
 struct ChainRow {
     base: Vec<Span<'static>>,
@@ -1049,7 +1049,7 @@ impl ChainRow {
 
     /// Pad the content out to `col`, then append whichever trailers fit inside
     /// `width` (the panel's inner width). A projected-switch target carries the
-    /// `↩ ~eta` hint; a blocked member carries its 1-cell reason marker. BOTH can
+    /// `↲ ~eta` hint; a blocked member carries its 1-cell reason marker. BOTH can
     /// apply to one row: `next_target`'s headroom walk only prefers a fresh
     /// member and falls through to a stale-but-unexhausted one (`is_exhausted`
     /// ignores `fetch_status`), so a `To` target can also be `Stale`. Render both
@@ -1154,10 +1154,21 @@ fn chain_row(cfg: &AppConfig, name: &crate::profile::ProfileName, ctx: ChainRowC
             // `projected_switch` only ever fires off `burn_rate_eta`, so this
             // hint is always an EXHAUSTION projection — a genuine event-driven
             // return (healthy active, preferred just freed) has no eta to show.
-            Span::styled(format!("↩ ~{}", humanize_duration(secs)), theme::faint())
+            let mark = switch_mark();
+            Span::styled(
+                format!("{} ~{}", mark.content, humanize_duration(secs)),
+                mark.style,
+            )
         }),
         marker: reason.as_ref().map(reason_marker),
     }
+}
+
+/// The projected-switch mark a target member's chain row leads its eta with.
+/// One source for the row and the help modal's glyph legend, so the legend
+/// cannot drift from the glyph or the hue the chain renders.
+pub(super) fn switch_mark() -> Span<'static> {
+    Span::styled("\u{21b2}", theme::faint())
 }
 
 /// `gauge_w`-cell bar relative to the member's threshold (full = rotate off).

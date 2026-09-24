@@ -16,7 +16,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use super::super::app::{
     App, CardEdit, ChainItemKind, FALLBACK_ROWS, FallbackFocus, FallbackRow, InputState,
@@ -29,9 +28,9 @@ use super::global_config::default_reminder;
 use super::panes::{
     DETAIL_KEY_GUTTER, DETAIL_KEY_W, DIAG_AUTH_BROKEN, DIAG_BUDGET_SPENT, DIAG_CANCELED,
     DIAG_DISABLED, DIAG_KICK, DIAG_STALE, DIAG_WEEKLY_SOFT, DIAG_WEEKLY_SPENT, bold_when,
-    draw_selector_list, head_cols, help_tooltip_lines, highlight_row, invalid_tooltip_lines,
-    key_cell, label_style, master_detail, name_color, pill, rail_hint_lines, section_box,
-    section_box_verbatim, select_line, value_caret, wrap_words,
+    cycle_row_lines, draw_scrolled_lines, draw_selector_list, head_cols, help_tooltip_lines,
+    highlight_row, invalid_tooltip_lines, key_cell, label_style, master_detail, name_color, pill,
+    rail_hint_lines, section_box, section_box_verbatim, select_line, value_caret, wrap_words,
 };
 use crate::fallback::{
     BlockedReason, DEFAULT_THRESHOLD, blocked_reason, health_blocked_reason, parse_threshold,
@@ -176,6 +175,7 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // wrapped fix line) and the `preferred days` row wraps, and a caret on the
     // wrong row is invisible to every text assertion — so positions are read
     // out of the buffer rather than tracked in a constant edited in lockstep.
+    let mut add_focus = (0, 0);
     let (title, is_name, lines, spans): (String, bool, Vec<Line<'static>>, RowSpans) =
         match selected {
             Some(ChainItemKind::Member(i)) => {
@@ -186,6 +186,11 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     Some(CardEdit::Days(picker)) => Some(picker.cursor),
                     _ => None,
                 };
+                let day_stop = app
+                    .fallback_day_stop
+                    .as_ref()
+                    .filter(|stop| stop.member == name)
+                    .map(|stop| stop.state.as_slice());
                 let (lines, spans) = member_detail(
                     &cfg,
                     &name,
@@ -197,6 +202,7 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         max_spend_editing: typed(FallbackRow::MaxSpend),
                         weekly_editing: typed(FallbackRow::WeeklyAt),
                         day_picker,
+                        day_stop,
                         width: inner_w,
                         kick_lift,
                         sessions: app.live_sessions.member(&name),
@@ -204,12 +210,16 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 );
                 (name.to_string(), true, lines, spans)
             }
-            Some(ChainItemKind::Add) => (
-                "add to chain".to_string(),
-                false,
-                add_detail(app, detail_focused, inner_w),
-                std::array::from_fn(|_| 0..0),
-            ),
+            Some(ChainItemKind::Add) => {
+                let (lines, focus) = add_detail(app, detail_focused, inner_w);
+                add_focus = focus;
+                (
+                    "add to chain".to_string(),
+                    false,
+                    lines,
+                    std::array::from_fn(|_| 0..0),
+                )
+            }
             None => (
                 "chain".to_string(),
                 false,
@@ -225,44 +235,44 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    // The header block + the rows + a tooltip outgrow a short pane (a 40x24
-    // terminal leaves ~14 inner rows, and a blocked member's pill block eats
-    // two more), and the card has no scrollbar — so a FOCUSED card scrolls the
-    // cursored row (all its own lines, plus up to a 2-line tooltip) into view
-    // instead of clipping `max spend` and `remove` off the bottom. Unfocused
-    // keeps the top anchored: while browsing the left chain the identity header
-    // is the payload, not the rows.
-    let content_h = lines.len();
-    let scroll = if detail_focused && matches!(selected, Some(ChainItemKind::Member(_))) {
-        let cursor = app.fallback_detail_cursor.min(FALLBACK_ROWS.len() - 1);
-        let row = &spans[cursor];
-        let height = inner.height as usize;
-        // Capped at the row's own first line, so a row taller than the pane
-        // (the day picker on a small terminal) keeps its label. The picker's
-        // caret line outranks the label when the two cannot share the pane: a
-        // space there saves the day under the caret, which must be on screen.
-        let base = (row.end + 2).saturating_sub(height).min(row.start);
-        let caret_line = match edit {
-            Some(CardEdit::Days(picker)) if FALLBACK_ROWS[cursor] == FallbackRow::PreferredDays => {
-                day_picker_rows(inner_w)
-                    .iter()
-                    .position(|r| r.contains(&picker.cursor))
+    let height = inner.height as usize;
+    let focus = match selected {
+        // The header block + the rows + a tooltip outgrow a short pane (a
+        // 40x24 terminal leaves ~14 inner rows, and a blocked member's pill
+        // block eats two more), so a FOCUSED card scrolls the cursored row's
+        // block (its own lines and its whole tooltip, however far a narrow
+        // pane wraps it) into view instead of clipping `max spend`, `remove`
+        // or a hint's tail off the bottom. Unfocused keeps the top anchored:
+        // while browsing the left chain the identity header is the payload,
+        // not the rows.
+        Some(ChainItemKind::Member(_)) if detail_focused => {
+            let cursor = app.fallback_detail_cursor.min(FALLBACK_ROWS.len() - 1);
+            let block = &spans[cursor];
+            // The block's first line caps the scroll, so a row taller than the
+            // pane (the day picker on a small terminal) keeps its label. The
+            // picker's caret line outranks the label when the two cannot share
+            // the pane: a space there saves the day under the caret, which
+            // must be on screen.
+            let caret_line = match edit {
+                Some(CardEdit::Days(picker))
+                    if FALLBACK_ROWS[cursor] == FallbackRow::PreferredDays =>
+                {
+                    day_picker_rows(inner_w)
+                        .iter()
+                        .position(|r| r.contains(&picker.cursor))
+                }
+                _ => None,
             }
-            _ => None,
+            .map(|k| block.start + k);
+            let start = caret_line.map_or(block.start, |line| {
+                block.start.max((line + 1).saturating_sub(height))
+            });
+            (start, block.end)
         }
-        .map(|k| row.start + k);
-        caret_line
-            .map_or(base, |line| base.max((line + 1).saturating_sub(height)))
-            .min(content_h.saturating_sub(height))
-    } else {
-        0
+        Some(ChainItemKind::Add) => add_focus,
+        Some(ChainItemKind::Member(_)) | None => (0, 0),
     };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme::base())
-            .scroll((scroll as u16, 0)),
-        inner,
-    );
+    let scroll = draw_scrolled_lines(frame, inner, lines, focus);
 
     // Position the native terminal cursor for whichever field is being typed,
     // matching the post-draw cursor path the other edit screens use. This is not
@@ -279,8 +289,8 @@ fn draw_chain_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // The row must actually be ON the pane before its caret is placed. The
     // scroll above chases the CURSORED row, which is the row being typed on
-    // every real path — but a degenerate pane (height smaller than the
-    // lookahead) can still leave it off, and an unguarded set parks a visible
+    // every real path — but a degenerate pane (no rows at all) can still leave
+    // it off, and an unguarded set parks a visible
     // caret on a border or the pane below, since a real terminal clamps the
     // row rather than dropping it. Mirrors the `config.rs` edit-caret guard.
     if detail_focused
@@ -526,13 +536,16 @@ struct MemberCard<'a> {
     weekly_editing: Option<&'a InputState>,
     /// The chip caret while the day picker is open on this member.
     day_picker: Option<usize>,
+    /// The custom day list the open card remembers as a cycle stop.
+    day_stop: Option<&'a [Weekday]>,
     width: usize,
     kick_lift: Option<i64>,
     sessions: crate::live_sessions::MemberSessions,
 }
 
 /// The lines each `FALLBACK_ROWS` row occupies in [`member_detail`]'s output,
-/// its own lines only (tooltip excluded), indexed like `FALLBACK_ROWS`.
+/// its own lines plus the tooltip under it, indexed like `FALLBACK_ROWS`: the
+/// block the card's scroll keeps on screen, whose first line is the row's own.
 type RowSpans = [std::ops::Range<usize>; FALLBACK_ROWS.len()];
 
 /// Live-session count, 5h gauge with threshold tick, headroom figure, and the
@@ -551,6 +564,7 @@ fn member_detail(
         max_spend_editing,
         weekly_editing,
         day_picker,
+        day_stop,
         width,
         kick_lift,
         sessions,
@@ -669,6 +683,7 @@ fn member_detail(
                 preferred: profile.preferred,
                 preferred_days: &profile.preferred_days,
                 day_picker: picking,
+                day_stop,
                 max_spend: profile.max_auto_spend.unwrap_or(0.0),
                 spend_budget: cfg.state.spend_budget_switching,
                 armed_remove,
@@ -684,7 +699,6 @@ fn member_detail(
                 line
             }
         }));
-        spans[i] = start..lines.len();
         // `rotate at` shows its help hint while the row is selected; while typing,
         // it swaps to an always-on `0–100 %` range tooltip (faint, DANGER when out
         // of range) — mirroring the Config-tab refresh editor.
@@ -748,19 +762,32 @@ fn member_detail(
                 width,
             ));
         }
-        // At rest, blocker-first like `Disabled`: a list that cannot claim is the
-        // one fact worth saying before space starts cycling presets. The
-        // `preferred` half is named on both other arms because the list never
-        // answers for the days it leaves alone — the `preferred` hint above says
-        // the same from its side. Descended, the picker's edit grammar instead.
+        // At rest, what the list does and that ⏎ picks single days, blocker
+        // first like `Disabled`: a list that cannot claim is the one fact worth
+        // saying before space starts cycling presets. It says nothing of the
+        // days it leaves alone, since another member's list can claim those
+        // ahead of `preferred`; the `preferred` hint above covers them. A day
+        // another list names too goes to whichever claimant reads clear first
+        // (`is_home_on` reads the claimant set), so that arm says so instead of
+        // promising this account the day. Descended, the picker's grammar.
         if *row == FallbackRow::PreferredDays && selected {
+            let shared = shared_days(cfg, name, &profile.preferred_days);
             let hint = match (picking, crate::fallback::day_claim_blocker(cfg, name)) {
-                (Some(_), _) => "space toggles and saves · ↵ done".to_string(),
-                (None, Some(reason)) => format!("a day list here would claim nothing: {reason}"),
-                (None, None) if profile.preferred_days.is_empty() => {
-                    "no home days; `preferred` holds every day".to_string()
+                (Some(_), _) => {
+                    "← → walk · space toggles and saves · ↵ esc done · ↑ ↓ leave".to_string()
                 }
-                (None, None) => "home on these days; `preferred` decides the rest".to_string(),
+                (None, Some(reason)) => format!(
+                    "a day list here would claim nothing: {reason} · ↵ picks days one by one"
+                ),
+                (None, None) if !shared.is_empty() => format!(
+                    "another list also names {}: work returns to whichever account reads clear \
+                     first · ↵ picks days one by one",
+                    day_list_label(&shared)
+                ),
+                (None, None) => {
+                    "work returns to this account on the days set here · ↵ picks days one by one"
+                        .to_string()
+                }
             };
             lines.extend(help_tooltip_lines(&hint, width));
         }
@@ -787,6 +814,7 @@ fn member_detail(
                 None => {}
             }
         }
+        spans[i] = start..lines.len();
     }
 
     // All-exhausted sibling of the Overview projection line: when EVERY chain
@@ -846,12 +874,14 @@ fn preferred_hint(cfg: &AppConfig, name: &crate::profile::ProfileName, on: bool)
         .filter(|_| crate::fallback::day_claim_blocker(cfg, name).is_none())
     {
         let named = crate::profile::render_preferred_days(&days).join(", ");
+        // The toggle's half names the days it really decides: "the rest" would
+        // be false the moment another member's list names one of them.
         return if on {
-            // 80 columns is the narrow case this card renders at; the tail has
-            // to survive it or the operator reads only the list half.
-            format!("home on {named} by the day list, and on the rest by this toggle")
+            format!(
+                "home on {named} by its preferred days, and on days no list claims by this toggle"
+            )
         } else {
-            format!("home on {named}, by the day list in this account's config.toml")
+            format!("home on {named} by its preferred days")
         };
     }
     // Only a list that could actually serve stands the toggle down, matching
@@ -955,6 +985,8 @@ struct MemberRow<'a> {
     preferred_days: &'a [Weekday],
     /// The chip caret while the day picker is open on this member.
     day_picker: Option<usize>,
+    /// The custom day list the open card remembers as a cycle stop.
+    day_stop: Option<&'a [Weekday]>,
     max_spend: f64,
     spend_budget: bool,
     armed_remove: bool,
@@ -979,6 +1011,7 @@ fn detail_row(
         preferred,
         preferred_days,
         day_picker,
+        day_stop,
         max_spend,
         spend_budget,
         armed_remove,
@@ -1113,7 +1146,7 @@ fn detail_row(
         FallbackRow::PreferredDays => {
             return match day_picker {
                 Some(caret) => day_picker_lines(preferred_days, caret, width),
-                None => day_list_lines(arrow, selected, preferred_days, width),
+                None => day_list_lines(arrow, selected, preferred_days, day_stop, width),
             };
         }
         FallbackRow::MaxSpend => {
@@ -1191,6 +1224,20 @@ fn detail_row(
 /// Where a value opens on the card: past the 2-cell gutter and the key column.
 const VALUE_COL: usize = 2 + DETAIL_KEY_W + DETAIL_KEY_GUTTER;
 
+/// The days in `days` another chain member's list also claims, in
+/// `WEEKDAYS_ALL` order: on those, work returns to whichever claimant reads
+/// clear first rather than to `name`.
+fn shared_days(
+    cfg: &AppConfig,
+    name: &crate::profile::ProfileName,
+    days: &[Weekday],
+) -> Vec<Weekday> {
+    WEEKDAYS_ALL
+        .into_iter()
+        .filter(|day| days.contains(day) && cfg.day_listers(*day).any(|n| n != name))
+        .collect()
+}
+
 /// A day list as the card names it: the preset rung's own name, or the custom
 /// set in its canonical spelling.
 fn day_list_label(days: &[Weekday]) -> String {
@@ -1200,52 +1247,50 @@ fn day_list_label(days: &[Weekday]) -> String {
     }
 }
 
-/// The `preferred days` row at rest: the preset rung's own name, or a custom set
-/// spelled as the file writes it. A custom set too wide for the pane breaks
-/// between days, never inside one, onto lines indented to the value column, the
-/// open picker's break rule. `never` is the unset state, so it reads faint like
-/// an off toggle.
+/// The `preferred days` row at rest: the house cycle row over
+/// [`PREFERRED_DAY_PRESETS`], `never` a live rung like the rest. A custom set
+/// trails the run spelled as the file writes it: the row's value while the
+/// member holds it, else the stop the open card remembers stepping past, which
+/// the cycle comes back to.
 fn day_list_lines(
     arrow: Span<'static>,
     selected: bool,
     days: &[Weekday],
+    stop: Option<&[Weekday]>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let style = if days.is_empty() {
-        theme::faint()
-    } else {
-        theme::accent()
-    };
-    let label = day_list_label(days);
-    let segments = if preferred_days_preset(days).is_some() {
-        vec![label]
-    } else {
-        // Floored at the longest entry: `wrap_words` hard-splits a word wider
-        // than its width, and a day name is never split.
-        let longest = label
-            .split_whitespace()
-            .map(|w| w.chars().count())
-            .max()
-            .unwrap_or(0);
-        wrap_words(&label, width.saturating_sub(VALUE_COL).max(longest))
-    };
-    let mut lead = Some(vec![
+    let held = preferred_days_preset(days);
+    let options: Vec<(&str, bool)> = PREFERRED_DAY_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| (*label, held == Some(i)))
+        .collect();
+    let custom = match held {
+        None => Some((days, true)),
+        Some(_) => stop.map(|stop| (stop, false)),
+    }
+    .map(|(set, active)| {
+        (
+            crate::profile::render_preferred_days(set).join(", "),
+            active,
+        )
+    });
+    let lead = vec![
         arrow,
         Span::styled(
             key_cell("preferred days", DETAIL_KEY_W, DETAIL_KEY_GUTTER),
             label_style(selected),
         ),
-    ]);
-    segments
-        .into_iter()
-        .map(|segment| {
-            let mut spans = lead
-                .take()
-                .unwrap_or_else(|| vec![Span::raw(" ".repeat(VALUE_COL))]);
-            spans.push(Span::styled(segment, style));
-            Line::from(spans)
-        })
-        .collect()
+    ];
+    cycle_row_lines(
+        lead,
+        &options,
+        custom
+            .as_ref()
+            .map(|(value, active)| (value.as_str(), *active)),
+        selected,
+        width,
+    )
 }
 
 /// Where the picker's first caret slot sits on every line: past the gutter and
@@ -1333,7 +1378,9 @@ fn day_picker_lines(days: &[Weekday], caret: usize, width: usize) -> Vec<Line<'s
         .collect()
 }
 
-fn add_detail(app: &App, focused: bool, width: usize) -> Vec<Line<'static>> {
+/// The `+ add` pane's lines, and the block the view keeps on screen: the
+/// candidate under the cursor with the note it carries.
+fn add_detail(app: &App, focused: bool, width: usize) -> (Vec<Line<'static>>, (usize, usize)) {
     let candidates = chain_candidates(app);
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled("add an account to the rotation", theme::dim())),
@@ -1354,18 +1401,22 @@ fn add_detail(app: &App, focused: bool, width: usize) -> Vec<Line<'static>> {
             "every account is already in the chain",
             theme::faint(),
         )));
-        return lines;
+        return (lines, (0, 0));
     }
 
     if !focused {
-        return lines;
+        return (lines, (0, 0));
     }
 
     let cursor = app
         .fallback_detail_cursor
         .min(candidates.len().saturating_sub(1));
+    let mut focus = (0, 0);
     for (i, name) in candidates.iter().enumerate() {
         let selected = i == cursor;
+        if selected {
+            focus.0 = lines.len();
+        }
         let arrow = if selected {
             Span::styled("❯ ", theme::accent().bold())
         } else {
@@ -1391,12 +1442,15 @@ fn add_detail(app: &App, focused: bool, width: usize) -> Vec<Line<'static>> {
             let blocker = crate::fallback::walk_blocker(&app.config(), &member);
             let hint = match blocker {
                 Some(reason) => format!("its day list ({label}) would claim nothing: {reason}"),
-                None => format!("home on {label}"),
+                None => format!("brings back its preferred days: {label}"),
             };
             lines.extend(help_tooltip_lines(&hint, width));
         }
+        if selected {
+            focus.1 = lines.len();
+        }
     }
-    lines
+    (lines, focus)
 }
 
 fn empty_detail() -> Vec<Line<'static>> {

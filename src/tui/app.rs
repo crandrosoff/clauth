@@ -202,10 +202,9 @@ pub(crate) enum FallbackRow {
     Preferred,
     /// The weekdays this member is home (`Profile::preferred_days`): a cycle row
     /// over `PREFERRED_DAY_PRESETS` at rest, a multi-select chip row once ⏎
-    /// descends into it (`CardEdit::Days`). A hand-written list
-    /// matching no preset renders in its canonical spelling and steps to
-    /// `never`, the ladder's first rung: a set has no order, so there is no next
-    /// rung above it to step to.
+    /// descends into it (`CardEdit::Days`). A list matching no preset trails the
+    /// run in its canonical spelling and is one more stop in the cycle while the
+    /// card stays open (`App::fallback_day_stop`).
     PreferredDays,
     /// Dollar ceiling on what the chain may spend of this member's
     /// pay-as-you-go budget unattended (`Profile::max_auto_spend`, $0 default).
@@ -333,8 +332,8 @@ const DAYS_WEEKENDS: [Weekday; 2] = [Weekday::Sat, Weekday::Sun];
 
 /// The `preferred days` preset ladder: one source for the row's display AND
 /// `step_preferred_days`' cycle, in cycle order. Space walks it forward and
-/// wraps past the last rung back to `never`; a set matching no rung steps to
-/// `never`.
+/// wraps past the last rung onto the card's remembered custom list, else back
+/// to `never`; a set matching no rung steps to `never`.
 pub(crate) const PREFERRED_DAY_PRESETS: [(&str, &[Weekday]); 4] = [
     ("never", &[]),
     ("weekdays", &DAYS_WEEKDAYS),
@@ -1871,6 +1870,10 @@ pub(crate) struct App {
     /// The member card's one open edit, pinned to the member it opened on, or
     /// `None` at rest.
     pub(crate) fallback_edit: Option<MemberEdit<CardEdit>>,
+    /// The custom day list `space` last stepped past on the open card, kept as
+    /// one more stop in the preset cycle until the card closes. UI state only:
+    /// never saved, dropped with the card.
+    pub(crate) fallback_day_stop: Option<MemberEdit<Vec<Weekday>>>,
     /// Cursor into [`GLOBAL_CONFIG_ROWS`] on the program-wide Config tab.
     pub(crate) global_config_cursor: usize,
     /// `Some` while the refresh-interval custom-value field is open (⏎ opens,
@@ -2355,6 +2358,7 @@ impl App {
             fallback_focus: FallbackFocus::Chain,
             fallback_detail_cursor: 0,
             fallback_edit: None,
+            fallback_day_stop: None,
             global_config_cursor: 0,
             refresh_interval_draft: None,
             context_nudge_draft: None,
@@ -3183,8 +3187,8 @@ pub(crate) fn has_sub_focus(app: &App) -> bool {
         || (app.tab == Tab::Tokens && app.token_view == TokenView::Models)
 }
 
-/// What owns the keyboard this frame: every key, `←`/`→` included, reaches it
-/// before any tab switch or global binding.
+/// What owns the keyboard this frame: every key it claims ([`KeyOwner::claims`]),
+/// `←`/`→` included, reaches it before any tab switch or global binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyOwner {
     /// The modal stack: its top modal takes every key.
@@ -3207,6 +3211,15 @@ pub(crate) enum KeyOwner {
     WeeklyThreshold,
     /// The Plugin tab's herdr tag-refresh field.
     HerdrTag,
+}
+
+impl KeyOwner {
+    /// Whether this owner takes `code`, or lets it through to the global keys.
+    /// The chip picker binds neither `?` nor `x`, so help and toast dismissal
+    /// work mid-pick; a typed field takes both, since they are data there.
+    pub(crate) fn claims(self, code: KeyCode) -> bool {
+        !(self == Self::DayPicker && matches!(code, KeyCode::Char('?' | 'x')))
+    }
 }
 
 /// What owns the keyboard this frame, or `None` when keys take their tab and
@@ -3262,8 +3275,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // A modal, then an open editor, owns the keyboard: typed digits and
-    // letters can't trip global shortcuts, and ←/→ never switch the tab.
-    if let Some(owner) = keyboard_owner(app) {
+    // letters can't trip global shortcuts, and ←/→ never switch the tab. A key
+    // the owner does not claim falls through to the global senses below.
+    if let Some(owner) = keyboard_owner(app).filter(|owner| owner.claims(key.code)) {
         match owner {
             KeyOwner::Modal => handle_modal_key(app, key),
             KeyOwner::SetupField | KeyOwner::NewAccountField => handle_config_edit_key(app, key),
@@ -3582,9 +3596,7 @@ fn switch_tab(app: &mut App, tab: Tab) {
         Tab::Fallback => {
             app.chain_cursor = chain_cursor_for_profile(app);
             sync_profile_from_chain(app);
-            app.fallback_focus = FallbackFocus::Chain;
-            app.fallback_detail_cursor = 0;
-            app.fallback_edit = None;
+            leave_fallback_detail(app);
         }
         Tab::Config => {
             app.global_config_cursor = 0;
@@ -5996,11 +6008,13 @@ fn enter_fallback_detail(app: &mut App) {
     app.fallback_focus = FallbackFocus::Detail;
 }
 
-/// Return focus to the chain list, clearing any armed remove or live edit.
+/// Return focus to the chain list, clearing any armed remove or live edit and
+/// the card's remembered day-list stop.
 fn leave_fallback_detail(app: &mut App) {
     app.fallback_focus = FallbackFocus::Chain;
     app.fallback_detail_cursor = 0;
     app.fallback_edit = None;
+    app.fallback_day_stop = None;
 }
 
 /// ⇧↑↓: move the selected member up/down, cursor follows. No-op on `+ add`
@@ -6222,26 +6236,35 @@ pub(crate) fn member_days(app: &App, name: &ProfileName) -> Option<Vec<Weekday>>
 /// [`MemberEdit`] is pinned to. When the reload took that member off the chain
 /// or its account off the roster, close the edit and hand focus back to the
 /// chain list, so no key meant for the edit lands on the member that moved into
-/// its slot, and none writes to an account that is gone.
+/// its slot, and none writes to an account that is gone. A remembered day-list
+/// stop goes once the card no longer shows its member.
 fn repin_member_edit(app: &mut App) {
-    let Some(member) = app.fallback_edit.as_ref().map(|e| e.member.clone()) else {
-        return;
-    };
-    let slot = {
-        let cfg = app.config();
-        cfg.find(&member)
-            .and_then(|_| cfg.state.fallback_chain.iter().position(|n| *n == member))
-    };
-    match slot {
-        Some(i) => app.chain_cursor = i,
-        None => leave_fallback_detail(app),
+    if let Some(member) = app.fallback_edit.as_ref().map(|e| e.member.clone()) {
+        let slot = {
+            let cfg = app.config();
+            cfg.find(&member)
+                .and_then(|_| cfg.state.fallback_chain.iter().position(|n| *n == member))
+        };
+        match slot {
+            Some(i) => app.chain_cursor = i,
+            None => leave_fallback_detail(app),
+        }
+    }
+    if app
+        .fallback_day_stop
+        .as_ref()
+        .is_some_and(|stop| selected_member_name(app).as_ref() != Some(&stop.member))
+    {
+        app.fallback_day_stop = None;
     }
 }
 
-/// Space on the `preferred days` row at rest: step to the next preset rung and
-/// persist. A set matching no rung (a hand-written list) steps to `never`, the
-/// ladder's first rung: a set has no order, so no rung sits above it the way
-/// `step_weekly_threshold` finds the next preset above a custom percent.
+/// Space on the `preferred days` row at rest: step to the next stop and
+/// persist. A set matching no rung (a custom list) is one more stop past the
+/// last rung for as long as the card stays open: stepping off it remembers it
+/// and lands on `never`, the ladder's first rung (a set has no order, so no
+/// rung sits above it the way `step_weekly_threshold` finds the next preset
+/// above a custom percent), and the last rung steps back onto it.
 fn step_preferred_days(app: &mut App) {
     let Some(name) = selected_member_name(app) else {
         return;
@@ -6252,10 +6275,21 @@ fn step_preferred_days(app: &mut App) {
         return;
     };
     let next = match preferred_days_preset(&shown) {
-        Some(i) if i + 1 < PREFERRED_DAY_PRESETS.len() => i + 1,
-        _ => 0,
+        Some(i) if i + 1 < PREFERRED_DAY_PRESETS.len() => preferred_days_at(i + 1),
+        Some(_) => app
+            .fallback_day_stop
+            .as_ref()
+            .filter(|stop| stop.member == name)
+            .map(|stop| stop.state.clone())
+            .unwrap_or_default(),
+        None => {
+            app.fallback_day_stop = Some(MemberEdit {
+                member: name.clone(),
+                state: shown,
+            });
+            preferred_days_at(0)
+        }
     };
-    let next = preferred_days_at(next);
     if let Some(reason) = write_preferred_days(app, &name, move |_| next) {
         warn_list_claims_nothing(app, reason);
     }
@@ -6277,8 +6311,9 @@ fn open_day_picker(app: &mut App) {
 
 /// Keystrokes while the chip picker is open (a multi-select chip row):
 /// ←/→ walk the caret with wrap, space toggles the day under it and saves at
-/// once, ⏎/esc/q leave the mode, ↑/↓ leave the mode and the row together. Every
-/// other key is claimed and does nothing, so no global binding fires mid-pick.
+/// once, ⏎/esc/q leave the mode, ↑/↓ leave the mode and the row together.
+/// `?` and `x` never reach here ([`KeyOwner::claims`]); every other key is
+/// claimed and does nothing, so no other global binding fires mid-pick.
 fn handle_day_picker_key(app: &mut App, key: KeyEvent) {
     let days = WEEKDAYS_ALL.len();
     match key.code {

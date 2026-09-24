@@ -1,6 +1,7 @@
 //! Bottom strip: key hints, or a footer alert in place when one is active.
 
 use ratatui::Frame;
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -17,11 +18,14 @@ use super::format::spinner_frame;
 
 const TAB_NAV: (&str, &str) = ("←→", "tabs");
 
-/// A typed field's whole grammar: `q` is data there, so it gets no hint.
-const TYPED_FIELD: &[(&str, &str)] = &[("↵", "save"), ("←→", "caret"), ("esc", "cancel")];
+/// A typed field's whole grammar: `q` is data there, so it gets no hint. Esc
+/// puts the field back to its saved value, and says so in the field's own
+/// terms, since beside a login in flight a bare `cancel` reads as the login's.
+const TYPED_FIELD: &[(&str, &str)] = &[("↵", "save"), ("←→", "caret"), ("esc", "revert")];
 
-/// The `+ new` form's typed field: esc ends the edit and keeps the typed value.
-const NEW_ACCOUNT_FIELD: &[(&str, &str)] = &[("↵", "save"), ("←→", "caret"), ("esc", "done")];
+/// The `+ new` form's typed field: ⏎ and esc both end the edit and keep the
+/// typed value; nothing saves until the form's own `create account` row.
+const NEW_ACCOUNT_FIELD: &[(&str, &str)] = &[("↵", "done"), ("←→", "caret"), ("esc", "done")];
 
 pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // 1-col breathing room on each side; the alert row (which replaces this in
@@ -56,11 +60,22 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    // An editor owns every key, `←→` included, so its own grammar is the whole
-    // row: `q` only where the editor itself binds it. Every owner takes the
-    // arrows, so `←→ tabs` rides only while nothing owns the keyboard.
-    let mut hints: Vec<(&str, &str)> = match owner.and_then(owner_hints) {
-        Some(hints) => hints.to_vec(),
+    // An editor owns the keys it claims, `←→` included, so its own grammar is
+    // the whole row: `q` only where the editor itself binds it, `? help` only
+    // where it lets `?` through. Every owner takes the arrows, so `←→ tabs`
+    // rides only while nothing owns the keyboard.
+    let mut hints: Vec<(&str, &str)> = match owner.zip(owner.and_then(owner_hints)) {
+        Some((owner, own)) => {
+            let mut hints = own.to_vec();
+            if !owner.claims(KeyCode::Char('?')) {
+                let at = hints
+                    .iter()
+                    .position(|(key, _)| *key == "q")
+                    .unwrap_or(hints.len());
+                hints.insert(at, ("?", "help"));
+            }
+            hints
+        }
         None => owner
             .is_none()
             .then_some(TAB_NAV)
@@ -96,9 +111,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-/// An owner's own grammar, the whole hint row while it holds the keyboard.
-/// `None` for the modal stack, which has no hint set of its own: the screen's
-/// hints stay under it.
+/// An owner's own grammar, the whole hint row while it holds the keyboard
+/// bar the `? help` that [`draw`] derives from what the owner claims. `None`
+/// for the modal stack, which has no hint set of its own: the screen's hints
+/// stay under it.
 fn owner_hints(owner: KeyOwner) -> Option<&'static [(&'static str, &'static str)]> {
     match owner {
         KeyOwner::Modal => None,
@@ -110,11 +126,11 @@ fn owner_hints(owner: KeyOwner) -> Option<&'static [(&'static str, &'static str)
         | KeyOwner::HerdrTag => Some(TYPED_FIELD),
         KeyOwner::NewAccountField => Some(NEW_ACCOUNT_FIELD),
         // `←→` walk the chips and each space saves, so nothing reads as a
-        // commit; `q` leaves the picker.
+        // commit; `q` leaves the picker. ⏎ leaves it too, so it takes no group
+        // of its own beside `q back`: three screen-specific groups at most.
         KeyOwner::DayPicker => Some(&[
             ("←→", "day"),
             ("space", "toggle"),
-            ("↵", "done"),
             ("↑↓", "row"),
             ("q", "back"),
         ]),

@@ -34,8 +34,8 @@ use super::super::app::{
 };
 use super::super::theme::{self, Tier};
 use super::panes::{
-    cycle_option, draw_scrolled_lines, head_cols, help_tooltip_lines, highlight_row,
-    invalid_tooltip_lines, key_cell, label_style, section_box, value_caret,
+    cycle_option, cycle_row_lines, draw_scrolled_lines, head_cols, help_tooltip_lines,
+    highlight_row, invalid_tooltip_lines, key_cell, label_style, section_box, value_caret,
 };
 
 /// Width of the key column: the longest keys (`allow extra usage` /
@@ -140,13 +140,26 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 lines.extend(tooltip);
             }
             None => {
+                // `home tab` is the Config tab's widest run (eight chips, 87
+                // cells focused), so it is the one row here that wraps.
                 let row_lines = if *row == GlobalConfigRow::HomeTab {
                     let arrow = if selected {
                         Span::styled("❯ ", theme::accent().bold())
                     } else {
                         Span::raw("  ")
                     };
-                    home_tab_lines(arrow, rows, selected, inner.width as usize)
+                    let lead = vec![
+                        arrow,
+                        Span::styled(
+                            key_cell("home tab", KEY_W, KEY_GUTTER),
+                            label_style(selected),
+                        ),
+                    ];
+                    let options: Vec<(&str, bool)> = HomeTab::ALL
+                        .iter()
+                        .map(|t| (t.as_str(), rows.home_tab == *t))
+                        .collect();
+                    cycle_row_lines(lead, &options, None, selected, inner.width as usize)
                 } else {
                     vec![detail_row(*row, selected, rows, tunables, row_editing)]
                 };
@@ -837,51 +850,6 @@ fn cycle_row(
         spans.push(cycle_option(label, *active, row_selected));
     }
     Line::from(spans)
-}
-
-/// [`cycle_row`]'s wrap-aware form for the `home tab` row: the run is the
-/// Config tab's widest (eight chips, 87 cells focused), so at a narrow pane a
-/// single line clips the tail of the run — the selected chip included. The
-/// run breaks BETWEEN chips onto continuation lines indented to the value
-/// column (the contract's multi-select wrapping clause, extended to the cycle
-/// row), never inside a chip.
-fn home_tab_lines(
-    arrow: Span<'static>,
-    rows: RowState,
-    selected: bool,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let value_col = 2 + KEY_W + KEY_GUTTER;
-    let mut out = vec![Line::from(vec![
-        arrow,
-        Span::styled(
-            key_cell("home tab", KEY_W, KEY_GUTTER),
-            label_style(selected),
-        ),
-    ])];
-    let mut used = value_col;
-    for (i, tab) in HomeTab::ALL.iter().enumerate() {
-        let span = cycle_option(tab.as_str(), rows.home_tab == *tab, selected);
-        let gap = if i == 0 { 0 } else { 2 };
-        let need = span.content.chars().count() + gap;
-        if used + need > width {
-            let len = span.content.chars().count();
-            let mut next = Line::from(Span::raw(" ".repeat(value_col)));
-            next.spans.push(span);
-            used = value_col + len;
-            out.push(next);
-        } else {
-            // `out` always holds the first line (built above).
-            let idx = out.len() - 1;
-            let last = &mut out[idx];
-            if gap > 0 {
-                last.spans.push(Span::raw("  "));
-            }
-            last.spans.push(span);
-            used += need;
-        }
-    }
-    out
 }
 
 /// A disabled row for a cycle setting another toggle makes inert: the
