@@ -701,6 +701,19 @@ pub(crate) enum HerdrCommand {
         #[command(subcommand)]
         cmd: HerdrConfigCommand,
     },
+
+    /// Re-run the plugin's pane report so the sidebar tag follows a switch
+    ///
+    /// Started detached by every account switch clauth makes: every claude or
+    /// codex pane after a global switch, or only `$HERDR_PANE_ID` with
+    /// `--own-pane` after a `--with-fallback` swap. Silent when herdr or the
+    /// clauth plugin is absent. Hidden from help: a switch's own path.
+    #[command(hide = true)]
+    RefreshTags {
+        /// Re-report only this session's own pane (`$HERDR_PANE_ID`).
+        #[arg(long)]
+        own_pane: bool,
+    },
 }
 
 /// `clauth proxy <cmd>`.

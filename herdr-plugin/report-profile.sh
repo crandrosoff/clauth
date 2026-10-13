@@ -270,19 +270,27 @@ else
 fi
 "$herdr_bin" pane report-metadata "$@"
 [ "$pane_tag" = on ] || exit 0
+# A re-run clauth itself started (`clauth herdr refresh-tags` after a switch,
+# or a TUI knob push) only republishes: it never spawns a watcher.
+[ "${CLAUTH_TAG_NO_WATCH:-}" = 1 ] && exit 0
 
-# A --with-fallback session moves onto another account mid-run with no herdr
-# event, so the one-shot report above goes stale until the next status change.
-# Spawn a detached per-pane watcher to re-report on a timer instead. Only
-# claude and codex panes spend a clauth account; an agentless pane publishes
-# its clear above and is left watcher-less. The pidfile makes later invocations
-# skip the spawn while that watch lives, and the watcher removes it when it
-# exits: the pane closed, or it runs neither claude nor codex.
+# Every switch clauth makes (`clauth switch`, an auto-switch, a --with-fallback
+# swap) pushes the tag itself, so the per-pane timer below is opt-in: it only
+# catches an account moved outside clauth. `tag_watch_secs = 0`, the default,
+# leaves it off. Only claude and codex panes spend a clauth account; an
+# agentless pane publishes its clear above and is left watcher-less. The
+# pidfile makes later invocations skip the spawn while that watch lives, and
+# the watcher removes it when it exits: the pane closed, or it runs neither
+# claude nor codex.
 case "$agent" in
     claude | codex) ;;
     *) exit 0 ;;
 esac
 [ -n "$pane" ] || exit 0
+watch_secs=$(clauth herdr config get tag_watch_secs 2>/dev/null || printf '%s' "${CLAUTH_PROFILE_WATCH_INTERVAL:-0}")
+case "$watch_secs" in
+    '' | 0) exit 0 ;;
+esac
 state_dir="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/clauth}"
 mkdir -p "$state_dir" 2>/dev/null || exit 0
 pidfile="$state_dir/watch-$pane.pid"

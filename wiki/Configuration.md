@@ -159,7 +159,7 @@ clauth keeps no file for the queue: it derives the last open from `usage_history
 | `[herdr]` | table | `{}` | the herdr-plugin knobs the Services tab edits, plus the first-launch marker ([herdr plugin](Herdr-Plugin)) |
 | `[herdr] popup_width` | string | `fit` | `fit` (focused-pane width, 540-column cap), `half` (herdr's default), `split-right`, or `split-top` (a real pane right of or above the focused one); a saved `full` loads as `fit` |
 | `[herdr] pane_tag` | bool | `true` | publish the `clauth=$profile` pane-metadata tag; off clears it on every pane |
-| `[herdr] tag_watch_secs` | int | `5` | seconds between the per-pane tag watcher's re-publishes |
+| `[herdr] tag_watch_secs` | int | `0` | seconds between the opt-in per-pane tag watcher's re-publishes; `0` starts no watcher, since every switch clauth makes pushes the tags itself |
 | `[herdr] border_label` | bool | `false` | publish `--display-agent "$profile"` so split-pane borders name the account; off clears the stale label |
 | `[herdr] delegate_dot` | bool | `true` | report `clauth_delegate=working\|idle` pane metadata during delegate runs |
 | `[herdr] delegate_row_text` | bool | `false` | append `$clauth_delegate` to the sidebar row `install` writes |

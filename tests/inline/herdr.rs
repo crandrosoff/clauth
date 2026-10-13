@@ -2356,7 +2356,7 @@ fn herdr_config_get_answers_every_default_with_no_profiles_toml() {
     for (key, want) in [
         ("popup_width", "fit"),
         ("pane_tag", "on"),
-        ("tag_watch_secs", "5"),
+        ("tag_watch_secs", "0"),
         ("border_label", "off"),
         ("delegate_dot", "on"),
         ("delegate_row_text", "off"),
@@ -2575,6 +2575,20 @@ fn report_profile_run(
     border_label: &str,
     agent_json: Option<&str>,
 ) -> (Vec<String>, bool) {
+    report_profile_run_with(pane_tag, border_label, agent_json, "1", false)
+}
+
+/// [`report_profile_run`] with the `tag_watch_secs` knob spelled by the caller,
+/// and `pushed` setting `CLAUTH_TAG_NO_WATCH=1`, the mark a switch's
+/// `clauth herdr refresh-tags` re-run carries.
+#[cfg(unix)]
+fn report_profile_run_with(
+    pane_tag: &str,
+    border_label: &str,
+    agent_json: Option<&str>,
+    watch_secs: &str,
+    pushed: bool,
+) -> (Vec<String>, bool) {
     let home = crate::testutil::HomeSandbox::new();
     write_shim(
         home.home(),
@@ -2585,7 +2599,7 @@ fn report_profile_run(
         home.home(),
         "clauth",
         &format!(
-            "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo {pane_tag} ;;\n  herdr:border_label) echo {border_label} ;;\n  herdr:tag_watch_secs) echo 1 ;;\nesac\nexit 0\n"
+            "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo {pane_tag} ;;\n  herdr:border_label) echo {border_label} ;;\n  herdr:tag_watch_secs) echo {watch_secs} ;;\nesac\nexit 0\n"
         ),
     );
     let mut cmd = std::process::Command::new("sh");
@@ -2610,6 +2624,11 @@ fn report_profile_run(
     );
     if let Some(agent) = agent_json {
         cmd.env("HERDR_PLUGIN_EVENT_JSON", agent);
+    }
+    if pushed {
+        cmd.env("CLAUTH_TAG_NO_WATCH", "1");
+    } else {
+        cmd.env_remove("CLAUTH_TAG_NO_WATCH");
     }
     let out = cmd.output().expect("report-profile.sh runs");
     assert!(
@@ -4027,4 +4046,192 @@ fn snapshot_rects_read_herdr_091_layouts() {
         rects[0].1.as_ref().map(|r| (r.width, r.height)),
         Some((80, 24))
     );
+}
+
+// ── push-on-switch: the tag follows a switch without a per-pane timer ──────
+
+/// `tag_watch_secs = 0` (the default) turns the per-pane timer off: the hook's
+/// report still publishes the tag once, and no watcher is spawned for it.
+#[cfg(unix)]
+#[test]
+fn tag_watch_secs_zero_reports_once_and_spawns_no_watcher() {
+    let (lines, spawned) =
+        report_profile_run_with("on", "off", Some(r#"{"agent":"claude"}"#), "0", false);
+    assert_eq!(lines.len(), 1, "one report-metadata call: {lines:?}");
+    assert!(
+        lines[0].contains("--token clauth=fit"),
+        "the tag is published: {}",
+        lines[0]
+    );
+    assert!(!spawned, "a zero interval spawns no watcher");
+}
+
+/// A positive interval keeps the opt-in timer: the claude pane gets its watcher.
+#[cfg(unix)]
+#[test]
+fn a_positive_tag_watch_secs_still_spawns_the_watcher() {
+    let (_lines, spawned) =
+        report_profile_run_with("on", "off", Some(r#"{"agent":"claude"}"#), "1", false);
+    assert!(spawned, "the opt-in timer still spawns its watcher");
+}
+
+/// A re-run pushed by a switch (`CLAUTH_TAG_NO_WATCH=1`) republishes the tag
+/// and never spawns a watcher, whatever the interval says: the push must not
+/// grow the timers it replaces.
+#[cfg(unix)]
+#[test]
+fn a_pushed_report_spawns_no_watcher_even_with_a_timer_set() {
+    let (lines, spawned) =
+        report_profile_run_with("on", "off", Some(r#"{"agent":"claude"}"#), "1", true);
+    assert_eq!(lines.len(), 1, "one report-metadata call: {lines:?}");
+    assert!(!spawned, "a pushed re-run spawns no watcher");
+}
+
+/// A sandbox for [`refresh_tags_with`]: a herdr shim that logs every argv and
+/// answers `plugin list --json` and `pane list` from files, and a fake
+/// `report-profile.sh` under the registered plugin root that logs the pane id
+/// and the push mark it ran with.
+#[cfg(unix)]
+struct RefreshSandbox {
+    home: crate::testutil::HomeSandbox,
+}
+
+#[cfg(unix)]
+impl RefreshSandbox {
+    fn new(entry: Option<&str>) -> Self {
+        let home = crate::testutil::HomeSandbox::new();
+        let root = home.home().join("plugin");
+        std::fs::create_dir_all(&root).expect("plugin root");
+        write_shim(
+            &root,
+            "report-profile.sh",
+            "printf '%s %s %s\\n' \"$HERDR_PANE_ID\" \"${CLAUTH_TAG_NO_WATCH:-}\" \"${HERDR_PLUGIN_EVENT_JSON:-}\" >> \"$(dirname \"$0\")/runs.log\"\nexit 0\n",
+        );
+        write_shim(
+            home.home(),
+            "herdr",
+            "echo \"$*\" >> \"$(dirname \"$0\")/herdr.log\"\nif [ \"$1\" = plugin ] && [ \"$2\" = list ]; then cat \"$(dirname \"$0\")/plugins.json\"; exit 0; fi\nif [ \"$1\" = pane ] && [ \"$2\" = list ]; then cat \"$(dirname \"$0\")/panes.json\"; exit 0; fi\nexit 0\n",
+        );
+        let entries = entry
+            .map(|e| e.replace("{ROOT}", &root.display().to_string()))
+            .unwrap_or_default();
+        std::fs::write(
+            home.home().join("plugins.json"),
+            format!(
+                r#"{{"id":"cli:plugin","result":{{"plugins":[{entries}],"type":"plugin_list"}}}}"#
+            ),
+        )
+        .expect("plugin list");
+        let pane = |id: &str, agent: Option<&str>| {
+            let agent = agent
+                .map(|a| format!(r#""agent":"{a}","#))
+                .unwrap_or_default();
+            format!(
+                r#"{{{agent}"agent_status":"idle","focused":false,"pane_id":"{id}","tab_id":"w1:t1","workspace_id":"w1"}}"#
+            )
+        };
+        std::fs::write(
+            home.home().join("panes.json"),
+            format!(
+                r#"{{"id":"cli:pane:list","result":{{"panes":[{},{},{}],"type":"pane_list"}}}}"#,
+                pane("p1", Some("claude")),
+                pane("p2", Some("codex")),
+                pane("p3", None)
+            ),
+        )
+        .expect("pane list");
+        Self { home }
+    }
+
+    fn bin(&self) -> String {
+        self.home.home().join("herdr").display().to_string()
+    }
+
+    fn runs(&self) -> Vec<String> {
+        std::fs::read_to_string(self.home.home().join("plugin/runs.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    }
+
+    fn herdr_calls(&self) -> String {
+        std::fs::read_to_string(self.home.home().join("herdr.log")).unwrap_or_default()
+    }
+}
+
+#[cfg(unix)]
+const CLAUTH_ENTRY: &str = r#"{"enabled":true,"manifest_path":"{ROOT}/herdr-plugin.toml","name":"clauth","plugin_id":"clauth","plugin_root":"{ROOT}","source":{"kind":"github","owner":"uwuclxdy","repo":"clauth"},"version":"0.17.0"}"#;
+
+/// A switch's push re-runs the plugin's own report once per claude or codex
+/// pane, each carrying the no-watch mark and no event JSON, and skips the
+/// agentless pane: the script, not clauth, still decides the tag.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_reports_each_claude_and_codex_pane_once() {
+    let sandbox = RefreshSandbox::new(Some(CLAUTH_ENTRY));
+    let reported = refresh_tags_with(&sandbox.bin(), &TagScope::AgentPanes, None);
+    assert_eq!(reported, vec!["p1".to_string(), "p2".to_string()]);
+    assert_eq!(sandbox.runs(), vec!["p1 1", "p2 1"]);
+}
+
+/// A fallback swap moves only its own session, so its push reports only its
+/// own pane, and never lists the others.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_for_its_own_pane_reports_only_that_pane() {
+    let sandbox = RefreshSandbox::new(Some(CLAUTH_ENTRY));
+    let reported = refresh_tags_with(&sandbox.bin(), &TagScope::OwnPane, Some("p9"));
+    assert_eq!(reported, vec!["p9".to_string()]);
+    assert_eq!(sandbox.runs(), vec!["p9 1"]);
+    assert!(
+        !sandbox.herdr_calls().contains("pane list"),
+        "no pane list for one pane: {}",
+        sandbox.herdr_calls()
+    );
+}
+
+/// A session outside herdr has no pane to report.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_for_its_own_pane_outside_herdr_reports_nothing() {
+    let sandbox = RefreshSandbox::new(Some(CLAUTH_ENTRY));
+    assert!(refresh_tags_with(&sandbox.bin(), &TagScope::OwnPane, None).is_empty());
+    assert!(sandbox.runs().is_empty());
+}
+
+/// No clauth plugin registered with herdr: nothing to run, and no error.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_is_silent_when_the_plugin_is_not_registered() {
+    let sandbox = RefreshSandbox::new(None);
+    assert!(refresh_tags_with(&sandbox.bin(), &TagScope::AgentPanes, None).is_empty());
+    assert!(sandbox.runs().is_empty());
+}
+
+/// A disabled plugin publishes nothing, so a switch must not run its script.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_skips_a_disabled_plugin() {
+    let disabled = CLAUTH_ENTRY.replace(r#""enabled":true"#, r#""enabled":false"#);
+    let sandbox = RefreshSandbox::new(Some(&disabled));
+    assert!(refresh_tags_with(&sandbox.bin(), &TagScope::AgentPanes, None).is_empty());
+    assert!(sandbox.runs().is_empty());
+}
+
+/// `clauth herdr refresh-tags` parses, hidden, with an optional `--own-pane`.
+#[test]
+fn herdr_refresh_tags_parses_with_and_without_own_pane() {
+    for (argv, own) in [
+        (vec!["clauth", "herdr", "refresh-tags"], false),
+        (vec!["clauth", "herdr", "refresh-tags", "--own-pane"], true),
+    ] {
+        let cli = Cli::try_parse_from(argv).expect("parses");
+        match cli.command {
+            Some(Command::Herdr {
+                cmd: HerdrCommand::RefreshTags { own_pane },
+            }) => assert_eq!(own_pane, own),
+            other => panic!("not refresh-tags: {other:?}"),
+        }
+    }
 }

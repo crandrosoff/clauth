@@ -28,8 +28,9 @@ description = "Publish the account the focused pane burns as pane metadata"
 contexts = ["global", "workspace", "pane"]
 command = ["sh", "report-profile.sh"]
 
-# A --with-fallback session moves onto another account mid-run, so the tag is
-# refreshed on every status change and not only when the agent first appears.
+# The tag is refreshed on every agent status change, not only when the agent
+# first appears; an account switch clauth makes re-reports it too
+# (`clauth herdr refresh-tags`).
 [[events]]
 on = "pane.agent_detected"
 command = ["sh", "report-profile.sh"]

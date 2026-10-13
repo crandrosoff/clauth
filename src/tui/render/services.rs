@@ -743,7 +743,10 @@ fn option_row(
                 spans.push(Span::styled(" s", unit_style));
             }
             None => spans.push(Span::styled(
-                format!("{}s", settings.tag_watch_secs),
+                match settings.tag_watch_secs {
+                    0 => "off".to_string(),
+                    secs => format!("{secs}s"),
+                },
                 theme::accent(),
             )),
         },

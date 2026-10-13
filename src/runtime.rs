@@ -3338,6 +3338,9 @@ impl SessionSwap {
                     plan.member
                 );
             }
+            // The row now names the new member, which the pane's tag reads:
+            // push this session's own pane, the one account that moved.
+            crate::herdr::push_pane_tags(crate::herdr::TagScope::OwnPane);
             Ok(SwapOutcome::Swapped)
         })?;
         // macOS: the session's Claude Code reads the NAMESPACED Keychain item
@@ -3702,6 +3705,9 @@ impl SessionSwap {
                     plan.member
                 );
             }
+            // The row now names the new member, which the pane's tag reads:
+            // push this session's own pane, the one account that moved.
+            crate::herdr::push_pane_tags(crate::herdr::TagScope::OwnPane);
             Ok(SwapOutcome::Swapped)
         })
     }

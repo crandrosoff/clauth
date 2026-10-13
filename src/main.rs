@@ -417,6 +417,7 @@ fn cmd_herdr(cmd: cli::HerdrCommand) -> Result<()> {
         cli::HerdrCommand::Config { cmd } => match cmd {
             cli::HerdrConfigCommand::Get { key } => herdr::config_get(&key),
         },
+        cli::HerdrCommand::RefreshTags { own_pane } => herdr::refresh_tags(own_pane),
     }
 }
 

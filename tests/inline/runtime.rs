@@ -11279,3 +11279,23 @@ fn the_watchdog_keeps_what_a_session_saved_beside_a_static_token() {
         "a re-login syncs nothing"
     );
 }
+
+/// A fallback swap moves only its own session onto the next member, so it
+/// pushes a re-report of its own pane's tag, once, and nothing else.
+#[test]
+fn a_swap_pushes_its_own_pane_tag_once() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    with_fake_home(tmp.path(), || {
+        let launch = member("push-a");
+        let intended = member("push-b");
+        member_store(&launch);
+        member_store(&intended);
+        let (swap, _launch_markers) = lone_session(&launch, Isolation::Shared);
+        let _ = crate::herdr::take_pushed_tags();
+        assert_eq!(swap.swap_to("push-b").expect("swap"), SwapOutcome::Swapped);
+        assert_eq!(
+            crate::herdr::take_pushed_tags(),
+            vec![crate::herdr::TagScope::OwnPane]
+        );
+    });
+}

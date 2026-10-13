@@ -685,6 +685,10 @@ pub(crate) fn publish_status_with(
     config: &crate::profile::ConfigHandle,
     before_commit: impl FnOnce(),
 ) {
+    // Every caller is a switch that moved the active account (or turned it
+    // off), so this is also where the herdr pane tags are pushed. The push is
+    // not the feed: it runs even when a daemon owns the feed and defers it.
+    crate::herdr::push_pane_tags(crate::herdr::TagScope::AgentPanes);
     if singleton_held().unwrap_or(false) {
         return;
     }
