@@ -4368,9 +4368,10 @@ fn a_pushed_rerun_drops_inherited_clauth_session_homes_and_keeps_custom_ones() {
     );
 }
 
-/// herdr 0.8 registered a github install with no `plugin_root` (the captured
-/// `GITHUB` entry): the scripts are found under the source's managed path,
-/// at its `subdir` when herdr names one, else at the managed path itself.
+/// herdr 0.8 registered a github install with no `plugin_root` (the shape of
+/// the captured `GITHUB` entry; these two entries are built in that shape): the
+/// scripts are found under the source's managed path, at its `subdir` when
+/// herdr names one, else at the managed path itself.
 #[cfg(unix)]
 #[test]
 fn refresh_tags_finds_the_scripts_of_an_install_without_plugin_root() {
@@ -4385,10 +4386,13 @@ fn refresh_tags_finds_the_scripts_of_an_install_without_plugin_root() {
     }
 }
 
-/// The push re-executes the running binary through a path that survives that
-/// binary being replaced on disk (`/proc/self/exe` on Linux).
+/// The push re-executes the running binary through `/proc/self/exe` on Linux,
+/// the one path that still runs this image after an upgrade replaced or
+/// removed the file on disk; elsewhere through `current_exe`.
 #[test]
-fn the_push_runs_a_binary_path_that_exists() {
+fn the_push_reexecutes_through_proc_self_exe_on_linux() {
     let exe = self_exe().expect("a runnable clauth");
+    #[cfg(target_os = "linux")]
+    assert_eq!(exe, std::path::Path::new("/proc/self/exe"));
     assert!(exe.exists(), "{}", exe.display());
 }

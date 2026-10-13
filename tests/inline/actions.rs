@@ -7695,3 +7695,29 @@ fn deleting_an_adopted_codex_profile_pushes_the_agent_pane_tags() {
         vec![crate::herdr::TagScope::AgentPanes]
     );
 }
+
+/// The forcing relink changes the live login a bare `claude` pane reads, so it
+/// pushes when its hold ends: a flow that commits the marker in one hold and
+/// relinks in a later one (the dashboard's divergence adoption) pushes again
+/// after the relink, so the last push sees the new login.
+#[test]
+fn a_relink_in_its_own_hold_pushes_after_the_marker_hold() {
+    let _home = HomeSandbox::new();
+    let mut config = two_profiles_active_on_one();
+    let _ = crate::herdr::take_pushed_tags();
+    crate::lock::with_state_lock(|held| {
+        config.state.set_active(Some("two".into()), held);
+        Ok(())
+    })
+    .expect("marker hold");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+    crate::claude::force_link_profile_credentials(&"two".into()).expect("relink");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes],
+        "the relink pushes once more, after it"
+    );
+}

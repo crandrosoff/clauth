@@ -8239,8 +8239,9 @@ fn handle_herdr_tag_edit_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Parse and persist the typed tag-refresh seconds. A value under 1s keeps the
-/// draft open so the inline Invalid-input treatment stays on screen — no toast.
+/// Parse and persist the typed tag-refresh seconds; 0 turns the per-pane
+/// timer off. A value that is not a whole number keeps the draft open so the
+/// inline Invalid-input treatment stays on screen — no toast.
 fn commit_herdr_tag_edit(app: &mut App) {
     let Some(raw) = app.services.herdr_tag_draft.as_ref().map(|i| i.trimmed()) else {
         return;
@@ -8257,8 +8258,8 @@ fn commit_herdr_tag_edit(app: &mut App) {
     app.services.herdr_tag_draft = None;
 }
 
-/// A typed tag-refresh value is valid only as a whole number of seconds, at
-/// least 1 — shared by the commit path and the render's inline check.
+/// A typed tag-refresh value is valid only as a whole number of seconds, 0
+/// (off) included — shared by the commit path and the render's inline check.
 pub(crate) fn parse_herdr_tag_secs(raw: &str) -> Option<u64> {
     raw.parse::<u64>().ok()
 }

@@ -3443,6 +3443,10 @@ pub(crate) fn force_link_profile_credentials(name: &ProfileName) -> Result<()> {
         } else if link.symlink_metadata().is_ok() {
             std::fs::remove_file(&link).context("failed to remove .credentials.json")?;
         }
+        // The live login a bare `claude` pane reads just moved: push the herdr
+        // pane tags when this hold ends. A switch relinks inside the hold that
+        // moves the marker, so it still pushes once.
+        crate::lock::note_account_moved();
         Ok(())
     })
 }

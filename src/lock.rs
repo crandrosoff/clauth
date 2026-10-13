@@ -177,12 +177,16 @@ thread_local! {
 }
 
 /// Record that the active account moved inside the current state hold. The
-/// herdr pane tags are pushed once, when the OUTERMOST hold ends: after the
-/// move was committed inside it and the flock is free, never while a reporter
-/// could still read the state from before the move. Every writer of the
-/// active-account marker calls this through `AppState::set_active`, so a
-/// switch, a login that activates, a logout, a delete and a divergence
-/// adoption all push without each caller having to remember to.
+/// herdr pane tags are pushed once, when the OUTERMOST hold ends and the flock
+/// is free, so a reporter never reads the state from the middle of the move.
+/// That is after the move's save, or after a save that failed: the push only
+/// re-reads the current state, so an extra one is harmless. Every writer of
+/// the active-account marker calls this through `AppState::set_active`, and
+/// the forcing relink of the live login calls it too, so a switch, a login
+/// that activates, a logout, a delete and a divergence adoption all push
+/// without each caller having to remember to. A flow that moves the marker
+/// and the live login in separate holds pushes after each, the last one
+/// after the new login is live.
 pub(crate) fn note_account_moved() {
     ACCOUNT_MOVED.set(true);
 }
