@@ -8144,7 +8144,7 @@ fn step_herdr_tag_refresh(app: &mut App, delta: i64) {
         cfg.state.herdr.tag_watch_secs = if delta > 0 {
             cur.saturating_add(1)
         } else {
-            cur.saturating_sub(1).max(1)
+            cur.saturating_sub(1)
         };
         let _ = save_app_state(&cfg.state);
     }
@@ -8163,9 +8163,9 @@ fn toggle_herdr_bool(app: &mut App, flip: impl FnOnce(&mut HerdrSettings)) {
 }
 
 /// Push a `pane_tag`/`border_label` change onto the live herdr panes right
-/// now, instead of letting it sit until the next watcher tick
-/// (`tag_watch_secs` away, 5 s by default): re-run `report-profile.sh` once
-/// per pane, the way `watch-profile.sh` re-runs it. The off direction clears
+/// now, instead of letting it sit until the next agent event or watcher tick
+/// (the watcher is opt-in, `tag_watch_secs` above 0): re-run
+/// `report-profile.sh` once per pane, the way a switch's push re-runs it. The off direction clears
 /// its artifact through the same re-run, so it no longer waits for the tick
 /// either. Only the two knobs that script reads trigger this —
 /// `delegate_dot`'s gate lives in the MCP server process (a separate binary a
@@ -8193,43 +8193,13 @@ fn push_herdr_knob_change() {
         .to_string_lossy()
         .into_owned();
     spawn_worker(move || {
-        let Some(panes) = herdr_pane_ids(&bin) else {
+        let Some(panes) = crate::herdr::list_panes(&bin) else {
             return;
         };
         for pane in panes {
-            rerun_pane_report(&script, &pane);
+            crate::herdr::rerun_pane_report(&bin, &script, &pane.pane_id);
         }
     });
-}
-
-/// `bin pane list` → pane ids, parsed by the one typed parser the pane
-/// reporter shares: an unknown payload shape (a herdr release moving a field)
-/// reads as no panes rather than a wrong one. Bounded at
-/// `crate::herdr::PROBE_TIMEOUT` — a hung herdr delays the push worker, never
-/// the key handling.
-fn herdr_pane_ids(bin: &str) -> Option<Vec<String>> {
-    let out = crate::herdr::bounded_output(bin, &["pane", "list"], &[])?;
-    if !out.status.success() {
-        return None;
-    }
-    crate::herdr::parse_pane_list(&out.stdout)
-        .map(|panes| panes.into_iter().map(|pane| pane.pane_id).collect())
-}
-
-/// Re-run `report-profile.sh` for one pane with the pane id set and the
-/// event/context JSON cleared, so the script reads the pane's live agent
-/// itself. The script's pidfile gate skips the watcher spawn while a live
-/// watch exists, so re-running it alongside the live watchers is safe.
-fn rerun_pane_report(script: &str, pane: &str) {
-    let _ = crate::herdr::bounded_output(
-        script,
-        &[],
-        &[
-            ("HERDR_PANE_ID", std::ffi::OsStr::new(pane)),
-            ("HERDR_PLUGIN_EVENT_JSON", std::ffi::OsStr::new("")),
-            ("HERDR_PLUGIN_CONTEXT_JSON", std::ffi::OsStr::new("")),
-        ],
-    );
 }
 
 /// Advance the popup-width knob to the next shape, wrapping past `split-top`
@@ -8290,8 +8260,7 @@ fn commit_herdr_tag_edit(app: &mut App) {
 /// A typed tag-refresh value is valid only as a whole number of seconds, at
 /// least 1 — shared by the commit path and the render's inline check.
 pub(crate) fn parse_herdr_tag_secs(raw: &str) -> Option<u64> {
-    let secs = raw.parse::<u64>().ok()?;
-    (secs >= 1).then_some(secs)
+    raw.parse::<u64>().ok()
 }
 
 /// Open the confirm before flipping `delegate row text`: the flip rewrites

@@ -7531,3 +7531,77 @@ fn a_login_clear_retires_the_spent_record() {
             .exists()
     );
 }
+
+// ── push-on-switch: a switch re-reports the herdr pane tags itself ─────────
+
+/// A global switch that moved the active account pushes one re-report of every
+/// agent pane's tag, so a bare `claude` pane's tag follows it with no timer.
+#[test]
+fn a_global_switch_pushes_the_agent_pane_tags_once() {
+    let _home = HomeSandbox::new();
+    let _ = crate::herdr::take_pushed_tags();
+    through_handle(two_profiles_active_on_one(), |h| {
+        switch_profile(h, &"two".into()).expect("switch");
+    });
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// The no-op switch (target already active) moves nothing, so it pushes nothing.
+#[test]
+fn a_no_op_switch_pushes_no_pane_tags() {
+    let _home = HomeSandbox::new();
+    let _ = crate::herdr::take_pushed_tags();
+    through_handle(two_profiles_active_on_one(), |h| {
+        switch_profile(h, &"one".into()).expect("no-op switch");
+    });
+    assert!(crate::herdr::take_pushed_tags().is_empty());
+}
+
+/// The push is not the feed: a daemon owning the status feed defers the
+/// republish, but the switch still pushes the tags.
+#[test]
+fn a_switch_pushes_the_tags_while_a_daemon_owns_the_feed() {
+    let _home = HomeSandbox::new();
+    let _ = crate::herdr::take_pushed_tags();
+    let _singleton = crate::daemon::hold_daemon_lock();
+    through_handle(two_profiles_active_on_one(), |h| {
+        switch_profile(h, &"two".into()).expect("switch");
+    });
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// Switching off leaves bare `claude` panes on no account: their tags follow.
+#[test]
+fn switching_off_pushes_the_agent_pane_tags() {
+    let _home = HomeSandbox::new();
+    let _ = crate::herdr::take_pushed_tags();
+    through_handle(two_profiles_active_on_one(), |h| {
+        switch_off(h).expect("switch off");
+    });
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// A codex switch repoints the operator's auth link, which codex panes read:
+/// it pushes the same re-report, and its no-op pushes nothing.
+#[test]
+fn a_codex_switch_pushes_the_agent_pane_tags_and_its_no_op_does_not() {
+    let _home = HomeSandbox::new();
+    write_codex_state("active_profile = \"cx1\"\nprofiles = [\"cx1\", \"cx2\"]\n");
+    let _ = crate::herdr::take_pushed_tags();
+    switch_codex_profile("cx2").expect("switch");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+    switch_codex_profile("cx2").expect("no-op switch");
+    assert!(crate::herdr::take_pushed_tags().is_empty());
+}

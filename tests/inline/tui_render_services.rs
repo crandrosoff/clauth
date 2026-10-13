@@ -3262,8 +3262,8 @@ fn herdr_options_render_all_six_rows_on_both_tiers() {
         "pane tag on:\n{screen}"
     );
     assert!(
-        row_with(&rows, "tag refresh").contains("5s"),
-        "tag refresh default 5s:\n{screen}"
+        row_with(&rows, "tag refresh").contains("off"),
+        "tag refresh default off (0, no watcher):\n{screen}"
     );
     assert!(
         row_with(&rows, "border label").contains("○─"),

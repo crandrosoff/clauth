@@ -16141,7 +16141,7 @@ fn herdr_pane_tag_toggles_and_persists() {
     assert!(herdr_knobs().pane_tag, "and back");
 }
 
-/// `tag refresh`: `+`/`-` step live with a floor of 1, ⏎ opens the typed editor
+/// `tag refresh`: `+`/`-` step live with a floor of 0 (off), ⏎ opens the typed editor
 /// (commits on ⏎, discards on ⎋, invalid input stays in the editor) — the
 /// Config-tab refresh-interval mechanism.
 #[test]
@@ -16151,12 +16151,16 @@ fn herdr_tag_refresh_steps_types_and_persists() {
     let mut app = herdr_options_app();
     app.services.herdr_options_cursor = 2;
 
-    for _ in 0..4 {
-        handle_key(&mut app, crate::testutil::key(KeyCode::Char('-')));
-    }
-    assert_eq!(herdr_knobs().tag_watch_secs, 1, "four steps down from 5");
+    assert_eq!(herdr_knobs().tag_watch_secs, 0, "the default is 0, off");
     handle_key(&mut app, crate::testutil::key(KeyCode::Char('-')));
-    assert_eq!(herdr_knobs().tag_watch_secs, 1, "the floor is 1, never 0");
+    assert_eq!(herdr_knobs().tag_watch_secs, 0, "the floor is 0, off");
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('+')));
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('+')));
+    assert_eq!(herdr_knobs().tag_watch_secs, 2);
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('-')));
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('-')));
+    assert_eq!(herdr_knobs().tag_watch_secs, 0, "stepping down reaches off");
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('+')));
     handle_key(&mut app, crate::testutil::key(KeyCode::Char('+')));
     assert_eq!(herdr_knobs().tag_watch_secs, 2);
 
@@ -16173,12 +16177,12 @@ fn herdr_tag_refresh_steps_types_and_persists() {
     assert_eq!(herdr_knobs().tag_watch_secs, 30, "the typed value commits");
     assert!(app.services.herdr_tag_draft.is_none());
 
-    // An under-floor value keeps the editor open and persists nothing.
+    // A value that is not a whole number keeps the editor open and persists nothing.
     handle_key(&mut app, crate::testutil::key(KeyCode::Enter));
     handle_key(&mut app, crate::testutil::key(KeyCode::Backspace));
     handle_key(&mut app, crate::testutil::key(KeyCode::Backspace));
     handle_key(&mut app, crate::testutil::key(KeyCode::Backspace));
-    handle_key(&mut app, crate::testutil::key(KeyCode::Char('0')));
+    handle_key(&mut app, crate::testutil::key(KeyCode::Char('x')));
     handle_key(&mut app, crate::testutil::key(KeyCode::Enter));
     assert!(
         app.services.herdr_tag_draft.is_some(),
@@ -29076,4 +29080,12 @@ mod usage_picker {
             "the startup rate step refuses a hybrid's OAuth burn history"
         );
     }
+}
+
+/// The typed editor takes 0, which turns the per-pane timer off.
+#[test]
+fn herdr_tag_refresh_editor_accepts_zero_as_off() {
+    assert_eq!(super::parse_herdr_tag_secs("0"), Some(0));
+    assert_eq!(super::parse_herdr_tag_secs("30"), Some(30));
+    assert_eq!(super::parse_herdr_tag_secs("x"), None);
 }

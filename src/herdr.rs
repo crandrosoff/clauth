@@ -395,6 +395,167 @@ pub(crate) struct HerdrProbe {
     pub(crate) error: Option<String>,
 }
 
+/// Which panes a switch's tag push re-reports: every claude or codex pane
+/// after a global (claude or codex) switch, or only the session's own pane
+/// after a `--with-fallback` swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TagScope {
+    AgentPanes,
+    OwnPane,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PUSHED_TAGS: std::cell::RefCell<Vec<TagScope>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push the herdr pane tags after an account switch, so the sidebar tag
+/// follows it with no per-pane timer: every switch clauth makes calls this
+/// once it has committed. Starts `clauth herdr refresh-tags` detached, so the
+/// switch never waits on herdr, and no herdr costs one `PATH` lookup. Tests
+/// record the scope instead of spawning.
+pub(crate) fn push_pane_tags(scope: TagScope) {
+    #[cfg(test)]
+    PUSHED_TAGS.with(|pushed| pushed.borrow_mut().push(scope));
+    #[cfg(not(test))]
+    spawn_tag_refresh(scope);
+}
+
+/// The scopes [`push_pane_tags`] recorded on this thread, drained.
+#[cfg(test)]
+pub(crate) fn take_pushed_tags() -> Vec<TagScope> {
+    PUSHED_TAGS.with(|pushed| std::mem::take(&mut *pushed.borrow_mut()))
+}
+
+/// [`push_pane_tags`]'s spawn. A global push strips the session vars (the
+/// daemon rule, [`strip_session_env`]): a switch moves every herdr pane's
+/// account, so the push targets herdr's default session, never the pane its
+/// caller happened to start in. An own-pane push keeps them: it IS that pane.
+/// The child is reaped off-thread, so a long-lived caller (daemon, TUI,
+/// session supervisor) keeps no zombie per switch.
+#[cfg(not(test))]
+fn spawn_tag_refresh(scope: TagScope) {
+    if resolved_bin().is_none() {
+        return;
+    }
+    if scope == TagScope::OwnPane && std::env::var_os("HERDR_PANE_ID").is_none() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(["herdr", "refresh-tags"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match scope {
+        TagScope::AgentPanes => strip_session_env(&mut cmd),
+        TagScope::OwnPane => {
+            cmd.arg("--own-pane");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+    if let Ok(mut child) = cmd.spawn() {
+        let _ = std::thread::Builder::new()
+            .name("clauth-tag-push".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+}
+
+/// `clauth herdr refresh-tags [--own-pane]`: the body a switch's push runs.
+/// Silent and successful when herdr, the clauth plugin, or its script is
+/// absent: a push is best-effort, and the next agent-event hook still reports.
+pub(crate) fn refresh_tags(own_pane: bool) -> Result<()> {
+    let Some(bin) = resolved_bin() else {
+        return Ok(());
+    };
+    let scope = if own_pane {
+        TagScope::OwnPane
+    } else {
+        TagScope::AgentPanes
+    };
+    let own = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|pane| !pane.is_empty());
+    refresh_tags_with(&bin.to_string_lossy(), &scope, own.as_deref());
+    Ok(())
+}
+
+/// [`refresh_tags`] against a named herdr: re-runs the registered plugin's own
+/// `report-profile.sh` once per pane in `scope` (so the script, not clauth,
+/// still decides each tag) and returns the panes it ran for. Nothing runs when
+/// the clauth plugin is unregistered or disabled, or its script is missing.
+pub(crate) fn refresh_tags_with(
+    bin: &str,
+    scope: &TagScope,
+    own_pane: Option<&str>,
+) -> Vec<String> {
+    if *scope == TagScope::OwnPane && own_pane.is_none() {
+        return Vec::new();
+    }
+    let (Some(entry), _) = registry_probe(bin) else {
+        return Vec::new();
+    };
+    let Some(root) = entry.plugin_root.filter(|_| entry.enabled) else {
+        return Vec::new();
+    };
+    let script = Path::new(&root).join("report-profile.sh");
+    if !script.is_file() {
+        return Vec::new();
+    }
+    let panes: Vec<String> = match scope {
+        TagScope::OwnPane => own_pane.map(str::to_string).into_iter().collect(),
+        TagScope::AgentPanes => list_panes(bin)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pane| matches!(pane.agent.as_deref(), Some("claude" | "codex")))
+            .map(|pane| pane.pane_id)
+            .collect(),
+    };
+    let script = script.to_string_lossy();
+    for pane in &panes {
+        rerun_pane_report(bin, &script, pane);
+    }
+    panes
+}
+
+/// `bin pane list`, parsed by the one typed parser the pane reporter shares:
+/// an unknown payload shape (a herdr release moving a field) reads as no
+/// panes rather than a wrong one. Bounded at [`PROBE_TIMEOUT`].
+pub(crate) fn list_panes(bin: &str) -> Option<Vec<HerdrPane>> {
+    let out = bounded_output(bin, &["pane", "list"], &[])?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_pane_list(&out.stdout)
+}
+
+/// Re-run `report-profile.sh` for one pane with the pane id set and the
+/// event/context JSON cleared, so the script reads the pane's live agent
+/// itself. `CLAUTH_TAG_NO_WATCH=1` marks it a re-run: it republishes and never
+/// spawns a watcher, which only herdr's own hook runs may do.
+pub(crate) fn rerun_pane_report(bin: &str, script: &str, pane: &str) {
+    let _ = bounded_output(
+        script,
+        &[],
+        &[
+            ("HERDR_PANE_ID", OsStr::new(pane)),
+            ("HERDR_BIN_PATH", OsStr::new(bin)),
+            ("HERDR_PLUGIN_EVENT_JSON", OsStr::new("")),
+            ("HERDR_PLUGIN_CONTEXT_JSON", OsStr::new("")),
+            ("CLAUTH_TAG_NO_WATCH", OsStr::new("1")),
+        ],
+    );
+}
+
 /// Probes the installed herdr. `None` when herdr does not resolve, so the caller renders no row at all.
 pub(crate) fn probe() -> Option<HerdrProbe> {
     let bin = resolved_bin()?;

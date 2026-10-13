@@ -746,7 +746,9 @@ pub(crate) struct HerdrSettings {
     pub(crate) popup_width: PopupWidth,
     /// Publish the `clauth=$profile` pane-metadata token (the sidebar tag).
     pub(crate) pane_tag: bool,
-    /// The per-pane tag watcher interval, seconds.
+    /// The opt-in per-pane tag watcher interval, seconds; 0 (the default)
+    /// spawns no watcher. Every switch clauth makes pushes the tags itself, so
+    /// the timer only catches an account moved outside clauth.
     pub(crate) tag_watch_secs: u64,
     /// Also publish `--display-agent "$profile"` so split-pane borders name
     /// the account.
@@ -768,7 +770,7 @@ impl Default for HerdrSettings {
         Self {
             popup_width: PopupWidth::Fit,
             pane_tag: true,
-            tag_watch_secs: 5,
+            tag_watch_secs: 0,
             border_label: false,
             delegate_dot: true,
             delegate_row_text: false,

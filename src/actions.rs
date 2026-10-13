@@ -1239,7 +1239,7 @@ pub(crate) fn delete_profile(
 /// profile — the rename there replaces by remove-then-rename — and the next
 /// switch to either account re-links it.
 pub(crate) fn switch_codex_profile(name: &str) -> Result<Option<std::path::PathBuf>> {
-    crate::codex_profiles::CodexState::update(|state| {
+    let (repointed, moved) = crate::codex_profiles::CodexState::update(|state| {
         if !state.holds(name) {
             bail!("codex profile '{name}' not found");
         }
@@ -1247,11 +1247,18 @@ pub(crate) fn switch_codex_profile(name: &str) -> Result<Option<std::path::PathB
         let repointed = follow_operator_auth_slot(name)?;
         // Same early return the claude switch takes on `is_active` — nothing
         // to move, and `update`'s dirty check then leaves the file untouched.
-        if state.active_profile().map(ProfileName::as_str) != Some(name) {
+        let moved = state.active_profile().map(ProfileName::as_str) != Some(name);
+        if moved {
             state.set_active(Some(name));
         }
-        Ok(repointed)
-    })
+        Ok((repointed, moved))
+    })?;
+    // A codex pane's tag follows the slot and the operator's auth link: push
+    // it once either moved, the way every claude switch does.
+    if moved || repointed.is_some() {
+        crate::herdr::push_pane_tags(crate::herdr::TagScope::AgentPanes);
+    }
+    Ok(repointed)
 }
 
 /// Repoint the operator's `auth.json` at `name`'s store when it is a link into
