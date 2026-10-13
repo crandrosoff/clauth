@@ -1091,7 +1091,14 @@ impl AppState {
     /// Set the active-profile marker. Requires the state-flock witness: the
     /// marker is read-modify-written cross-process, so an unlocked write can
     /// lose a concurrent switch.
+    ///
+    /// A marker that actually moves also schedules the herdr pane-tag push
+    /// for the end of the hold ([`crate::lock::note_account_moved`]); writing
+    /// the account already active pushes nothing.
     pub(crate) fn set_active(&mut self, active: Option<ProfileName>, _held: &StateLockHeld) {
+        if self.active_profile.as_ref() != active.as_ref() {
+            crate::lock::note_account_moved();
+        }
         self.active_profile.set(active, _held);
     }
 

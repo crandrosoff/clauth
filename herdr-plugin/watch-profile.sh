@@ -15,18 +15,33 @@ set -u
 pane="${1:?usage: watch-profile.sh <pane-id> <pidfile>}"
 pidfile="${2:?usage: watch-profile.sh <pane-id> <pidfile>}"
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
-# The tag_watch_secs knob wins over the env, which wins over the 5s default;
-# a predating clauth answers nothing, so the env/default chain still holds.
-interval=$(clauth herdr config get tag_watch_secs 2>/dev/null || printf '%s' "${CLAUTH_PROFILE_WATCH_INTERVAL:-5}")
-# A non-numeric interval would make `sleep` fail instantly, zero would hot-spin
-# the loop, and a hand-edited knob of absurd magnitude overflows `sleep`'s
-# parser; clamp non-numeric to the default, and the range to [1 s, 1 h].
-case "$interval" in
-    *[!0-9]* | '') interval=5 ;;
-esac
-[ "$interval" -lt 1 ] && interval=1
-[ "$interval" -gt 3600 ] && interval=3600
 dir=$(dirname "$0")
+
+# The tick interval. The tag_watch_secs knob wins over the env, which wins over
+# the 5s default; a predating clauth answers nothing, so the env/default chain
+# still holds. `off` (the knob at 0) or 0 prints `off`: the timer was turned
+# off. A non-numeric interval would make `sleep` fail instantly and a knob of
+# absurd magnitude overflows `sleep`'s parser; clamp non-numeric to the
+# default, and the range to at most 1 h.
+read_interval() {
+    v=$(clauth herdr config get tag_watch_secs 2>/dev/null) || v="${CLAUTH_PROFILE_WATCH_INTERVAL:-5}"
+    case "$v" in
+        off) printf 'off'; return ;;
+        *[!0-9]* | '') v=5 ;;
+    esac
+    if [ "$v" -lt 1 ]; then printf 'off'; return; fi
+    [ "$v" -gt 3600 ] && v=3600
+    printf '%s' "$v"
+}
+
+# Sleep one tick. The knob is re-read first, so turning the timer off reaches a
+# watcher already running, not only new ones: it ends, leaving the tag it last
+# published standing (the switch push keeps it current from then on).
+nap() {
+    interval=$(read_interval)
+    [ "$interval" = off ] && exit 0
+    sleep "$interval"
+}
 
 # Reads the pane's own `agent` field from a `pane get` JSON line on stdin. The
 # nested `agent_session` record (whose `agent` field is always present) and the
@@ -42,6 +57,8 @@ pane_agent() {
 # by a killed watch self-heals: the next spawn sees a dead pid and takes over.
 echo "$$" > "$pidfile" 2>/dev/null
 trap 'rm -f "$pidfile"' EXIT
+interval=$(read_interval)
+[ "$interval" = off ] && exit 0
 
 fails=0
 while :; do
@@ -56,7 +73,7 @@ while :; do
         if [ "$fails" -ge 3 ]; then
             break
         fi
-        sleep "$interval"
+        nap
         continue
     }
     fails=0
@@ -75,8 +92,10 @@ while :; do
     # instead of inheriting the spawn hook's stale value, and hand it the live
     # agent just read: a codex watcher on a pane that now runs claude re-reports
     # as claude (and the reverse), never its spawn-time harness.
+    # CLAUTH_TAG_NO_WATCH: this watcher IS the pane's watcher, so the report
+    # only republishes and never spawns another.
     HERDR_PANE_ID="$pane" HERDR_PLUGIN_EVENT_JSON='' HERDR_PLUGIN_CONTEXT_JSON='' \
-        CLAUTH_PANE_AGENT="$live" \
+        CLAUTH_PANE_AGENT="$live" CLAUTH_TAG_NO_WATCH=1 \
         "$dir/report-profile.sh" >/dev/null 2>&1 || true
-    sleep "$interval"
+    nap
 done

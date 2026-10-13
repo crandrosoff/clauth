@@ -276,8 +276,10 @@ fi
 
 # Every switch clauth makes (`clauth switch`, an auto-switch, a --with-fallback
 # swap) pushes the tag itself, so the per-pane timer below is opt-in: it only
-# catches an account moved outside clauth. `tag_watch_secs = 0`, the default,
-# leaves it off. Only claude and codex panes spend a clauth account; an
+# catches an account moved outside clauth. `tag_watch_secs = 0` (printed `off`),
+# the default, leaves it off. A clauth that predates the knob answers nothing
+# and predates the push too, so it keeps its old timer: the env (0 included)
+# or the old 5 s default. Only claude and codex panes spend a clauth account; an
 # agentless pane publishes its clear above and is left watcher-less. The
 # pidfile makes later invocations skip the spawn while that watch lives, and
 # the watcher removes it when it exits: the pane closed, or it runs neither
@@ -287,9 +289,11 @@ case "$agent" in
     *) exit 0 ;;
 esac
 [ -n "$pane" ] || exit 0
-watch_secs=$(clauth herdr config get tag_watch_secs 2>/dev/null || printf '%s' "${CLAUTH_PROFILE_WATCH_INTERVAL:-0}")
+if ! watch_secs=$(clauth herdr config get tag_watch_secs 2>/dev/null); then
+    watch_secs="${CLAUTH_PROFILE_WATCH_INTERVAL:-5}"
+fi
 case "$watch_secs" in
-    '' | 0) exit 0 ;;
+    '' | 0 | off) exit 0 ;;
 esac
 state_dir="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/clauth}"
 mkdir -p "$state_dir" 2>/dev/null || exit 0

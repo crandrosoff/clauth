@@ -6834,3 +6834,93 @@ fn a_codex_switch_pushes_the_agent_pane_tags_and_its_no_op_does_not() {
     switch_codex_profile("cx2").expect("no-op switch");
     assert!(crate::herdr::take_pushed_tags().is_empty());
 }
+
+// ── review repairs: every active-account move pushes, once, after the hold ──
+
+/// The active account moving anywhere inside a state hold pushes once, when
+/// the OUTERMOST hold ends: never while the lock is still held.
+#[test]
+fn the_account_moving_inside_one_state_hold_pushes_once_after_it() {
+    let _home = HomeSandbox::new();
+    let mut state = AppState::default();
+    let _ = crate::herdr::take_pushed_tags();
+    crate::lock::with_state_lock(|held| {
+        state.set_active(Some("x".into()), held);
+        crate::lock::with_state_lock(|_inner| Ok(()))?;
+        assert!(
+            crate::herdr::take_pushed_tags().is_empty(),
+            "nothing is pushed while the hold lasts"
+        );
+        Ok(())
+    })
+    .expect("hold");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// Writing the account that is already active moves nothing.
+#[test]
+fn setting_the_same_active_account_pushes_nothing() {
+    let _home = HomeSandbox::new();
+    let mut state = AppState {
+        active_profile: Some("x".into()),
+        ..Default::default()
+    };
+    let _ = crate::herdr::take_pushed_tags();
+    crate::lock::with_state_lock(|held| {
+        state.set_active(Some("x".into()), held);
+        Ok(())
+    })
+    .expect("hold");
+    assert!(crate::herdr::take_pushed_tags().is_empty());
+}
+
+/// Removing the active profile leaves bare `claude` panes on no account.
+#[test]
+fn removing_the_active_profile_pushes_the_agent_pane_tags() {
+    let _home = HomeSandbox::new();
+    let mut config = two_profiles_active_on_one();
+    let _ = crate::herdr::take_pushed_tags();
+    crate::lock::with_state_lock(|held| {
+        config.remove(&"one".into(), held);
+        Ok(())
+    })
+    .expect("hold");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// Adopting the operator's codex login repoints the link a bare codex pane's
+/// tag reads, so it pushes.
+#[test]
+fn a_codex_capture_that_adopts_the_slot_pushes_the_agent_pane_tags() {
+    let home = HomeSandbox::new();
+    write_operator_codex(&home, Some(OPERATOR_AUTH), None);
+    let _ = crate::herdr::take_pushed_tags();
+    codex_login_capture_at("cx", "2026-09-16T12:00:00+00:00").expect("capture");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}
+
+/// Deleting the profile a slot was adopted onto detaches that link: push.
+#[test]
+fn deleting_an_adopted_codex_profile_pushes_the_agent_pane_tags() {
+    let home = HomeSandbox::new();
+    let operator = home.home().join("operator-codex");
+    std::fs::create_dir_all(&operator).expect("mkdir operator home");
+    let _cx_home = crate::testutil::CodexHomeSandbox::new(&home, &operator);
+    std::fs::write(operator.join("auth.json"), OPERATOR_AUTH).expect("operator login");
+    codex_login_capture("cx1").expect("capture");
+    let _ = crate::herdr::take_pushed_tags();
+    delete_codex_profile("cx1", false, &rotation_guard("cx1")).expect("delete");
+    assert_eq!(
+        crate::herdr::take_pushed_tags(),
+        vec![crate::herdr::TagScope::AgentPanes]
+    );
+}

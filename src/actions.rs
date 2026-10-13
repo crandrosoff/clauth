@@ -1316,6 +1316,12 @@ pub(crate) fn delete_codex_profile(
         state.remove_profile(name);
         Ok(detached)
     })
+    .inspect(|detached| {
+        // A bare codex pane's tag reads the slot just unlinked.
+        if detached.is_some() {
+            crate::herdr::push_pane_tags(crate::herdr::TagScope::AgentPanes);
+        }
+    })
 }
 
 /// Remove the operator's `auth.json` when it is the link
@@ -1502,6 +1508,8 @@ pub(crate) fn codex_login_capture_at(name: &str, now_rfc3339: &str) -> Result<()
         outln!("clauth: captured the operator codex login into codex profile '{canonical}'");
     }
     if adopted {
+        // A bare codex pane's tag reads the slot just linked to this store.
+        crate::herdr::push_pane_tags(crate::herdr::TagScope::AgentPanes);
         outln!(
             "clauth: {} now follows the profile store — your own codex and clauth \
              sessions share one chain",

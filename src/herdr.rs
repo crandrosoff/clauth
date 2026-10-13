@@ -380,6 +380,11 @@ pub(crate) struct RegistryEntry {
     /// never replaced behind them.
     pub(crate) source_owner: Option<String>,
     pub(crate) source_repo: Option<String>,
+    /// Where herdr checked a github install out, and the plugin's subdir in
+    /// it. herdr 0.8 registered a github install with neither `plugin_root`
+    /// nor `subdir`, so these are how [`report_script`] still finds it.
+    pub(crate) managed_path: Option<String>,
+    pub(crate) source_subdir: Option<String>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -442,7 +447,7 @@ fn spawn_tag_refresh(scope: TagScope) {
     if scope == TagScope::OwnPane && std::env::var_os("HERDR_PANE_ID").is_none() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let Some(exe) = self_exe() else {
         return;
     };
     let mut cmd = Command::new(exe);
@@ -468,6 +473,17 @@ fn spawn_tag_refresh(scope: TagScope) {
                 let _ = child.wait();
             });
     }
+}
+
+/// The running clauth, for the push to re-execute. On Linux `/proc/self/exe`:
+/// it still runs this image after an upgrade replaced or removed the file on
+/// disk, where `current_exe` names a deleted path no spawn can run.
+pub(crate) fn self_exe() -> Option<PathBuf> {
+    let proc_exe = Path::new("/proc/self/exe");
+    if cfg!(target_os = "linux") && proc_exe.exists() {
+        return Some(proc_exe.to_path_buf());
+    }
+    std::env::current_exe().ok()
 }
 
 /// `clauth herdr refresh-tags [--own-pane]`: the body a switch's push runs.
@@ -504,13 +520,12 @@ pub(crate) fn refresh_tags_with(
     let (Some(entry), _) = registry_probe(bin) else {
         return Vec::new();
     };
-    let Some(root) = entry.plugin_root.filter(|_| entry.enabled) else {
-        return Vec::new();
-    };
-    let script = Path::new(&root).join("report-profile.sh");
-    if !script.is_file() {
+    if !entry.enabled {
         return Vec::new();
     }
+    let Some(script) = report_script(&entry) else {
+        return Vec::new();
+    };
     let panes: Vec<String> = match scope {
         TagScope::OwnPane => own_pane.map(str::to_string).into_iter().collect(),
         TagScope::AgentPanes => list_panes(bin)
@@ -525,6 +540,24 @@ pub(crate) fn refresh_tags_with(
         rerun_pane_report(bin, &script, pane);
     }
     panes
+}
+
+/// The registered plugin's `report-profile.sh`: under `plugin_root` when herdr
+/// names it (0.9), else under the github checkout herdr 0.8 recorded only as
+/// `managed_path` — at its `subdir` when named, at the checkout itself, or at
+/// the repo's own `herdr-plugin/`. The first that holds the script wins.
+fn report_script(entry: &RegistryEntry) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = entry.plugin_root.iter().map(PathBuf::from).collect();
+    if let Some(managed) = entry.managed_path.as_deref().map(Path::new) {
+        if let Some(subdir) = &entry.source_subdir {
+            dirs.push(managed.join(subdir));
+        }
+        dirs.push(managed.to_path_buf());
+        dirs.push(managed.join("herdr-plugin"));
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join("report-profile.sh"))
+        .find(|script| script.is_file())
 }
 
 /// `bin pane list`, parsed by the one typed parser the pane reporter shares:
@@ -542,18 +575,31 @@ pub(crate) fn list_panes(bin: &str) -> Option<Vec<HerdrPane>> {
 /// event/context JSON cleared, so the script reads the pane's live agent
 /// itself. `CLAUTH_TAG_NO_WATCH=1` marks it a re-run: it republishes and never
 /// spawns a watcher, which only herdr's own hook runs may do.
+///
+/// A `CLAUDE_CONFIG_DIR` or `CODEX_HOME` inherited from the caller is dropped
+/// when it names a tree clauth built: a switch typed inside `clauth start a`
+/// would otherwise have `clauth which` answer `a` for every bare pane. The
+/// operator's own custom dirs stay, since a bare pane runs under those too.
 pub(crate) fn rerun_pane_report(bin: &str, script: &str, pane: &str) {
-    let _ = bounded_output(
-        script,
-        &[],
-        &[
-            ("HERDR_PANE_ID", OsStr::new(pane)),
-            ("HERDR_BIN_PATH", OsStr::new(bin)),
-            ("HERDR_PLUGIN_EVENT_JSON", OsStr::new("")),
-            ("HERDR_PLUGIN_CONTEXT_JSON", OsStr::new("")),
-            ("CLAUTH_TAG_NO_WATCH", OsStr::new("1")),
-        ],
-    );
+    let mut cmd = Command::new(script);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HERDR_PANE_ID", pane)
+        .env("HERDR_BIN_PATH", bin)
+        .env("HERDR_PLUGIN_EVENT_JSON", "")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", "")
+        .env("CLAUTH_TAG_NO_WATCH", "1");
+    if let Ok(root) = crate::profile::clauth_dir() {
+        for var in ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] {
+            if std::env::var_os(var).is_some_and(|dir| Path::new(&dir).starts_with(&root)) {
+                cmd.env_remove(var);
+            }
+        }
+    }
+    if let Ok(child) = cmd.spawn() {
+        let _ = run_bounded(child, PROBE_TIMEOUT);
+    }
 }
 
 /// Probes the installed herdr. `None` when herdr does not resolve, so the caller renders no row at all.
@@ -903,6 +949,16 @@ fn registry_entry_from_value(root: &Value) -> Option<RegistryEntry> {
         source_repo: entry
             .get("source")
             .and_then(|source| source.get("repo"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        managed_path: entry
+            .get("source")
+            .and_then(|source| source.get("managed_path"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_subdir: entry
+            .get("source")
+            .and_then(|source| source.get("subdir"))
             .and_then(Value::as_str)
             .map(str::to_string),
         warnings: entry
@@ -1916,7 +1972,9 @@ fn check_config(bin: &str, probe: &Path, text: &str) -> Result<Vec<String>> {
 /// knobs persisted under `[herdr]` in profiles.toml. One value per line in a
 /// shell shape: `fit|half|split-right|split-top` for `popup_width`, `on|off`
 /// for the bools, the
-/// bare number for `tag_watch_secs`, so a caller never parses help prose. A
+/// bare number for `tag_watch_secs` (`off` at 0: a watcher script that
+/// predates the opt-in reads a non-number as its old 5 s default, never as a
+/// 1 s loop), so a caller never parses help prose. A
 /// missing profiles.toml answers the defaults; an unknown key is a usage error
 /// (exit 2) naming the valid keys.
 pub(crate) fn config_get(key: &str) -> Result<()> {
@@ -1932,7 +1990,10 @@ fn herdr_value(herdr: &crate::profile::HerdrSettings, key: &str) -> Result<Strin
     match key {
         "popup_width" => Ok(herdr.popup_width.as_str().to_string()),
         "pane_tag" => Ok(on_off(herdr.pane_tag).to_string()),
-        "tag_watch_secs" => Ok(herdr.tag_watch_secs.to_string()),
+        "tag_watch_secs" => Ok(match herdr.tag_watch_secs {
+            0 => "off".to_string(),
+            secs => secs.to_string(),
+        }),
         "border_label" => Ok(on_off(herdr.border_label).to_string()),
         "delegate_dot" => Ok(on_off(herdr.delegate_dot).to_string()),
         "delegate_row_text" => Ok(on_off(herdr.delegate_row_text).to_string()),

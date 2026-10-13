@@ -2356,7 +2356,7 @@ fn herdr_config_get_answers_every_default_with_no_profiles_toml() {
     for (key, want) in [
         ("popup_width", "fit"),
         ("pane_tag", "on"),
-        ("tag_watch_secs", "0"),
+        ("tag_watch_secs", "off"),
         ("border_label", "off"),
         ("delegate_dot", "on"),
         ("delegate_row_text", "off"),
@@ -2599,7 +2599,7 @@ fn report_profile_run_with(
         home.home(),
         "clauth",
         &format!(
-            "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo {pane_tag} ;;\n  herdr:border_label) echo {border_label} ;;\n  herdr:tag_watch_secs) echo {watch_secs} ;;\nesac\nexit 0\n"
+            "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo {pane_tag} ;;\n  herdr:border_label) echo {border_label} ;;\n  herdr:tag_watch_secs) [ \"{watch_secs}\" = FAIL ] && exit 1; echo {watch_secs} ;;\nesac\nexit 0\n"
         ),
     );
     let mut cmd = std::process::Command::new("sh");
@@ -4105,7 +4105,7 @@ impl RefreshSandbox {
         write_shim(
             &root,
             "report-profile.sh",
-            "printf '%s %s %s\\n' \"$HERDR_PANE_ID\" \"${CLAUTH_TAG_NO_WATCH:-}\" \"${HERDR_PLUGIN_EVENT_JSON:-}\" >> \"$(dirname \"$0\")/runs.log\"\nexit 0\n",
+            "printf '%s %s %s\\n' \"$HERDR_PANE_ID\" \"${CLAUTH_TAG_NO_WATCH:-}\" \"${HERDR_PLUGIN_EVENT_JSON:-}\" >> \"$(dirname \"$0\")/runs.log\"\nprintf '%s %s\\n' \"${CLAUDE_CONFIG_DIR:-none}\" \"${CODEX_HOME:-none}\" >> \"$(dirname \"$0\")/env.log\"\nexit 0\n",
         );
         write_shim(
             home.home(),
@@ -4113,7 +4113,10 @@ impl RefreshSandbox {
             "echo \"$*\" >> \"$(dirname \"$0\")/herdr.log\"\nif [ \"$1\" = plugin ] && [ \"$2\" = list ]; then cat \"$(dirname \"$0\")/plugins.json\"; exit 0; fi\nif [ \"$1\" = pane ] && [ \"$2\" = list ]; then cat \"$(dirname \"$0\")/panes.json\"; exit 0; fi\nexit 0\n",
         );
         let entries = entry
-            .map(|e| e.replace("{ROOT}", &root.display().to_string()))
+            .map(|e| {
+                e.replace("{ROOT}", &root.display().to_string())
+                    .replace("{HOME}", &home.home().display().to_string())
+            })
             .unwrap_or_default();
         std::fs::write(
             home.home().join("plugins.json"),
@@ -4234,4 +4237,158 @@ fn herdr_refresh_tags_parses_with_and_without_own_pane() {
             other => panic!("not refresh-tags: {other:?}"),
         }
     }
+}
+
+// ── review repairs: compatibility, discovery, environment, lifecycle ───────
+
+/// A clauth that predates the knob answers nothing: the new script keeps the
+/// old 5 s watcher, since such a binary pushes nothing on a switch either.
+#[cfg(unix)]
+#[test]
+fn an_older_clauth_without_the_knob_keeps_the_watcher() {
+    let (_lines, spawned) =
+        report_profile_run_with("on", "off", Some(r#"{"agent":"claude"}"#), "FAIL", false);
+    assert!(spawned, "no knob answer keeps the legacy watcher");
+}
+
+/// The knob prints `off` at 0; the script reads that as no watcher.
+#[cfg(unix)]
+#[test]
+fn a_knob_read_as_off_spawns_no_watcher() {
+    let (lines, spawned) =
+        report_profile_run_with("on", "off", Some(r#"{"agent":"claude"}"#), "off", false);
+    assert_eq!(lines.len(), 1, "the tag is still published: {lines:?}");
+    assert!(!spawned, "off spawns no watcher");
+}
+
+/// A running watcher re-reads the knob each tick and exits once it reads
+/// `off`, leaving the tag it last published standing: turning the timer off
+/// in the TUI stops watchers already running, not only new ones.
+#[cfg(unix)]
+#[test]
+fn a_running_watcher_exits_once_the_knob_reads_off() {
+    let home = crate::testutil::HomeSandbox::new();
+    write_herdr_shim(&home, "{}", 0, 100);
+    std::fs::write(home.home().join("agent"), "claude").expect("agent");
+    write_shim(
+        home.home(),
+        "clauth",
+        "case \"$1:$4\" in\n  which:) echo fit ;;\n  herdr:pane_tag) echo on ;;\n  herdr:border_label) echo off ;;\n  herdr:tag_watch_secs) n=$(cat \"$HOME/knob-reads\" 2>/dev/null || echo 0); echo $((n+1)) > \"$HOME/knob-reads\"; if [ \"$n\" -ge 1 ]; then echo off; else echo 1; fi ;;\nesac\nexit 0\n",
+    );
+    let state = home.home().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    let pidfile = state.join("watch-p1.pid");
+    std::fs::write(&pidfile, "0").expect("pidfile");
+    let start = std::time::Instant::now();
+    let out = std::process::Command::new("timeout")
+        .arg("20")
+        .arg("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/herdr-plugin/watch-profile.sh"
+        ))
+        .arg("p1")
+        .arg(&pidfile)
+        .env("HERDR_BIN_PATH", home.home().join("herdr"))
+        .env("HERDR_PLUGIN_ID", "clauth")
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("CLAUTH_PROC_ROOT", home.home().join("proc"))
+        .env("HOME", home.home())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.home().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .expect("watch-profile.sh runs");
+    assert!(
+        out.status.success(),
+        "the watcher exits 0 by itself: {out:?}"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(15),
+        "it exits on the tick that reads off"
+    );
+    let reports = std::fs::read_to_string(home.home().join("report.log")).unwrap_or_default();
+    assert_eq!(reports.lines().count(), 1, "one tick reported: {reports}");
+    assert!(
+        !pidfile.exists(),
+        "the watcher drops its pidfile on the way out"
+    );
+}
+
+/// A re-run clauth started must not answer as the session it was started in:
+/// a `CLAUDE_CONFIG_DIR` or `CODEX_HOME` naming a tree clauth built is dropped
+/// (`clauth which` would otherwise claim every bare pane for that session),
+/// while the operator's own custom dirs stay.
+#[cfg(unix)]
+#[test]
+#[expect(
+    unsafe_code,
+    reason = "env mutation is unsafe in Rust 2024; serialized by HOME_TEST_LOCK, which the sandbox holds"
+)]
+fn a_pushed_rerun_drops_inherited_clauth_session_homes_and_keeps_custom_ones() {
+    let sandbox = RefreshSandbox::new(Some(CLAUTH_ENTRY));
+    let home = sandbox.home.home().to_path_buf();
+    let saved_codex = std::env::var_os("CODEX_HOME");
+    // SAFETY: test-only; HomeSandbox holds HOME_TEST_LOCK for this whole test
+    // and restores CLAUDE_CONFIG_DIR on drop; CODEX_HOME is restored below.
+    unsafe {
+        std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".clauth/profiles/a/runtime"));
+        std::env::set_var("CODEX_HOME", home.join(".clauth/profiles/a/codex-home"));
+    }
+    refresh_tags_with(&sandbox.bin(), &TagScope::OwnPane, Some("p1"));
+    // SAFETY: as above.
+    unsafe {
+        std::env::set_var("CLAUDE_CONFIG_DIR", home.join("my-claude"));
+        std::env::set_var("CODEX_HOME", home.join("my-codex"));
+    }
+    refresh_tags_with(&sandbox.bin(), &TagScope::OwnPane, Some("p1"));
+    // SAFETY: as above.
+    unsafe {
+        match &saved_codex {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+    let env_log = std::fs::read_to_string(home.join("plugin/env.log")).expect("env log");
+    let lines: Vec<&str> = env_log.lines().collect();
+    assert_eq!(lines[0], "none none", "clauth-built homes are dropped");
+    assert_eq!(
+        lines[1],
+        format!(
+            "{} {}",
+            home.join("my-claude").display(),
+            home.join("my-codex").display()
+        ),
+        "the operator's own dirs stay"
+    );
+}
+
+/// herdr 0.8 registered a github install with no `plugin_root` (the captured
+/// `GITHUB` entry): the scripts are found under the source's managed path,
+/// at its `subdir` when herdr names one, else at the managed path itself.
+#[cfg(unix)]
+#[test]
+fn refresh_tags_finds_the_scripts_of_an_install_without_plugin_root() {
+    for entry in [
+        r#"{"enabled":true,"name":"clauth","plugin_id":"clauth","source":{"kind":"github","owner":"uwuclxdy","repo":"clauth","managed_path":"{HOME}","subdir":"plugin"},"version":"0.17.0"}"#,
+        r#"{"enabled":true,"name":"clauth","plugin_id":"clauth","source":{"kind":"github","owner":"uwuclxdy","repo":"clauth","managed_path":"{ROOT}"},"version":"0.17.0"}"#,
+    ] {
+        let sandbox = RefreshSandbox::new(Some(entry));
+        let reported = refresh_tags_with(&sandbox.bin(), &TagScope::OwnPane, Some("p4"));
+        assert_eq!(reported, vec!["p4".to_string()], "entry {entry}");
+        assert_eq!(sandbox.runs(), vec!["p4 1"]);
+    }
+}
+
+/// The push re-executes the running binary through a path that survives that
+/// binary being replaced on disk (`/proc/self/exe` on Linux).
+#[test]
+fn the_push_runs_a_binary_path_that_exists() {
+    let exe = self_exe().expect("a runnable clauth");
+    assert!(exe.exists(), "{}", exe.display());
 }

@@ -168,6 +168,24 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
+// Set when the active account moved inside this thread's state hold
+// ([`note_account_moved`]); the outermost hold's drop pushes the herdr pane
+// tags once and clears it.
+thread_local! {
+    static ACCOUNT_MOVED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record that the active account moved inside the current state hold. The
+/// herdr pane tags are pushed once, when the OUTERMOST hold ends: after the
+/// move was committed inside it and the flock is free, never while a reporter
+/// could still read the state from before the move. Every writer of the
+/// active-account marker calls this through `AppState::set_active`, so a
+/// switch, a login that activates, a logout, a delete and a divergence
+/// adoption all push without each caller having to remember to.
+pub(crate) fn note_account_moved() {
+    ACCOUNT_MOVED.set(true);
+}
+
 // When this thread's [`SUBPROCESS_BUDGET`] runs out, or None when the thread
 // holds no state lock. Set by the WIDEST active scope on the thread — a
 // `SharedSubprocessBudget` when one is armed, else the OUTERMOST acquisition —
@@ -428,6 +446,9 @@ impl Drop for StateLock {
             // strangle the recovery path.
             if self._armed_budget {
                 HOLD_DEADLINE.set(None);
+            }
+            if ACCOUNT_MOVED.replace(false) {
+                crate::herdr::push_pane_tags(crate::herdr::TagScope::AgentPanes);
             }
         }
         // Reentrant calls have _thread_guard = None; nothing extra to do.
