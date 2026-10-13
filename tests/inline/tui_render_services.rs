@@ -25,6 +25,8 @@ fn entry(enabled: bool, min: Option<&str>, warnings: Vec<&str>) -> RegistryEntry
         resolved_commit: None,
         source_owner: None,
         source_repo: None,
+        managed_path: None,
+        source_subdir: None,
         warnings: warnings.into_iter().map(str::to_string).collect(),
     }
 }
